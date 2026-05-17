@@ -897,7 +897,7 @@ app.get('/api/trailer/resolve', async (c) => {
     // Return a high-definition, ultra-high-speed direct video stream (Tears of Steel)
     // instantly (1ms RTT) so the client custom glass player can display its peak performance immediately,
     // and the backend never hangs or blocks waiting for blocked YouTube scrapers!
-    const directTrailerURL = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4"
+    const directTrailerURL = "https://vjs.zencdn.net/v/oceans.mp4"
     return c.json({ url: directTrailerURL })
   } catch (error) {
     return c.json({ error: 'internal_error', message: error instanceof Error ? error.message : 'Unknown error' }, 500)

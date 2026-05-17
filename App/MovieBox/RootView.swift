@@ -76,13 +76,14 @@ struct RootView: View {
 
             if playerState.isPresented {
                 PlayerView(state: playerState)
+                    .ignoresSafeArea()
                     .transition(.opacity)
                     .zIndex(10)
             }
         }
         .ignoresSafeArea(edges: .top)
         .background(
-            WindowConfigurator(trafficLightInset: CGPoint(x: 24, y: 20))
+            WindowConfigurator(trafficLightInset: CGPoint(x: 24, y: 20), isPlayerPresented: playerState.isPresented)
                 .frame(width: 0, height: 0)
         )
         .onAppear {
@@ -499,28 +500,168 @@ struct CatalogView: View {
 struct DownloadsView: View {
     @Query(sort: \DownloadRecord.createdAt, order: .reverse) private var downloads: [DownloadRecord]
     @StateObject private var downloadManager = DownloadManager()
+    @Environment(PlayerState.self) private var playerState
+
+    @State private var magnetInput: String = ""
+    @State private var errorMessage: String? = nil
+    @State private var isStreaming = false
+    @State private var activeStreamSession: StreamSession? = nil
+    @State private var streamingOrchestrator = StreamingOrchestrator()
 
     var body: some View {
         ScrollView {
-            if downloads.isEmpty && downloadManager.tasks.isEmpty {
-                ContentUnavailableView(
-                    "No Downloads",
-                    systemImage: "arrow.down.circle",
-                    description: Text("Download movies from the Movie Detail screen.")
-                )
-                .frame(maxWidth: .infinity, minHeight: 260)
-            } else {
-                LazyVStack(spacing: 12) {
-                    ForEach(downloadManager.tasks) { task in
-                        DownloadTaskRow(task: task, downloadManager: downloadManager)
+            VStack(spacing: 20) {
+                // Sleek Floating Glass Magnet Input Pod
+                VStack(spacing: 12) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "link.badge.plus")
+                            .font(.title3)
+                            .foregroundStyle(.white.opacity(0.8))
+                        
+                        TextField("Paste Magnet Link or info_hash...", text: $magnetInput)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 13))
+                            .foregroundStyle(.white)
+                        
+                        if !magnetInput.isEmpty {
+                            Button {
+                                magnetInput = ""
+                                errorMessage = nil
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.white.opacity(0.5))
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
-
-                    ForEach(downloads, id: \.tmdbId) { download in
-                        DownloadRecordRow(download: download)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.1), lineWidth: 1))
+                    
+                    if magnetInput.isEmpty {
+                        HStack(spacing: 8) {
+                            Text("Test HDR / Dolby Vision:")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.4))
+                            
+                            Button {
+                                magnetInput = "https://developer.apple.com/streaming/examples/advanced-hdr-single-stream/master.m3u8"
+                                handleMagnetAction(isDownload: false)
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "visionpro")
+                                    Text("Dolby Vision")
+                                }
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(.cyan)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(.cyan.opacity(0.12), in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            
+                            Button {
+                                magnetInput = "https://demo.unified-streaming.com/k8s/features/stable/video/tears-of-steel-hdr.mp4/.m3u8"
+                                handleMagnetAction(isDownload: false)
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "sun.max.fill")
+                                    Text("HDR10")
+                                }
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(.yellow)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(.yellow.opacity(0.12), in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.top, 4)
+                    }
+                    
+                    if !magnetInput.isEmpty {
+                        HStack(spacing: 12) {
+                            Button {
+                                handleMagnetAction(isDownload: false)
+                            } label: {
+                                HStack {
+                                    if isStreaming {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                            .tint(.black)
+                                    } else {
+                                        Image(systemName: "play.fill")
+                                    }
+                                    Text(isStreaming ? "Preparing..." : "Stream Now")
+                                }
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.black)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                                .background(.white, in: Capsule())
+                                .shadow(color: .white.opacity(0.15), radius: 6)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isStreaming)
+                            
+                            Button {
+                                handleMagnetAction(isDownload: true)
+                            } label: {
+                                HStack {
+                                    Image(systemName: "arrow.down.circle.fill")
+                                    Text("Download")
+                                }
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                                .background(.white.opacity(0.12), in: Capsule())
+                                .overlay(Capsule().stroke(.white.opacity(0.15), lineWidth: 1))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isStreaming)
+                            
+                            Spacer()
+                        }
+                        .transition(.move(edge: .top).combined(with: .opacity))
                     }
                 }
+                .padding(16)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+                .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.12), lineWidth: 1))
+                .shadow(color: .black.opacity(0.2), radius: 10, y: 6)
                 .padding(.horizontal, 28)
-                .padding(.vertical, 18)
+                .padding(.top, 10)
+
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.red)
+                        .padding(.horizontal, 28)
+                        .transition(.opacity)
+                }
+
+                if downloads.isEmpty && downloadManager.tasks.isEmpty {
+                    ContentUnavailableView(
+                        "No Downloads",
+                        systemImage: "arrow.down.circle",
+                        description: Text("Download movies from details or paste a magnet link above.")
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 260)
+                } else {
+                    LazyVStack(spacing: 12) {
+                        ForEach(downloadManager.tasks) { task in
+                            DownloadTaskRow(task: task, downloadManager: downloadManager)
+                        }
+
+                        ForEach(downloads, id: \.tmdbId) { download in
+                            DownloadRecordRow(download: download)
+                        }
+                    }
+                    .padding(.horizontal, 28)
+                    .padding(.vertical, 10)
+                }
             }
         }
         .padding(.top, topBarReservedHeight)
@@ -531,6 +672,93 @@ struct DownloadsView: View {
                     Text(formatSpeed(downloadManager.totalDownloadSpeed))
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func handleMagnetAction(isDownload: Bool) {
+        let cleanLink = magnetInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        // Intercept direct HTTP/HTTPS stream URLs for rapid HDR/Dolby Vision testing
+        if cleanLink.hasPrefix("http://") || cleanLink.hasPrefix("https://") {
+            if let url = URL(string: cleanLink) {
+                errorMessage = nil
+                let isDolby = cleanLink.contains("advanced-hdr")
+                playerState.load(
+                    url: url,
+                    title: isDolby ? "Dolby Vision Advanced HDR Test Stream" : "HDR10 Test Stream",
+                    movieId: 0,
+                    subtitleURL: nil,
+                    hdrType: isDolby ? .dolbyVision : .hdr10
+                )
+                magnetInput = ""
+            } else {
+                errorMessage = "Invalid stream URL format."
+            }
+            return
+        }
+        
+        var parsedLink = cleanLink
+        // Convert raw 40-character info hash to full magnet link automatically
+        if cleanLink.count == 40 && cleanLink.range(of: "^[a-fA-F0-9]+$", options: .regularExpression) != nil {
+            parsedLink = "magnet:?xt=urn:btih:\(cleanLink)"
+        }
+        
+        guard let magnet = MagnetURI(from: parsedLink) else {
+            errorMessage = "Invalid Magnet URI or info_hash format."
+            return
+        }
+        
+        errorMessage = nil
+        let displayName = magnet.displayName ?? "Custom Torrent Link"
+        
+        if isDownload {
+            downloadManager.startDownload(
+                tmdbId: Int.random(in: 100000...999999),
+                title: displayName,
+                magnetURI: parsedLink,
+                quality: "1080p",
+                hdrType: nil
+            )
+            magnetInput = ""
+        } else {
+            let mockTorrent = TorrentResult(
+                title: displayName,
+                magnetURI: parsedLink,
+                quality: .p1080,
+                hdrType: nil,
+                codec: .h264,
+                audioFormat: nil,
+                source: .webdl,
+                sizeBytes: 2_000_000_000, // 2GB mock size
+                seeders: 10,
+                leechers: 5,
+                trackerSource: .torrentio
+            )
+            
+            isStreaming = true
+            let session = StreamSession(orchestrator: streamingOrchestrator)
+            activeStreamSession = session
+            
+            Task {
+                await session.start(torrent: mockTorrent)
+                
+                await MainActor.run {
+                    if case .ready(let url) = session.state {
+                        isStreaming = false
+                        playerState.load(
+                            url: url,
+                            title: displayName,
+                            movieId: 0,
+                            subtitleURL: nil,
+                            hdrType: nil
+                        )
+                        magnetInput = ""
+                    } else if case .failed(let err) = session.state {
+                        isStreaming = false
+                        errorMessage = "Streaming failed: \(err)"
+                    }
                 }
             }
         }
