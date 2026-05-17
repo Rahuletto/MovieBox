@@ -110,19 +110,16 @@ public final class DownloadManager: ObservableObject {
             return
         }
 
-        let pieceSize: Int64 = 256 * 1024
-        let estimatedPieces = max(1, Int((1_000_000_000 + pieceSize - 1) / pieceSize))
-        let piecesHash = Data(count: estimatedPieces * 20)
-
-        let metadata = TorrentMetadata(
-            infoHash: magnet.infoHash,
-            name: task.title,
-            totalSize: 1_000_000_000,
-            pieceLength: pieceSize,
-            pieces: piecesHash,
-            files: [TorrentFile(path: [task.title], length: 1_000_000_000)],
-            trackers: magnet.trackers.isEmpty ? ["http://tracker.openbittorrent.com:80/announce"] : magnet.trackers
-        )
+        let metadata: TorrentMetadata
+        do {
+            metadata = try await TorrentMetadataFetcher.fetch(
+                infoHash: magnet.infoHash,
+                magnetTrackers: magnet.trackers
+            )
+        } catch {
+            tasks[taskIndex].state = .failed
+            return
+        }
 
         let outputDir = downloadDirectory.appendingPathComponent(task.title)
         try? FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)

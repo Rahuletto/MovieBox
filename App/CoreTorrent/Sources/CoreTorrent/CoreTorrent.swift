@@ -293,7 +293,7 @@ public actor TorrentSearchAggregator {
         self.jackettClient = JackettClient(apiKey: jackettAPIKey, host: jackettHost, port: jackettPort)
     }
 
-    public func search(movieTitle: String, imdbId: String? = nil) -> AsyncStream<[TorrentResult]> {
+    public func search(movieTitle: String, imdbId: String? = nil, kind: TorrentioClient.MediaKind = .movie) -> AsyncStream<[TorrentResult]> {
         AsyncStream { continuation in
             Task {
                 var allResults: [TorrentResult] = []
@@ -301,14 +301,15 @@ public actor TorrentSearchAggregator {
                 // 1. Search Torrentio if IMDb ID is available
                 if let imdb = imdbId, !imdb.isEmpty {
                     do {
-                        let torrentioResults = try await torrentioClient.search(imdbId: imdb)
+                        let torrentioResults = try await torrentioClient.search(imdbId: imdb, kind: kind)
                         allResults.append(contentsOf: torrentioResults)
                     } catch {
                         NSLog("Torrentio search failed: \(error)")
                     }
                 }
 
-                // 2. Search YTS mirror chain
+                // 2. Search YTS mirror chain (movies only)
+                if kind == .movie {
                 do {
                     let ytsResults = try await ytsClient.search(query: movieTitle)
                     let existingHashes = Set(allResults.compactMap { $0.infoHash?.lowercased() })
@@ -316,6 +317,7 @@ public actor TorrentSearchAggregator {
                     allResults.append(contentsOf: filteredYts)
                 } catch {
                     NSLog("YTS search failed: \(error)")
+                }
                 }
 
                 // 3. Search Jackett when configured

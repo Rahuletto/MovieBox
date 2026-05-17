@@ -27,20 +27,14 @@ public final class StreamingOrchestrator {
             throw StreamingOrchestratorError.invalidMagnetURI
         }
 
-        let pieceSize: Int64 = 256 * 1024
-        let estimatedPieces = max(1, Int((torrent.sizeBytes + pieceSize - 1) / pieceSize))
-
-        let piecesHash = Data(count: estimatedPieces * 20)
-
-        metadata = TorrentMetadata(
-            infoHash: magnet.infoHash,
-            name: torrent.title,
-            totalSize: torrent.sizeBytes,
-            pieceLength: pieceSize,
-            pieces: piecesHash,
-            files: [TorrentFile(path: [torrent.title], length: torrent.sizeBytes)],
-            trackers: magnet.trackers.isEmpty ? ["http://tracker.openbittorrent.com:80/announce"] : magnet.trackers
-        )
+        do {
+            metadata = try await TorrentMetadataFetcher.fetch(
+                infoHash: magnet.infoHash,
+                magnetTrackers: magnet.trackers
+            )
+        } catch {
+            throw StreamingOrchestratorError.metadataUnavailable(error.localizedDescription)
+        }
 
         guard let metadata else {
             throw StreamingOrchestratorError.failedToInitialize
@@ -111,11 +105,13 @@ public final class StreamingOrchestrator {
 public enum StreamingOrchestratorError: Error, LocalizedError {
     case invalidMagnetURI
     case failedToInitialize
+    case metadataUnavailable(String)
 
     public var errorDescription: String? {
         switch self {
         case .invalidMagnetURI: "Invalid magnet URI"
         case .failedToInitialize: "Failed to initialize streaming orchestrator"
+        case .metadataUnavailable(let message): message
         }
     }
 }
@@ -311,9 +307,9 @@ public final class TorrentEngine {
                 await connection.connect(
                     infoHash: metadata.infoHash,
                     pieceManager: pieceManager,
-                    onPieceReceived: { [weak self] pieceIndex, block in
+                    onPieceReceived: { [weak self] pieceIndex, offset, block in
                         Task { @MainActor in
-                            await self?.handlePieceReceived(pieceIndex: pieceIndex, block: block)
+                            await self?.handlePieceReceived(pieceIndex: pieceIndex, offset: offset, block: block)
                         }
                     }
                 )
@@ -321,10 +317,10 @@ public final class TorrentEngine {
         }
     }
 
-    private func handlePieceReceived(pieceIndex: UInt32, block: Data) async {
+    private func handlePieceReceived(pieceIndex: UInt32, offset: UInt32, block: Data) async {
         let pieceComplete = await pieceManager.markBlockReceived(
             pieceIndex: pieceIndex,
-            offset: 0,
+            offset: offset,
             block: block
         )
 

@@ -156,7 +156,7 @@ public final class PeerConnection: ObservableObject {
     private var isChoked = true
     private var peerBitfield: Data = Data()
     private var pieceManager: PieceManager?
-    private var onPieceReceived: ((UInt32, Data) -> Void)?
+    private var onPieceReceived: ((UInt32, UInt32, Data) -> Void)?
     private var bytesDownloaded: Int64 = 0
     private var downloadStartTime: Date?
 
@@ -165,7 +165,7 @@ public final class PeerConnection: ObservableObject {
         self.peerId = connectionPeerId
     }
 
-    public func connect(infoHash: String, pieceManager: PieceManager, onPieceReceived: @escaping (UInt32, Data) -> Void) async {
+    public func connect(infoHash: String, pieceManager: PieceManager, onPieceReceived: @escaping (UInt32, UInt32, Data) -> Void) async {
         self.pieceManager = pieceManager
         self.onPieceReceived = onPieceReceived
         downloadStartTime = Date.now
@@ -406,7 +406,7 @@ public final class PeerConnection: ObservableObject {
         piecesReceived += 1
         updateDownloadSpeed()
 
-        onPieceReceived?(pieceIndex, block)
+        onPieceReceived?(pieceIndex, offset, block)
         await requestPieces()
     }
 

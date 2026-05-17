@@ -18,59 +18,61 @@ struct ScrubberSlider: View {
 
     private let previewWidth: CGFloat = 160
     private let previewHeight: CGFloat = 90
+    private let trackHeight: CGFloat = 6
 
     var body: some View {
         GeometryReader { geometry in
             let trackWidth = geometry.size.width
-            let trackHeight: CGFloat = 12
             let percentage = progressFraction(for: trackWidth)
 
-            ZStack(alignment: .bottomLeading) {
-                if let hoverTime, trackWidth > 0 {
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(.white.opacity(0.18))
+                    .frame(height: trackHeight)
+
+                Capsule()
+                    .fill(.white)
+                    .frame(width: max(0, trackWidth * percentage), height: trackHeight)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            .contentShape(Rectangle().inset(by: -12))
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let location):
+                    updateHover(at: location.x, trackWidth: trackWidth)
+                case .ended:
+                    clearHover()
+                }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { gesture in
+                        let locationX = max(0, min(gesture.location.x, trackWidth))
+                        value = time(at: locationX, trackWidth: trackWidth)
+                        updateHover(at: locationX, trackWidth: trackWidth)
+                    }
+                    .onEnded { _ in
+                        clearHover()
+                    }
+            )
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 20)
+        .overlay(alignment: .top) {
+            if let hoverTime {
+                GeometryReader { geometry in
+                    let trackWidth = geometry.size.width
                     thumbnailPreview(for: hoverTime)
                         .frame(width: previewWidth)
                         .position(
                             x: clampedPreviewX(trackWidth: trackWidth),
-                            y: geometry.size.height - trackHeight - previewHeight / 2 - 14
+                            y: previewHeight / 2 + 8
                         )
-                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
-                        .zIndex(2)
                 }
-
-                ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(.white.opacity(0.18))
-                        .frame(height: 6)
-
-                    Capsule()
-                        .fill(.white)
-                        .frame(width: max(0, trackWidth * percentage), height: 6)
-                }
-                .frame(height: trackHeight)
-                .frame(maxHeight: .infinity, alignment: .bottom)
-                .contentShape(Rectangle().inset(by: -10))
-                .onContinuousHover { phase in
-                    switch phase {
-                    case .active(let location):
-                        updateHover(at: location.x, trackWidth: trackWidth)
-                    case .ended:
-                        clearHover()
-                    }
-                }
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { gesture in
-                            let locationX = max(0, min(gesture.location.x, trackWidth))
-                            value = time(at: locationX, trackWidth: trackWidth)
-                            updateHover(at: locationX, trackWidth: trackWidth)
-                        }
-                        .onEnded { _ in
-                            clearHover()
-                        }
-                )
+                .allowsHitTesting(false)
+                .offset(y: -(previewHeight + 20))
             }
         }
-        .frame(height: 108)
         .animation(.easeOut(duration: 0.12), value: hoverTime != nil)
         .onDisappear {
             thumbnailTask?.cancel()
@@ -124,7 +126,6 @@ struct ScrubberSlider: View {
                 .padding(.vertical, 4)
                 .background(.black.opacity(0.65), in: Capsule())
         }
-        .allowsHitTesting(false)
     }
 
     private func progressFraction(for trackWidth: CGFloat) -> CGFloat {

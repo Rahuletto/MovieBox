@@ -32,6 +32,7 @@ struct TorrentSection: View {
                         TorrentResultRow(
                             movieId: movie.id,
                             result: torrent,
+                            allTorrents: torrents,
                             orchestrator: orchestrator,
                             subtitleURL: subtitleURL,
                             downloadManager: downloadManager
@@ -47,11 +48,13 @@ struct TorrentSection: View {
 private struct TorrentResultRow: View {
     let movieId: Int
     let result: TorrentResult
+    let allTorrents: [TorrentResult]
     let orchestrator: StreamingOrchestrator
     let subtitleURL: URL?
     let downloadManager: DownloadManager
     @Environment(PlayerState.self) private var playerState
     @State private var streamSession: StreamSession?
+    @State private var playbackCoordinator: TorrentPlaybackCoordinator?
     @State private var isStreaming = false
 
     var body: some View {
@@ -96,31 +99,32 @@ private struct TorrentResultRow: View {
 
     private func startStream() {
         isStreaming = true
-        let session = StreamSession(orchestrator: orchestrator)
+        let coordinator = TorrentPlaybackCoordinator(orchestrator: orchestrator)
+        playbackCoordinator = coordinator
+        let session = coordinator.beginStream(torrent: result)
         streamSession = session
 
         Task {
-            await session.start(torrent: result)
+            while !Task.isCancelled {
+                if case .ready = session.state { break }
+                if case .failed = session.state { break }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
 
-            if case .ready(let url) = session.state {
-                let playerHdr: PlayerHDRType? = {
-                    guard let type = result.hdrType else { return nil }
-                    switch type {
-                    case .hdr: return .hdr
-                    case .hdr10: return .hdr10
-                    case .hdr10Plus: return .hdr10Plus
-                    case .dolbyVisionOnly: return .dolbyVision
-                    case .dolbyVisionWithHDR10: return .dolbyVisionWithHDR10
-                    case .hlg: return .hdr
-                    }
-                }()
-                playerState.load(
-                    url: url,
-                    title: result.title,
-                    movieId: movieId,
-                    subtitleURL: subtitleURL,
-                    hdrType: playerHdr
-                )
+            await MainActor.run {
+                isStreaming = false
+                do {
+                    try coordinator.finishPlayback(
+                        torrent: result,
+                        allTorrents: allTorrents,
+                        session: session,
+                        playerState: playerState,
+                        movieId: movieId,
+                        subtitleURL: subtitleURL
+                    )
+                } catch {
+                    // Row-level failure: player overlay will show if partially loaded
+                }
             }
         }
     }

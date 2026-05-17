@@ -9,7 +9,12 @@ public actor TorrentioClient {
         self.decoder = JSONDecoder()
     }
 
-    public func search(imdbId: String) async throws -> [TorrentResult] {
+    public enum MediaKind: String, Sendable {
+        case movie
+        case tv
+    }
+
+    public func search(imdbId: String, kind: MediaKind = .movie) async throws -> [TorrentResult] {
         var cleanId = imdbId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanId.isEmpty else { return [] }
         
@@ -17,8 +22,8 @@ public actor TorrentioClient {
             cleanId = "tt\(cleanId)"
         }
 
-        // Torrentio community endpoint with 10+ major providers preconfigured
-        let urlString = "https://torrentio.strem.fun/providers=yts,eztv,rarbg,1337x,kickass,thepiratebay,torrentproject,limetorrents,zooqle,tgx/stream/movie/\(cleanId).json"
+        let mediaPath = kind == .tv ? "series" : "movie"
+        let urlString = "https://torrentio.strem.fun/providers=yts,eztv,rarbg,1337x,kickass,thepiratebay,torrentproject,limetorrents,zooqle,tgx/stream/\(mediaPath)/\(cleanId).json"
         guard let url = URL(string: urlString) else { return [] }
 
         var request = URLRequest(url: url)

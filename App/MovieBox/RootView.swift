@@ -260,7 +260,7 @@ struct DetailHeroHeader: View {
 
               if detail.trailerURL != nil {
                   Button(action: onPlayTrailer) {
-                      Label("Play Trailer", systemImage: "play.circle")
+                      Label("Watch Trailer (Preview)", systemImage: "play.circle")
                           .font(.subheadline)
                           .foregroundStyle(.secondary)
                   }
@@ -577,6 +577,21 @@ struct DownloadsView: View {
                                 .background(.yellow.opacity(0.12), in: Capsule())
                             }
                             .buttonStyle(.plain)
+
+                            Button {
+                                playSubtitleTestStream()
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "captions.bubble.fill")
+                                    Text("Subtitles")
+                                }
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundStyle(.green)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(.green.opacity(0.12), in: Capsule())
+                            }
+                            .buttonStyle(.plain)
                         }
                         .padding(.top, 4)
                     }
@@ -690,6 +705,22 @@ struct DownloadsView: View {
         errorMessage = nil
     }
 
+    private func playSubtitleTestStream() {
+        guard let videoURL = URL(string: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"),
+              let subtitleURL = URL(string: "https://raw.githubusercontent.com/andreylysenko/big-buck-bunny-multi-subs/master/subtitles/eng.srt") else {
+            errorMessage = "Could not load subtitle test URLs."
+            return
+        }
+
+        errorMessage = nil
+        playerState.load(
+            url: videoURL,
+            title: "Subtitle Test — Big Buck Bunny",
+            movieId: 0,
+            subtitleURL: subtitleURL
+        )
+    }
+
     private func handleMagnetAction(isDownload: Bool) {
         let cleanLink = MagnetImportHandler.normalizeUserInput(magnetInput)
         
@@ -736,41 +767,43 @@ struct DownloadsView: View {
             )
             magnetInput = ""
         } else {
-            let mockTorrent = TorrentResult(
-                title: displayName,
-                magnetURI: parsedLink,
-                quality: .p1080,
-                hdrType: nil,
-                codec: .h264,
-                audioFormat: nil,
-                source: .webdl,
-                sizeBytes: 2_000_000_000, // 2GB mock size
-                seeders: 10,
-                leechers: 5,
-                trackerSource: .torrentio
-            )
-            
+            guard let torrent = TorrentResult.fromMagnetURI(parsedLink, fallbackTitle: displayName) else {
+                errorMessage = "Could not parse magnet link."
+                return
+            }
+
             isStreaming = true
-            let session = StreamSession(orchestrator: streamingOrchestrator)
+            let coordinator = TorrentPlaybackCoordinator(orchestrator: streamingOrchestrator)
+            let session = coordinator.beginStream(torrent: torrent)
             activeStreamSession = session
-            
+
             Task {
-                await session.start(torrent: mockTorrent)
-                
+                while !Task.isCancelled {
+                    if case .ready = session.state { break }
+                    if case .failed(let err) = session.state {
+                        await MainActor.run {
+                            isStreaming = false
+                            errorMessage = "Streaming failed: \(err)"
+                        }
+                        return
+                    }
+                    try? await Task.sleep(for: .milliseconds(250))
+                }
+
                 await MainActor.run {
-                    if case .ready(let url) = session.state {
-                        isStreaming = false
-                        playerState.load(
-                            url: url,
-                            title: displayName,
+                    isStreaming = false
+                    do {
+                        try coordinator.finishPlayback(
+                            torrent: torrent,
+                            allTorrents: [torrent],
+                            session: session,
+                            playerState: playerState,
                             movieId: 0,
-                            subtitleURL: nil,
-                            hdrType: nil
+                            subtitleURL: nil
                         )
                         magnetInput = ""
-                    } else if case .failed(let err) = session.state {
-                        isStreaming = false
-                        errorMessage = "Streaming failed: \(err)"
+                    } catch {
+                        errorMessage = error.localizedDescription
                     }
                 }
             }

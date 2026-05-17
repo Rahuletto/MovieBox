@@ -54,6 +54,16 @@ public final class PlayerState {
     public var hdrType: PlayerHDRType? = nil
     public var errorMessage: String? = nil
     public var onPositionUpdate: ((Int, Double, Double) -> Void)?
+
+    // Torrent / quality source picker
+    public var playbackSources: [PlaybackSourceOption] = []
+    public var selectedPlaybackSourceID: String?
+    public var isSwitchingSource = false
+    public var onSelectPlaybackSource: (@MainActor (PlaybackSourceOption) async -> Void)?
+
+    public var hasMultiplePlaybackSources: Bool {
+        playbackSources.count > 1
+    }
     
     // TV Series Episode Listing
     public var episodes: [PlayerEpisode] = []
@@ -82,6 +92,7 @@ public final class PlayerState {
     private var lastSubtitleSyncTime: Double = -1
 
     private var previousWindowFrame: NSRect? = nil
+    private var hasResizedForCurrentVideo = false
 
     private static let positionReportInterval: TimeInterval = 5
     private static let positionReportMinimumDelta: Double = 8
@@ -128,6 +139,7 @@ public final class PlayerState {
         }
         
         self.videoGravity = .resizeAspect // Reset to default
+        hasResizedForCurrentVideo = false
 
         if let ep = episodeTitle {
             self.seriesName = title
@@ -332,10 +344,19 @@ public final class PlayerState {
         seriesName = ""
         episodeTitle = nil
         hdrType = nil
+        playbackSources = []
+        selectedPlaybackSourceID = nil
+        isSwitchingSource = false
+        onSelectPlaybackSource = nil
         if let existing = thumbnailService {
             Task { await existing.clearCache() }
         }
         thumbnailService = nil
+    }
+
+    public func updatePlaybackSources(_ sources: [PlaybackSourceOption], selectedID: String?) {
+        playbackSources = sources
+        selectedPlaybackSourceID = selectedID
     }
 
     private func stopPlaybackResources() {
@@ -510,6 +531,15 @@ public final class PlayerState {
             }
         }
 
+        presentationSizeObserver = currentItem.observe(\.presentationSize, options: [.new, .initial]) { [weak self] item, _ in
+            Task { @MainActor in
+                guard let self, item === self.observedPlayerItem else { return }
+                let size = item.presentationSize
+                guard size.width > 1, size.height > 1 else { return }
+                self.resizeWindowToMatch(aspectRatio: size)
+            }
+        }
+
         player.publisher(for: \.timeControlStatus)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] status in
@@ -518,6 +548,31 @@ public final class PlayerState {
                 }
             }
             .store(in: &cancellables)
+    }
+
+    private func resizeWindowToMatch(aspectRatio: CGSize) {
+        guard !hasResizedForCurrentVideo else { return }
+        guard aspectRatio.width > 0, aspectRatio.height > 0 else { return }
+
+        guard let window = NSApplication.shared.keyWindow ?? NSApp.windows.first(where: { $0.isVisible && $0.isKeyWindow }),
+              !window.styleMask.contains(.fullScreen) else { return }
+
+        hasResizedForCurrentVideo = true
+
+        let currentFrame = window.frame
+        if previousWindowFrame == nil {
+            previousWindowFrame = currentFrame
+        }
+
+        let ratio = aspectRatio.width / aspectRatio.height
+        let newHeight = currentFrame.width / ratio
+
+        guard abs(currentFrame.height - newHeight) > 10 else { return }
+
+        var newFrame = currentFrame
+        newFrame.size.height = newHeight
+        newFrame.origin.y = currentFrame.origin.y + (currentFrame.height - newHeight) / 2
+        window.setFrame(newFrame, display: true, animate: true)
     }
 
     private func removeObservers() {
@@ -985,11 +1040,12 @@ public struct PlayerView: View {
 
             HStack(alignment: .center, spacing: 14) {
                 // Wide floating scrubber capsule
-                HStack(spacing: 12) {
+                HStack(alignment: .center, spacing: 12) {
                     Text(formatTime(state.currentTime))
                         .font(.system(size: 11, weight: .semibold))
                         .monospacedDigit()
                         .foregroundStyle(.white.opacity(0.85))
+                        .frame(width: 44, alignment: .trailing)
 
                     ScrubberSlider(
                         value: Binding(
@@ -1002,19 +1058,25 @@ public struct PlayerView: View {
                             await state.thumbnailImage(for: time, requestID: requestID)
                         }
                     )
+                    .frame(maxWidth: .infinity)
 
                     Text(formatRemainingTime())
                         .font(.system(size: 11, weight: .semibold))
                         .monospacedDigit()
                         .foregroundStyle(.white.opacity(0.85))
+                        .frame(width: 44, alignment: .leading)
                 }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 12)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
                 .nativeGlassEffect()
                 .frame(maxWidth: .infinity)
 
-                // Subtitle, Audio & Video Aspect Selectors Capsule
+                // Quality, subtitles, rate, aspect
                 HStack(spacing: 18) {
+                    if state.hasMultiplePlaybackSources {
+                        qualitySourceMenu
+                    }
+
                     Menu {
                         Button("0.5x") { state.setPlaybackRate(0.5) }
                         Button("1.0x") { state.setPlaybackRate(1.0) }
@@ -1072,6 +1134,53 @@ public struct PlayerView: View {
         .frame(maxWidth: .infinity)
     }
     
+    private var qualitySourceMenu: some View {
+        Menu {
+            let grouped = Dictionary(grouping: state.playbackSources, by: \.groupLabel)
+            ForEach(grouped.keys.sorted(), id: \.self) { group in
+                Section(group) {
+                    ForEach(grouped[group] ?? []) { source in
+                        Button {
+                            guard source.id != state.selectedPlaybackSourceID else { return }
+                            resetControlFade()
+                            Task {
+                                await state.onSelectPlaybackSource?(source)
+                            }
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(source.title)
+                                        .lineLimit(2)
+                                    Text(source.detailLine)
+                                        .font(.caption2)
+                                }
+                                Spacer()
+                                if source.id == state.selectedPlaybackSourceID {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } label: {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white.opacity(state.isSwitchingSource ? 0.5 : 0.9))
+                    .symbolEffect(.pulse, isActive: state.isSwitchingSource)
+                if state.isSwitchingSource {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .offset(x: 6, y: -6)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .help("Switch quality or language")
+        .disabled(state.isSwitchingSource || state.onSelectPlaybackSource == nil)
+    }
+
     private var episodesSidebar: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Episodes")

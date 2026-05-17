@@ -13,6 +13,7 @@ public actor PieceManager {
     private var downloadedPieces: Set<UInt32> = []
     private var pendingRequests: Set<BlockRequest> = []
     private var pieceBuffers: [UInt32: Data] = [:]
+    private var receivedBytes: [UInt32: Int] = [:]
 
     public init(pieceCount: Int, pieceLength: Int64, totalSize: Int64, piecesHash: Data) {
         self.pieceCount = pieceCount
@@ -53,26 +54,27 @@ public actor PieceManager {
         let request = BlockRequest(pieceIndex: pieceIndex, offset: offset, length: UInt32(block.count))
         pendingRequests.remove(request)
 
+        let expectedSize = Int(pieceSize(for: pieceIndex))
         if pieceBuffers[pieceIndex] == nil {
-            let size = pieceSize(for: pieceIndex)
-            pieceBuffers[pieceIndex] = Data(count: Int(size))
+            pieceBuffers[pieceIndex] = Data(count: expectedSize)
+            receivedBytes[pieceIndex] = 0
         }
 
         guard var buffer = pieceBuffers[pieceIndex] else { return false }
 
         let start = Int(offset)
         let end = start + block.count
-        guard end <= buffer.count else { return false }
+        guard start >= 0, end <= buffer.count else { return false }
 
         buffer.replaceSubrange(start..<end, with: block)
         pieceBuffers[pieceIndex] = buffer
+        receivedBytes[pieceIndex, default: 0] += block.count
 
-        let pieceSize = self.pieceSize(for: pieceIndex)
-        if Int64(buffer.count) >= pieceSize {
-            return verifyPiece(pieceIndex: pieceIndex, data: buffer)
+        guard receivedBytes[pieceIndex, default: 0] >= expectedSize else {
+            return false
         }
 
-        return false
+        return verifyPiece(pieceIndex: pieceIndex, data: buffer)
     }
 
     public func cancelPendingRequests() -> [BlockRequest] {

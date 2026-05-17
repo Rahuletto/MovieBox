@@ -26,6 +26,7 @@ struct MovieDetailView: View {
     @State private var showTrailer = false
     @State private var trailerURL: URL?
     @State private var activeStreamSession: StreamSession?
+    @State private var torrentCoordinator: TorrentPlaybackCoordinator?
     @State private var isPreparingStream = false
     @State private var scrollOffset: CGFloat = 0
     
@@ -158,7 +159,8 @@ struct MovieDetailView: View {
                     aggregator = TorrentSearchAggregator()
                 }
                 var latest: [TorrentResult] = []
-                for await batch in await aggregator.search(movieTitle: title, imdbId: imdb) {
+                let torrentKind: TorrentioClient.MediaKind = kind == .tv ? .tv : .movie
+                for await batch in await aggregator.search(movieTitle: title, imdbId: imdb, kind: torrentKind) {
                     latest = batch
                 }
                 return latest
@@ -249,22 +251,22 @@ struct MovieDetailView: View {
     }
 
     private func downloadSubtitle(_ subtitle: SubtitleInfo) {
+        Task { await downloadSubtitleAsync(subtitle) }
+    }
+
+    private func downloadSubtitleAsync(_ subtitle: SubtitleInfo) async {
         selectedSubtitle = subtitle
-        Task {
-            do {
-                guard let mode = metadataMode else { return }
-                let client = SubtitleClient(mode: mode)
-                let data = try await client.downloadSubtitle(url: subtitle.downloadUrl)
-                let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("moviebox_subtitles")
-                try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-                let fileURL = tempDir.appendingPathComponent("\(subtitle.id).srt")
-                try data.write(to: fileURL)
-                await MainActor.run {
-                    subtitleFileURL = fileURL
-                }
-            } catch {
-                errorMessage = error.localizedDescription
-            }
+        do {
+            guard let mode = metadataMode else { return }
+            let client = SubtitleClient(mode: mode)
+            let data = try await client.downloadSubtitle(url: subtitle.downloadUrl)
+            let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("moviebox_subtitles")
+            try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            let fileURL = tempDir.appendingPathComponent("\(subtitle.id).srt")
+            try data.write(to: fileURL)
+            subtitleFileURL = fileURL
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 
@@ -295,9 +297,10 @@ struct MovieDetailView: View {
                     isPreparingStream = false
                     playerState.load(
                         url: resolvedURL,
-                        title: "Trailer: \(detail?.movie.title ?? "")",
+                        title: detail?.movie.title ?? "",
                         movieId: movieId,
-                        subtitleURL: nil
+                        subtitleURL: nil,
+                        episodeTitle: "Trailer"
                     )
                 }
             } catch {
@@ -310,44 +313,59 @@ struct MovieDetailView: View {
     }
 
     private func playBestTorrent() {
-        guard let bestTorrent = torrents.first else {
-            errorMessage = "No available torrents found for this title."
+        guard !torrents.isEmpty else {
+            if kind == .tv {
+                errorMessage = "No torrents found for this show. Add Jackett in Settings and ensure the title has an IMDb ID."
+            } else {
+                errorMessage = "No torrents found for this movie yet. Check your connection or try again in a moment."
+            }
+            return
+        }
+
+        guard let bestTorrent = TorrentCatalog.best(from: torrents) else {
+            errorMessage = "No playable torrent release could be selected."
             return
         }
 
         isPreparingStream = true
-        let session = StreamSession(orchestrator: orchestrator)
-        activeStreamSession = session
+        let coordinator = TorrentPlaybackCoordinator(orchestrator: orchestrator)
+        torrentCoordinator = coordinator
 
         Task {
-            await session.start(torrent: bestTorrent)
+            if subtitleFileURL == nil, let preferred = subtitles.first {
+                await downloadSubtitleAsync(preferred)
+            }
+
+            let session = coordinator.beginStream(torrent: bestTorrent)
+            activeStreamSession = session
+
+            while !Task.isCancelled {
+                if case .ready = session.state {
+                    break
+                }
+                if case .failed(let err) = session.state {
+                    await MainActor.run {
+                        isPreparingStream = false
+                        errorMessage = "Failed to stream \"\(bestTorrent.title)\": \(err)"
+                    }
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
 
             await MainActor.run {
-                if case .ready(let url) = session.state {
-                    isPreparingStream = false
-                    
-                    let playerHdr: PlayerHDRType? = {
-                        guard let type = bestTorrent.hdrType else { return nil }
-                        switch type {
-                        case .hdr: return .hdr
-                        case .hdr10: return .hdr10
-                        case .hdr10Plus: return .hdr10Plus
-                        case .dolbyVisionOnly: return .dolbyVision
-                        case .dolbyVisionWithHDR10: return .dolbyVisionWithHDR10
-                        case .hlg: return .hdr
-                        }
-                    }()
-                    
-                    playerState.load(
-                        url: url,
-                        title: bestTorrent.title,
+                isPreparingStream = false
+                do {
+                    try coordinator.finishPlayback(
+                        torrent: bestTorrent,
+                        allTorrents: torrents,
+                        session: session,
+                        playerState: playerState,
                         movieId: movieId,
-                        subtitleURL: subtitleFileURL,
-                        hdrType: playerHdr
+                        subtitleURL: subtitleFileURL
                     )
-                } else if case .failed(let err) = session.state {
-                    isPreparingStream = false
-                    errorMessage = "Failed to stream best torrent: \(err)"
+                } catch {
+                    errorMessage = error.localizedDescription
                 }
             }
         }
