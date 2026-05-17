@@ -8,16 +8,26 @@ import UniformTypeIdentifiers
 
 @main
 struct MovieBoxApp: App {
+    private let sharedModelContainer: ModelContainer
+
     @State private var router = AppRouter()
     @State private var playerState = PlayerState()
     @State private var importErrorMessage: String?
+
+    init() {
+        do {
+            sharedModelContainer = try ModelContainer(for: MovieBoxSchema.models)
+        } catch {
+            fatalError("Failed to create ModelContainer: \(error)")
+        }
+    }
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environment(router)
                 .environment(playerState)
-                .modelContainer(for: MovieBoxSchema.models)
+                .modelContainer(sharedModelContainer)
                 .onOpenURL { url in
                     do {
                         try MagnetImportHandler.handle(url: url, router: router)
@@ -65,7 +75,7 @@ struct MovieBoxApp: App {
 
         Settings {
             SettingsView()
-                .modelContainer(for: MovieBoxSchema.models)
+                .modelContainer(sharedModelContainer)
         }
     }
 

@@ -46,6 +46,7 @@ public final class PlayerState {
     public var volume: Float = 1.0
     public var isMuted: Bool = false
     public var playbackRate: Double = 1.0
+    public private(set) var isFastScanning = false
     public var showsControls: Bool = false
     public var subtitleURL: URL? = nil
     public var activeSubtitleTrack: Int = 0
@@ -75,6 +76,8 @@ public final class PlayerState {
     public var isPictureInPicturePossible: Bool = false
     private var pipController: AVPictureInPictureController?
     private var pipDelegate: PlayerPiPDelegate?
+    private var fastScanBackwardTask: Task<Void, Never>?
+    private var playbackRateBeforeFastScan: Double = 1.0
 
     private var timeObserver: Any?
     private var itemStatusObserver: NSKeyValueObservation?
@@ -323,6 +326,11 @@ public final class PlayerState {
         playEpisode(at: nextIndex)
     }
 
+    public func toggleFullScreen() {
+        guard let window = NSApplication.shared.keyWindow else { return }
+        window.toggleFullScreen(nil)
+    }
+
     public func dismiss() {
         if let window = NSApplication.shared.keyWindow, window.styleMask.contains(.fullScreen) {
             window.toggleFullScreen(nil)
@@ -360,6 +368,7 @@ public final class PlayerState {
     }
 
     private func stopPlaybackResources() {
+        stopFastScan()
         removeObservers()
         teardownPiP()
         cancelSubtitleWork()
@@ -462,8 +471,56 @@ public final class PlayerState {
     }
 
     public func setPlaybackRate(_ rate: Double) {
+        guard !isFastScanning else { return }
         playbackRate = rate
         player.rate = Float(rate)
+    }
+
+    public func startFastScan(forward: Bool) {
+        guard isPresented, !isFastScanning else { return }
+        isFastScanning = true
+        playbackRateBeforeFastScan = playbackRate > 0 ? playbackRate : 1.0
+        fastScanBackwardTask?.cancel()
+
+        if forward {
+            player.rate = 2.0
+            playbackRate = 2.0
+            play()
+        } else {
+            player.rate = -1.5
+            playbackRate = -1.5
+            play()
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(120))
+                if player.rate >= 0 {
+                    player.rate = 0
+                    startBackwardSeekRepeat()
+                }
+            }
+        }
+    }
+
+    public func stopFastScan() {
+        guard isFastScanning else { return }
+        isFastScanning = false
+        fastScanBackwardTask?.cancel()
+        fastScanBackwardTask = nil
+        let restore = playbackRateBeforeFastScan > 0 ? playbackRateBeforeFastScan : 1.0
+        playbackRate = restore
+        player.rate = Float(restore)
+        if player.timeControlStatus != .playing, isPlaying {
+            play()
+        }
+    }
+
+    private func startBackwardSeekRepeat() {
+        fastScanBackwardTask?.cancel()
+        fastScanBackwardTask = Task {
+            while !Task.isCancelled {
+                seek(by: -10)
+                try? await Task.sleep(for: .milliseconds(350))
+            }
+        }
     }
 
     public func cyclePlaybackRate() {
@@ -653,6 +710,7 @@ public struct PlayerView: View {
     @State private var isHoveringHUD: Bool = false
     @State private var skipBackTrigger: Int = 0
     @State private var skipForwardTrigger: Int = 0
+    @State private var isCommandHeld = false
 
     public init(state: PlayerState) {
         self.state = state
@@ -776,64 +834,14 @@ public struct PlayerView: View {
                 .zIndex(8)
             }
         }
-        .onKeyPress(.space) {
-            state.togglePlayback()
-            resetControlFade()
-            return .handled
-        }
-        .onKeyPress(.leftArrow) {
-            state.seek(by: -10)
-            resetControlFade()
-            return .handled
-        }
-        .onKeyPress(.rightArrow) {
-            state.seek(by: 10)
-            resetControlFade()
-            return .handled
-        }
-        .onKeyPress(.upArrow) {
-            state.setVolume(min(1.0, state.volume + 0.1))
-            resetControlFade()
-            return .handled
-        }
-        .onKeyPress(.downArrow) {
-            state.setVolume(max(0.0, state.volume - 0.1))
-            resetControlFade()
-            return .handled
-        }
-        .onKeyPress("m") {
-            state.toggleMute()
-            resetControlFade()
-            return .handled
-        }
-        .onKeyPress(.escape) {
-            state.dismiss()
-            return .handled
-        }
-        .onKeyPress("f") {
-            toggleFullScreen()
-            resetControlFade()
-            return .handled
-        }
-        .onKeyPress("s") {
-            state.toggleSubtitle()
-            resetControlFade()
-            return .handled
-        }
-        .onKeyPress("p") {
-            state.togglePictureInPicture()
-            resetControlFade()
-            return .handled
-        }
-        .onKeyPress("a") {
-            state.cycleVideoGravity()
-            resetControlFade()
-            return .handled
-        }
-        .onKeyPress("c") {
-            state.toggleSubtitle()
-            resetControlFade()
-            return .handled
+        .overlay {
+            PlayerKeyboardCaptureView(
+                state: state,
+                onActivity: resetControlFade,
+                onSkipBack: { skipBackTrigger += 1 },
+                onSkipForward: { skipForwardTrigger += 1 },
+                onCommandHeld: { isCommandHeld = $0 }
+            )
         }
         .overlay {
             MouseTrackingView(onMove: resetControlFade)
@@ -841,6 +849,7 @@ public struct PlayerView: View {
         .ignoresSafeArea()
         .task {
             resetControlFade()
+            NotificationCenter.default.post(name: .playerReclaimKeyboardFocus, object: nil)
         }
     }
 
@@ -893,7 +902,7 @@ public struct PlayerView: View {
                         .animation(.spring(response: 0.05, dampingFraction: 0.95), value: state.isPictureInPictureActive)
 
                         Button {
-                            toggleFullScreen()
+                            state.toggleFullScreen()
                         } label: {
                             Image(systemName: "arrow.up.left.and.arrow.down.right")
                                 .font(.system(size: 12, weight: .semibold))
@@ -958,22 +967,14 @@ public struct PlayerView: View {
 
     private var centerControls: some View {
         HStack(spacing: 28) {
-            // Seek Back Button
-            Button {
-                state.seek(by: -15)
-                resetControlFade()
-                skipBackTrigger += 1
-            } label: {
-                Image(systemName: "gobackward.15")
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .symbolEffect(.rotate, value: skipBackTrigger)
-                    .frame(width: 52, height: 52)
-                    .nativeGlassEffect()
-            }
-            .buttonStyle(CenterHUDButtonStyle())
+            SkipSeekButton(
+                state: state,
+                direction: .back,
+                isCommandHeld: isCommandHeld,
+                pulseTrigger: $skipBackTrigger,
+                onActivity: resetControlFade
+            )
 
-            // Center Play / Pause Button
             Button {
                 state.togglePlayback()
                 resetControlFade()
@@ -988,20 +989,13 @@ public struct PlayerView: View {
             .buttonStyle(CenterHUDButtonStyle())
             .animation(.spring(response: 0.02, dampingFraction: 0.85), value: state.isPlaying)
 
-            // Seek Forward Button
-            Button {
-                state.seek(by: 15)
-                resetControlFade()
-                skipForwardTrigger += 1
-            } label: {
-                Image(systemName: "goforward.15")
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .symbolEffect(.rotate, value: skipForwardTrigger)
-                    .frame(width: 52, height: 52)
-                    .nativeGlassEffect()
-            }
-            .buttonStyle(CenterHUDButtonStyle())
+            SkipSeekButton(
+                state: state,
+                direction: .forward,
+                isCommandHeld: isCommandHeld,
+                pulseTrigger: $skipForwardTrigger,
+                onActivity: resetControlFade
+            )
         }
         .scaleEffect(state.showsControls ? 1.0 : 0.9)
         .opacity(state.showsControls ? 1.0 : 0.0)
@@ -1252,6 +1246,7 @@ public struct PlayerView: View {
     }
 
     private func resetControlFade() {
+        NotificationCenter.default.post(name: .playerReclaimKeyboardFocus, object: nil)
         state.showsControls = true
         controlFadeTask?.cancel()
         controlFadeTask = Task {
@@ -1264,10 +1259,6 @@ public struct PlayerView: View {
         }
     }
 
-    private func toggleFullScreen() {
-        guard let window = NSApplication.shared.keyWindow else { return }
-        window.toggleFullScreen(nil)
-    }
 }
 
 struct HUDButtonStyle: ButtonStyle {
@@ -1390,6 +1381,220 @@ struct VolumeSlider: View {
         }
         .tint(.white)
         .controlSize(.mini)
+    }
+}
+
+extension Notification.Name {
+    static let playerReclaimKeyboardFocus = Notification.Name("playerReclaimKeyboardFocus")
+}
+
+/// Invisible first-responder layer — SwiftUI `onKeyPress` does not receive keys when AVPlayer uses an `NSView` layer.
+struct PlayerKeyboardCaptureView: NSViewRepresentable {
+    var state: PlayerState
+    var onActivity: () -> Void
+    var onSkipBack: () -> Void
+    var onSkipForward: () -> Void
+    var onCommandHeld: (Bool) -> Void
+
+    func makeNSView(context: Context) -> PlayerKeyboardNSView {
+        let view = PlayerKeyboardNSView()
+        view.state = state
+        view.onActivity = onActivity
+        view.onSkipBack = onSkipBack
+        view.onSkipForward = onSkipForward
+        view.onCommandHeld = onCommandHeld
+        return view
+    }
+
+    func updateNSView(_ nsView: PlayerKeyboardNSView, context: Context) {
+        nsView.state = state
+        nsView.onActivity = onActivity
+        nsView.onSkipBack = onSkipBack
+        nsView.onSkipForward = onSkipForward
+        nsView.onCommandHeld = onCommandHeld
+        if state.isPresented {
+            nsView.claimKeyboardFocus()
+            onCommandHeld(NSEvent.modifierFlags.contains(.command))
+        }
+    }
+
+    static func dismantleNSView(_ nsView: PlayerKeyboardNSView, coordinator: ()) {
+        nsView.teardown()
+    }
+}
+
+final class PlayerKeyboardNSView: NSView {
+    weak var state: PlayerState?
+    var onActivity: (() -> Void)?
+    var onSkipBack: (() -> Void)?
+    var onSkipForward: (() -> Void)?
+    var onCommandHeld: ((Bool) -> Void)?
+    private var focusObserver: NSObjectProtocol?
+    private var isCommandKeyHeld = false
+
+    override var acceptsFirstResponder: Bool { true }
+
+    func teardown() {
+        if let focusObserver {
+            NotificationCenter.default.removeObserver(focusObserver)
+            self.focusObserver = nil
+        }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if focusObserver == nil {
+            focusObserver = NotificationCenter.default.addObserver(
+                forName: .playerReclaimKeyboardFocus,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.claimKeyboardFocus()
+            }
+        }
+        claimKeyboardFocus()
+    }
+
+    func claimKeyboardFocus() {
+        guard state?.isPresented == true else { return }
+        window?.makeFirstResponder(self)
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func flagsChanged(with event: NSEvent) {
+        let commandDown = event.modifierFlags.contains(.command)
+        if commandDown != isCommandKeyHeld {
+            isCommandKeyHeld = commandDown
+            onCommandHeld?(commandDown)
+        }
+        if !commandDown {
+            state?.stopFastScan()
+        }
+        super.flagsChanged(with: event)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        guard let state else {
+            super.keyDown(with: event)
+            return
+        }
+
+        if event.modifierFlags.contains(.control) || event.modifierFlags.contains(.option) {
+            super.keyDown(with: event)
+            return
+        }
+
+        if handleKeyDown(event, state: state) {
+            onActivity?()
+            return
+        }
+
+        super.keyDown(with: event)
+    }
+
+    override func keyUp(with event: NSEvent) {
+        if event.keyCode == 123 || event.keyCode == 124 {
+            if event.modifierFlags.contains(.command) || state?.isFastScanning == true {
+                state?.stopFastScan()
+            }
+        }
+        super.keyUp(with: event)
+    }
+
+    private func handleKeyDown(_ event: NSEvent, state: PlayerState) -> Bool {
+        let isCommand = event.modifierFlags.contains(.command)
+        let isShift = event.modifierFlags.contains(.shift)
+
+        switch event.keyCode {
+        case 49: // space
+            guard !isCommand, !isShift else { return false }
+            state.togglePlayback()
+            return true
+        case 123: // left
+            if isCommand {
+                state.startFastScan(forward: false)
+                onSkipBack?()
+                return true
+            }
+            if isShift {
+                state.seek(by: -5)
+                onSkipBack?()
+                return true
+            }
+            state.seek(by: -15)
+            onSkipBack?()
+            return true
+        case 124: // right
+            if isCommand {
+                state.startFastScan(forward: true)
+                onSkipForward?()
+                return true
+            }
+            if isShift {
+                state.seek(by: 5)
+                onSkipForward?()
+                return true
+            }
+            state.seek(by: 15)
+            onSkipForward?()
+            return true
+        case 126: // up
+            guard !isCommand, !isShift else { return false }
+            state.setVolume(min(1.0, state.volume + 0.1))
+            return true
+        case 125: // down
+            guard !isCommand, !isShift else { return false }
+            state.setVolume(max(0.0, state.volume - 0.1))
+            return true
+        case 53: // escape
+            state.dismiss()
+            return true
+        default:
+            break
+        }
+
+        guard !isCommand, !isShift else { return false }
+
+        guard let key = event.charactersIgnoringModifiers?.lowercased(), key.count == 1 else {
+            return false
+        }
+
+        switch key {
+        case "m":
+            state.toggleMute()
+            return true
+        case "f":
+            state.toggleFullScreen()
+            return true
+        case "s", "c":
+            state.toggleSubtitle()
+            return true
+        case "p":
+            state.togglePictureInPicture()
+            return true
+        case "a":
+            state.cycleVideoGravity()
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+struct SkipButtonPulseModifier: ViewModifier {
+    let trigger: Int
+    @State private var scale: CGFloat = 1
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(scale)
+            .onChange(of: trigger) { _, _ in
+                scale = 1.14
+                withAnimation(.spring(response: 0.1, dampingFraction: 0.52)) {
+                    scale = 1.0
+                }
+            }
     }
 }
 

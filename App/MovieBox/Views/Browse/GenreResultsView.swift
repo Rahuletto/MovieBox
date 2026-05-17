@@ -5,14 +5,7 @@ import SwiftData
 import SwiftUI
 
 func resolveMetadataMode(from settings: [AppSettings]) -> MetadataEndpointMode? {
-    guard let s = settings.first else { return nil }
-    if let url = URL(string: s.proxyBaseURL), !s.proxyBaseURL.isEmpty, !s.appToken.isEmpty {
-        return .backend(baseURL: url, appToken: s.appToken)
-    }
-    if !s.tmdbBearerToken.isEmpty {
-        return .direct(tmdbBearerToken: s.tmdbBearerToken, omdbAPIKey: s.omdbAPIKey.isEmpty ? nil : s.omdbAPIKey)
-    }
-    return nil
+    settings.first?.metadataMode
 }
 
 struct GenreResultsView: View {

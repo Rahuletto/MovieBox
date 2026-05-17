@@ -37,8 +37,8 @@ struct SearchView: View {
             .ignoresSafeArea(edges: .top)
             .opacity(router.selectedGenre == nil && router.searchQuery.isEmpty ? 1 : 0)
             .allowsHitTesting(router.selectedGenre == nil && router.searchQuery.isEmpty)
-            .animation(.spring(response: 0.42, dampingFraction: 0.82), value: router.selectedGenre)
-            .animation(.spring(response: 0.42, dampingFraction: 0.82), value: router.searchQuery)
+            .animation(MovieBoxMotion.chrome, value: router.selectedGenre)
+            .animation(MovieBoxMotion.chrome, value: router.searchQuery)
             .blur(radius: errorMessage != nil ? 18 : 0)
 
             // 2. Genre Results ScrollView

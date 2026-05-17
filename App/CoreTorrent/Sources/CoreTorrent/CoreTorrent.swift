@@ -57,14 +57,14 @@ public enum VideoSource: String, Sendable, Codable {
 
 public enum TrackerSource: Sendable, Codable, Hashable {
     case yts
-    case jackett(indexer: String)
+    case native(site: String)
     case torrentAPI
     case torrentio
 
     public var label: String {
         switch self {
         case .yts: "YTS"
-        case .jackett(let indexer): "Jackett: \(indexer)"
+        case .native(let site): site
         case .torrentAPI: "Torrent API"
         case .torrentio: "Torrentio"
         }
@@ -278,60 +278,66 @@ public enum ReleaseParser {
 }
 
 public actor TorrentSearchAggregator {
-    private let ytsClient: YTSClient
-    private var jackettClient: JackettClient?
     private let torrentioClient: TorrentioClient
+    private let nativeIndexers: NativeIndexerRegistry
+    public private(set) var lastDiagnostics = TorrentSearchDiagnostics()
 
-    public init(ytsClient: YTSClient = YTSClient(), torrentioClient: TorrentioClient = TorrentioClient()) {
-        self.ytsClient = ytsClient
+    public init(
+        torrentioClient: TorrentioClient = TorrentioClient(),
+        nativeIndexers: NativeIndexerRegistry = NativeIndexerRegistry()
+    ) {
         self.torrentioClient = torrentioClient
+        self.nativeIndexers = nativeIndexers
     }
 
-    public init(ytsClient: YTSClient = YTSClient(), torrentioClient: TorrentioClient = TorrentioClient(), jackettAPIKey: String, jackettHost: String, jackettPort: Int) {
-        self.ytsClient = ytsClient
-        self.torrentioClient = torrentioClient
-        self.jackettClient = JackettClient(apiKey: jackettAPIKey, host: jackettHost, port: jackettPort)
-    }
-
-    public func search(movieTitle: String, imdbId: String? = nil, kind: TorrentioClient.MediaKind = .movie) -> AsyncStream<[TorrentResult]> {
+    public func search(
+        movieTitle: String,
+        year: Int? = nil,
+        imdbId: String? = nil,
+        kind: TorrentioClient.MediaKind = .movie,
+        enableYTS: Bool = true,
+        enableNativeIndexers: Bool = true
+    ) -> AsyncStream<[TorrentResult]> {
         AsyncStream { continuation in
             Task {
+                var diagnostics = TorrentSearchDiagnostics()
+                let query = TorrentSearchQuery.make(title: movieTitle, year: year)
+                diagnostics.queryUsed = query
+                let context = TorrentSearchContext(query: query, year: year, imdbId: imdbId, kind: kind)
+
                 var allResults: [TorrentResult] = []
 
-                // 1. Search Torrentio if IMDb ID is available
                 if let imdb = imdbId, !imdb.isEmpty {
+                    diagnostics.torrentioAttempted = true
                     do {
                         let torrentioResults = try await torrentioClient.search(imdbId: imdb, kind: kind)
                         allResults.append(contentsOf: torrentioResults)
+                        diagnostics.torrentioCount = torrentioResults.count
                     } catch {
+                        diagnostics.torrentioError = error.localizedDescription
                         NSLog("Torrentio search failed: \(error)")
                     }
                 }
 
-                // 2. Search YTS mirror chain (movies only)
-                if kind == .movie {
-                do {
-                    let ytsResults = try await ytsClient.search(query: movieTitle)
+                if enableNativeIndexers {
+                    let enabledIDs: Set<String>? = enableYTS
+                        ? nil
+                        : Set(NativeIndexerRegistry.defaultIndexers.filter { $0 != "yts" })
+                    let native = await nativeIndexers.search(context: context, enabledIDs: enabledIDs)
+                    diagnostics.nativeCounts = native.counts
+                    diagnostics.nativeErrors = native.errors
+
                     let existingHashes = Set(allResults.compactMap { $0.infoHash?.lowercased() })
-                    let filteredYts = ytsResults.filter { !existingHashes.contains($0.infoHash?.lowercased() ?? "") }
-                    allResults.append(contentsOf: filteredYts)
-                } catch {
-                    NSLog("YTS search failed: \(error)")
-                }
-                }
-
-                // 3. Search Jackett when configured
-                if let jackett = jackettClient {
-                    do {
-                        let jackettResults = try await jackett.search(query: movieTitle)
-                        let existingHashes = Set(allResults.compactMap { $0.infoHash?.lowercased() })
-                        let filteredJackett = jackettResults.map { $0.toTorrentResult() }.filter { !existingHashes.contains($0.infoHash?.lowercased() ?? "") }
-                        allResults.append(contentsOf: filteredJackett)
-                    } catch {
-                        NSLog("Jackett search failed: \(error)")
+                    let filtered = native.results.filter { row in
+                        guard let hash = row.infoHash?.lowercased() else { return true }
+                        return !existingHashes.contains(hash)
                     }
+                    allResults.append(contentsOf: filtered)
+                    diagnostics.ytsCount = native.counts["yts", default: 0]
+                    diagnostics.ytsAttempted = enableYTS && kind == .movie
                 }
 
+                lastDiagnostics = diagnostics
                 continuation.yield(Self.sorted(allResults))
                 continuation.finish()
             }

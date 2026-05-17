@@ -31,7 +31,8 @@ public final class LogStore {
         let timestamp = formatter.string(from: Date())
         let formatted = "[\(timestamp)] \(message)"
         logs.append(formatted)
-        NSLog("MovieBoxApp: %@", formatted)
+        // Escape `%` so NSLog does not treat user/API text as printf format specifiers.
+        NSLog("MovieBoxApp: %@", formatted.replacingOccurrences(of: "%", with: "%%"))
     }
 
     public func clear() {
@@ -40,13 +41,6 @@ public final class LogStore {
 
     public var allLogs: String {
         logs.joined(separator: "\n")
-    }
-}
-
-@MainActor
-extension AppRouter {
-    func backFromDetail() {
-        show(activeTab)
     }
 }
 
@@ -62,8 +56,7 @@ struct RootView: View {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .ignoresSafeArea(edges: .top)
-                .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .center)))
-                .animation(.spring(response: 0.38, dampingFraction: 0.74), value: router.selectedRoute)
+                .animation(MovieBoxMotion.navigation, value: router.selectedRoute)
 
             VStack(spacing: 0) {
                 PillTabBar()
@@ -128,54 +121,54 @@ struct RootView: View {
 
     @ViewBuilder
     private var content: some View {
-        // Movie Detail View takes full page
-        if case .movieDetail(let id) = router.selectedRoute {
-            MovieDetailView(
-                movieId: id,
-                kind: router.detailKind,
-                orchestrator: streamingOrchestrator,
-                onBack: { router.backFromDetail() }
-            )
-            .id("movie-detail-\(id)")
-        } else {
-            // Tab-based views
-            ZStack {
-                // 1. Home View
-                HomeView()
-                    .opacity(router.activeTab == .home ? 1 : 0)
-                    .allowsHitTesting(router.activeTab == .home)
+        ZStack {
+            // Keep every tab mounted so ScrollView offset survives detail push/pop.
+            tabStack
 
-                // 2. Movies Catalog
-                CatalogView(kind: .movie)
-                    .opacity(router.activeTab == .movies ? 1 : 0)
-                    .allowsHitTesting(router.activeTab == .movies)
-
-                // 3. TV Shows Catalog
-                CatalogView(kind: .tv)
-                    .opacity(router.activeTab == .tvShows ? 1 : 0)
-                    .allowsHitTesting(router.activeTab == .tvShows)
-
-                // 4. Library View
-                LibraryView()
-                    .opacity(router.activeTab == .library ? 1 : 0)
-                    .allowsHitTesting(router.activeTab == .library)
-
-                // 5. Downloads View
-                DownloadsView()
-                    .opacity(router.activeTab == .downloads ? 1 : 0)
-                    .allowsHitTesting(router.activeTab == .downloads)
-
-                // 6. Search View
-                SearchView()
-                    .opacity(router.activeTab == .search ? 1 : 0)
-                    .allowsHitTesting(router.activeTab == .search)
+            if case .movieDetail(let id) = router.selectedRoute {
+                MovieDetailView(
+                    movieId: id,
+                    kind: router.detailKind,
+                    orchestrator: streamingOrchestrator,
+                    onBack: { router.backFromDetail() }
+                )
+                .id("movie-detail-\(id)")
+                .transition(.opacity)
+                .zIndex(1)
             }
+        }
+    }
+
+    private var tabStack: some View {
+        ZStack {
+            HomeView()
+                .opacity(router.activeTab == .home && !router.isShowingDetail ? 1 : 0)
+                .allowsHitTesting(router.activeTab == .home && !router.isShowingDetail)
+
+            CatalogView(kind: .movie)
+                .opacity(router.activeTab == .movies && !router.isShowingDetail ? 1 : 0)
+                .allowsHitTesting(router.activeTab == .movies && !router.isShowingDetail)
+
+            CatalogView(kind: .tv)
+                .opacity(router.activeTab == .tvShows && !router.isShowingDetail ? 1 : 0)
+                .allowsHitTesting(router.activeTab == .tvShows && !router.isShowingDetail)
+
+            LibraryView()
+                .opacity(router.activeTab == .library && !router.isShowingDetail ? 1 : 0)
+                .allowsHitTesting(router.activeTab == .library && !router.isShowingDetail)
+
+            DownloadsView()
+                .opacity(router.activeTab == .downloads && !router.isShowingDetail ? 1 : 0)
+                .allowsHitTesting(router.activeTab == .downloads && !router.isShowingDetail)
+
+            SearchView()
+                .opacity(router.activeTab == .search && !router.isShowingDetail ? 1 : 0)
+                .allowsHitTesting(router.activeTab == .search && !router.isShowingDetail)
         }
     }
 
     @Environment(\.modelContext) private var modelContext
     @Query private var storedMovies: [MovieRecord]
-
     private func updateWatchHistory(tmdbId: Int, position: Double, fraction: Double) {
         if let record = storedMovies.first(where: { $0.tmdbId == tmdbId }) {
             record.playbackPositionSeconds = position
@@ -1213,16 +1206,6 @@ struct FullScreenTrailerPlayer: View {
 }
 
 private extension AppSettings {
-    var metadataMode: MetadataEndpointMode? {
-        if let url = URL(string: proxyBaseURL), !proxyBaseURL.isEmpty, !appToken.isEmpty {
-            return .backend(baseURL: url, appToken: appToken)
-        }
-        if !tmdbBearerToken.isEmpty {
-            return .direct(tmdbBearerToken: tmdbBearerToken, omdbAPIKey: omdbAPIKey.isEmpty ? nil : omdbAPIKey)
-        }
-        return nil
-    }
-
     var cacheKey: String {
         "\(proxyBaseURL)|\(appToken)|\(tmdbBearerToken)"
     }

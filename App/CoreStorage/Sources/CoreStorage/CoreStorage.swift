@@ -98,14 +98,10 @@ public final class AppSettings {
     public var appToken: String
     public var tmdbBearerToken: String
     public var omdbAPIKey: String
-    public var jackettAPIKey: String
-    public var jackettHost: String
-    public var jackettPort: Int
     public var defaultDownloadPath: String
     public var preferredQuality: String
     public var preferredAudioLang: String
     public var preferredSubtitleLang: String
-    public var enableJackett: Bool
     public var enableYTS: Bool
     public var enableSeeding: Bool
     public var maxActiveDownloads: Int
@@ -139,14 +135,10 @@ public final class AppSettings {
         appToken: String = "",
         tmdbBearerToken: String = "",
         omdbAPIKey: String = "",
-        jackettAPIKey: String = "",
-        jackettHost: String = "localhost",
-        jackettPort: Int = 9117,
         defaultDownloadPath: String = "~/Movies/MovieBox",
         preferredQuality: String = "best",
         preferredAudioLang: String = "en",
         preferredSubtitleLang: String = "en",
-        enableJackett: Bool = false,
         enableYTS: Bool = true,
         enableSeeding: Bool = true,
         maxActiveDownloads: Int = 2,
@@ -179,14 +171,10 @@ public final class AppSettings {
         self.appToken = appToken
         self.tmdbBearerToken = tmdbBearerToken
         self.omdbAPIKey = omdbAPIKey
-        self.jackettAPIKey = jackettAPIKey
-        self.jackettHost = jackettHost
-        self.jackettPort = jackettPort
         self.defaultDownloadPath = defaultDownloadPath
         self.preferredQuality = preferredQuality
         self.preferredAudioLang = preferredAudioLang
         self.preferredSubtitleLang = preferredSubtitleLang
-        self.enableJackett = enableJackett
         self.enableYTS = enableYTS
         self.enableSeeding = enableSeeding
         self.maxActiveDownloads = maxActiveDownloads

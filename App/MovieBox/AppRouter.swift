@@ -42,7 +42,7 @@ final class AppRouter {
     }
 
     func show(_ route: Route) {
-        withAnimation(.spring(response: 0.38, dampingFraction: 0.74)) {
+        withAnimation(MovieBoxMotion.navigation) {
             if route != .search {
                 selectedGenre = nil
             }
@@ -51,10 +51,21 @@ final class AppRouter {
     }
 
     func showDetail(id: Int, kind: MediaKind = .movie) {
-        withAnimation(.spring(response: 0.38, dampingFraction: 0.74)) {
+        withAnimation(MovieBoxMotion.navigation) {
             detailKind = kind
             selectedRoute = .movieDetail(id)
         }
+    }
+
+    func backFromDetail() {
+        withAnimation(MovieBoxMotion.navigation) {
+            selectedRoute = activeTab
+        }
+    }
+
+    var isShowingDetail: Bool {
+        if case .movieDetail = selectedRoute { return true }
+        return false
     }
 }
 

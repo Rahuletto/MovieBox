@@ -144,14 +144,7 @@ struct HomeView: View {
     }
 
     private var metadataMode: MetadataEndpointMode? {
-        guard let setting = settings.first else { return nil }
-        if let url = URL(string: setting.proxyBaseURL), !setting.proxyBaseURL.isEmpty, !setting.appToken.isEmpty {
-            return .backend(baseURL: url, appToken: setting.appToken)
-        }
-        if !setting.tmdbBearerToken.isEmpty {
-            return .direct(tmdbBearerToken: setting.tmdbBearerToken, omdbAPIKey: setting.omdbAPIKey.isEmpty ? nil : setting.omdbAPIKey)
-        }
-        return nil
+        settings.first?.metadataMode
     }
 
     private var settingsKey: String {

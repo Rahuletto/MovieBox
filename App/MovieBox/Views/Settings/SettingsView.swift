@@ -7,6 +7,7 @@ struct SettingsView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var settingsRows: [AppSettings]
     @State private var draft = SettingsDraft()
+    @State private var isHydratingDraft = false
 
     var body: some View {
         TabView {
@@ -32,11 +33,16 @@ struct SettingsView: View {
         .scenePadding()
         .frame(width: 550)
         .onAppear { loadSettings() }
-        .onChange(of: draft) { save() }
+        .onChange(of: draft) { _, _ in
+            guard !isHydratingDraft else { return }
+            save()
+        }
     }
 
     private func loadSettings() {
+        isHydratingDraft = true
         draft = SettingsDraft(settings: settingsRows.first)
+        isHydratingDraft = false
     }
 
     private func save() {
@@ -134,12 +140,18 @@ private struct TorrentSettingsSection: View {
 
     var body: some View {
         Form {
-            Section("Jackett") {
-                SecureField("API Key", text: $draft.jackettAPIKey, prompt: Text("Enter key"))
-                TextField("Host", text: $draft.jackettHost, prompt: Text("localhost"))
-                TextField("Port", value: $draft.jackettPort, format: .number)
-                Text("Both YTS and Jackett are searched automatically. Configure Jackett credentials to include additional indexers.")
+            Section("Built-in Indexers") {
+                Text("Torrentio plus native Swift indexers (YTS, EZTV, Pirate Bay). No Jackett or sidecar.")
                     .foregroundStyle(.secondary)
+                Toggle("Include YTS (movies)", isOn: $draft.enableYTS)
+                LabeledContent("Movies") {
+                    Text("Torrentio, YTS, Pirate Bay")
+                        .foregroundStyle(.secondary)
+                }
+                LabeledContent("TV Shows") {
+                    Text("Torrentio, EZTV, Pirate Bay")
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section("Torrent Behavior") {
@@ -291,14 +303,10 @@ private struct SettingsDraft: Equatable {
     var appToken = ""
     var tmdbBearerToken = ""
     var omdbAPIKey = ""
-    var jackettAPIKey = ""
-    var jackettHost = "localhost"
-    var jackettPort = 9117
     var defaultDownloadPath = "~/Movies/MovieBox"
     var preferredQuality = "best"
     var preferredAudioLang = "en"
     var preferredSubtitleLang = "en"
-    var enableJackett = false
     var enableYTS = true
     var enableSeeding = true
     var maxActiveDownloads = 2
@@ -333,14 +341,10 @@ private struct SettingsDraft: Equatable {
         appToken = settings.appToken
         tmdbBearerToken = settings.tmdbBearerToken
         omdbAPIKey = settings.omdbAPIKey
-        jackettAPIKey = settings.jackettAPIKey
-        jackettHost = settings.jackettHost
-        jackettPort = settings.jackettPort
         defaultDownloadPath = settings.defaultDownloadPath
         preferredQuality = settings.preferredQuality
         preferredAudioLang = settings.preferredAudioLang
         preferredSubtitleLang = settings.preferredSubtitleLang
-        enableJackett = settings.enableJackett
         enableYTS = settings.enableYTS
         enableSeeding = settings.enableSeeding
         maxActiveDownloads = settings.maxActiveDownloads
@@ -375,14 +379,10 @@ private struct SettingsDraft: Equatable {
         settings.appToken = appToken
         settings.tmdbBearerToken = tmdbBearerToken
         settings.omdbAPIKey = omdbAPIKey
-        settings.jackettAPIKey = jackettAPIKey
-        settings.jackettHost = jackettHost
-        settings.jackettPort = jackettPort
         settings.defaultDownloadPath = defaultDownloadPath
         settings.preferredQuality = preferredQuality
         settings.preferredAudioLang = preferredAudioLang
         settings.preferredSubtitleLang = preferredSubtitleLang
-        settings.enableJackett = enableJackett
         settings.enableYTS = enableYTS
         settings.enableSeeding = enableSeeding
         settings.maxActiveDownloads = maxActiveDownloads

@@ -23,7 +23,7 @@ struct TorrentSection: View {
                 ContentUnavailableView(
                     "No Versions Found",
                     systemImage: "magnifyingglass",
-                    description: Text("YTS did not return torrent results for \(movie.title).")
+                    description: Text("Torrentio and built-in indexers returned no results for \(movie.title).")
                 )
                 .frame(maxWidth: .infinity, minHeight: 180)
             } else {

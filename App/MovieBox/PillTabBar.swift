@@ -42,8 +42,8 @@ struct PillTabBar: View {
                 HStack(spacing: 0) {
                     HStack(spacing: 12) {
                              Button {
-                                 if case .movieDetail = router.selectedRoute {
-                                     router.show(router.activeTab)
+                                 if router.isShowingDetail {
+                                     router.backFromDetail()
                                  } else {
                                      router.selectedGenre = nil
                                  }
@@ -70,14 +70,14 @@ struct PillTabBar: View {
                     Spacer()
                 }
                 .offset(y: 2)
-                .transition(.opacity.combined(with: .move(edge: .top)))
+                .transition(.opacity)
             } else {
                 HStack(spacing: 8) {
                     // Menu Capsule
                     HStack(spacing: 0) {
                         if isSearchExpanded {
                             Button {
-                                withAnimation(.spring(response: 0.36, dampingFraction: 0.64)) {
+                                withAnimation(MovieBoxMotion.chrome) {
                                     isMenuExpanded = true
                                 }
                             } label: {
@@ -145,7 +145,7 @@ struct PillTabBar: View {
                         } else {
                             Button {
                                 if router.selectedRoute == .search {
-                                    withAnimation(.spring(response: 0.36, dampingFraction: 0.64)) {
+                                    withAnimation(MovieBoxMotion.chrome) {
                                         isMenuExpanded = false
                                     }
                                 } else {
@@ -217,9 +217,9 @@ struct PillTabBar: View {
                 isSearchFieldFocused = false
             }
         }
-        .animation(.spring(response: 0.38, dampingFraction: 0.64), value: router.selectedRoute)
-        .animation(.spring(response: 0.38, dampingFraction: 0.64), value: router.selectedGenre)
-        .animation(.spring(response: 0.38, dampingFraction: 0.64), value: isMenuExpanded)
+        .animation(MovieBoxMotion.chrome, value: router.selectedRoute)
+        .animation(MovieBoxMotion.chrome, value: router.selectedGenre)
+        .animation(MovieBoxMotion.chrome, value: isMenuExpanded)
     }
 
     private func tabButton(_ tab: TabItem) -> some View {
@@ -244,7 +244,7 @@ struct PillTabBar: View {
                 .contentShape(Capsule(style: .continuous))
         }
         .buttonStyle(.plain)
-        .animation(.spring(response: 0.32, dampingFraction: 0.58), value: isSelected)
+        .animation(MovieBoxMotion.tabHighlight, value: isSelected)
         .accessibilityLabel(tab.title)
         .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : [.isButton])
     }
