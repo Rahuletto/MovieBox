@@ -28,9 +28,17 @@ struct PillTabBar: View {
         router.selectedRoute == .search && !isMenuExpanded
     }
 
+    /// True when we're presenting a movie/show detail view. In that case the
+    /// detail view renders its own NavigationHeader, so we hide the genre
+    /// "Animation" nav to avoid two stacked back buttons.
+    private var isInDetailView: Bool {
+        if case .movieDetail = router.selectedRoute { return true }
+        return false
+    }
+
     var body: some View {
         HStack(spacing: 8) {
-            if let genre = router.selectedGenre {
+            if let genre = router.selectedGenre, !isInDetailView {
                 HStack(spacing: 0) {
                     HStack(spacing: 12) {
                              Button {
