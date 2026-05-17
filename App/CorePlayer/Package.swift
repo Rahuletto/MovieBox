@@ -1,4 +1,4 @@
-// swift-tools-version: 6.3
+// swift-tools-version: 6.0
 import PackageDescription
 
 let package = Package(
@@ -7,8 +7,18 @@ let package = Package(
     products: [
         .library(name: "CorePlayer", targets: ["CorePlayer"])
     ],
+    dependencies: [
+        // Uncomment to use SwiftVLC for native MKV/DTS/AC3 playback
+        // .package(url: "https://github.com/harflabs/SwiftVLC.git", from: "0.8.0")
+    ],
     targets: [
-        .target(name: "CorePlayer")
+        .target(
+            name: "CorePlayer",
+            dependencies: [
+                // Uncomment to use SwiftVLC for native MKV/DTS/AC3 playback
+                // .product(name: "SwiftVLC", package: "SwiftVLC")
+            ]
+        )
     ],
     swiftLanguageModes: [.v6]
 )

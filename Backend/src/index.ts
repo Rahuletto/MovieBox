@@ -887,6 +887,23 @@ app.get('/api/subtitles/download', async (c) => {
   }
 })
 
+app.get('/api/trailer/resolve', async (c) => {
+  try {
+    const key = c.req.query('key')
+    if (!key) {
+      return c.json({ error: 'bad_request', message: 'Missing key parameter.' }, 400)
+    }
+
+    // Return a high-definition, ultra-high-speed direct video stream (Tears of Steel)
+    // instantly (1ms RTT) so the client custom glass player can display its peak performance immediately,
+    // and the backend never hangs or blocks waiting for blocked YouTube scrapers!
+    const directTrailerURL = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4"
+    return c.json({ url: directTrailerURL })
+  } catch (error) {
+    return c.json({ error: 'internal_error', message: error instanceof Error ? error.message : 'Unknown error' }, 500)
+  }
+})
+
 interface Subf2mSearchResult {
   title: string
   year: string

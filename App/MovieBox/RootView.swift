@@ -884,48 +884,57 @@ struct TrailerWebView: NSViewRepresentable {
     }
 }
 
-struct TrailerPlayerView: View {
+struct FullScreenTrailerPlayer: View {
     let videoURL: URL
     let onDismiss: () -> Void
 
     private var embedURL: URL? {
-        if videoURL.absoluteString.contains("youtube.com/embed/") {
-            return videoURL
-        }
-        if let components = URLComponents(url: videoURL, resolvingAgainstBaseURL: false),
-           let queryItems = components.queryItems,
-           let key = queryItems.first(where: { $0.name == "v" })?.value {
-            return URL(string: "https://www.youtube.com/embed/\(key)?autoplay=1&rel=0&modestbranding=1")
+        if let key = parseYouTubeKey(from: videoURL) {
+            return URL(string: "https://www.youtube.com/embed/\(key)?autoplay=1&rel=0&modestbranding=1&playsinline=1&enablejsapi=1")
         }
         return videoURL
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("Trailer")
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                Spacer()
-                Button(action: onDismiss) {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.title2)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.white.opacity(0.85))
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .background(.black)
+        ZStack(alignment: .topTrailing) {
+            Color.black.ignoresSafeArea()
 
             if let embedURL {
                 TrailerWebView(url: embedURL)
-                    .background(.black)
+                    .ignoresSafeArea()
             } else {
                 ContentUnavailableView("Unable to load trailer", systemImage: "play.slash")
             }
+
+            // Elegant, floating glass-morphic close button
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(12)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay(Circle().stroke(.white.opacity(0.2), lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .padding(24)
+            .transition(.opacity)
         }
-        .background(.black)
+    }
+
+    private func parseYouTubeKey(from url: URL) -> String? {
+        let absoluteString = url.absoluteString
+        if absoluteString.contains("youtube.com/embed/") {
+            return absoluteString.components(separatedBy: "youtube.com/embed/").last?.components(separatedBy: "?").first
+        }
+        if let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+           let queryItems = components.queryItems,
+           let key = queryItems.first(where: { $0.name == "v" })?.value {
+            return key
+        }
+        if absoluteString.contains("youtu.be/") {
+            return absoluteString.components(separatedBy: "youtu.be/").last?.components(separatedBy: "?").first
+        }
+        return nil
     }
 }
 

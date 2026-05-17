@@ -264,6 +264,47 @@ public actor MetadataClient {
         return MovieDetail(movie: movie, genres: try await movieResponse.genres ?? [], cast: Array(credits), similar: similar)
     }
 
+    public func resolveTrailer(key: String) async throws -> URL {
+        guard let mode else { throw MetadataError.missingConfiguration }
+
+        if case .backend(let baseURL, let appToken) = mode {
+            var components = URLComponents(url: baseURL.appending(path: "api/trailer/resolve"), resolvingAgainstBaseURL: false)
+            components?.queryItems = [URLQueryItem(name: "key", value: key)]
+            guard let url = components?.url else { throw MetadataError.invalidURL }
+
+            var request = URLRequest(url: url)
+            request.setValue(appToken, forHTTPHeaderField: "X-MovieBox-Token")
+            request.timeoutInterval = 20
+
+            let (data, response) = try await session.data(for: request)
+            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                throw MetadataError.upstream(http.statusCode)
+            }
+
+            struct TrailerResponse: Codable {
+                let url: String
+            }
+            let resolved = try JSONDecoder().decode(TrailerResponse.self, from: data)
+            if let resultURL = URL(string: resolved.url) {
+                return resultURL
+            }
+        }
+
+        // Direct mode fallback
+        let apiURL = URL(string: "https://pipedapi.kavin.rocks/streams/\(key)")!
+        let (data, _) = try await session.data(from: apiURL)
+        
+        struct PipedResponse: Codable {
+            let hlsUrl: String?
+        }
+        let piped = try JSONDecoder().decode(PipedResponse.self, from: data)
+        if let hls = piped.hlsUrl, let resultURL = URL(string: hls) {
+            return resultURL
+        }
+        
+        throw MetadataError.upstream(404)
+    }
+
     /// Returns an absolute Fanart.tv logo URL (NOT a TMDB path).
     /// Single backend RTT — server-side resolves external_ids → fanart and caches
     /// every step (including negatives) in KV. Frontend additionally caches in

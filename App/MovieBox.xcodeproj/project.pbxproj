@@ -390,6 +390,8 @@
 		};
 /* End XCLocalSwiftPackageReference section */
 
+
+
 /* Begin XCSwiftPackageProductDependency section */
 		AB0000010000000000001001 /* CoreMetadata */ = {
 			isa = XCSwiftPackageProductDependency;

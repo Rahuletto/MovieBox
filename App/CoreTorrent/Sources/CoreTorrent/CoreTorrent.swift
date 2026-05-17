@@ -59,12 +59,14 @@ public enum TrackerSource: Sendable, Codable, Hashable {
     case yts
     case jackett(indexer: String)
     case torrentAPI
+    case torrentio
 
     public var label: String {
         switch self {
         case .yts: "YTS"
         case .jackett(let indexer): "Jackett: \(indexer)"
         case .torrentAPI: "Torrent API"
+        case .torrentio: "Torrentio"
         }
     }
 }
@@ -186,34 +188,51 @@ public enum ReleaseParser {
 public actor TorrentSearchAggregator {
     private let ytsClient: YTSClient
     private var jackettClient: JackettClient?
+    private let torrentioClient: TorrentioClient
 
-    public init(ytsClient: YTSClient = YTSClient()) {
+    public init(ytsClient: YTSClient = YTSClient(), torrentioClient: TorrentioClient = TorrentioClient()) {
         self.ytsClient = ytsClient
+        self.torrentioClient = torrentioClient
     }
 
-    public init(ytsClient: YTSClient = YTSClient(), jackettAPIKey: String, jackettHost: String, jackettPort: Int) {
+    public init(ytsClient: YTSClient = YTSClient(), torrentioClient: TorrentioClient = TorrentioClient(), jackettAPIKey: String, jackettHost: String, jackettPort: Int) {
         self.ytsClient = ytsClient
+        self.torrentioClient = torrentioClient
         self.jackettClient = JackettClient(apiKey: jackettAPIKey, host: jackettHost, port: jackettPort)
     }
 
-    public func search(movieTitle: String) -> AsyncStream<[TorrentResult]> {
+    public func search(movieTitle: String, imdbId: String? = nil) -> AsyncStream<[TorrentResult]> {
         AsyncStream { continuation in
             Task {
                 var allResults: [TorrentResult] = []
 
-                // Always search YTS
+                // 1. Search Torrentio if IMDb ID is available
+                if let imdb = imdbId, !imdb.isEmpty {
+                    do {
+                        let torrentioResults = try await torrentioClient.search(imdbId: imdb)
+                        allResults.append(contentsOf: torrentioResults)
+                    } catch {
+                        NSLog("Torrentio search failed: \(error)")
+                    }
+                }
+
+                // 2. Search YTS mirror chain
                 do {
                     let ytsResults = try await ytsClient.search(query: movieTitle)
-                    allResults.append(contentsOf: ytsResults)
+                    let existingHashes = Set(allResults.compactMap { $0.infoHash?.lowercased() })
+                    let filteredYts = ytsResults.filter { !existingHashes.contains($0.infoHash?.lowercased() ?? "") }
+                    allResults.append(contentsOf: filteredYts)
                 } catch {
                     NSLog("YTS search failed: \(error)")
                 }
 
-                // Always search Jackett when configured
+                // 3. Search Jackett when configured
                 if let jackett = jackettClient {
                     do {
                         let jackettResults = try await jackett.search(query: movieTitle)
-                        allResults.append(contentsOf: jackettResults.map { $0.toTorrentResult() })
+                        let existingHashes = Set(allResults.compactMap { $0.infoHash?.lowercased() })
+                        let filteredJackett = jackettResults.map { $0.toTorrentResult() }.filter { !existingHashes.contains($0.infoHash?.lowercased() ?? "") }
+                        allResults.append(contentsOf: filteredJackett)
                     } catch {
                         NSLog("Jackett search failed: \(error)")
                     }
@@ -246,36 +265,45 @@ public actor YTSClient {
     }
 
     public func search(query: String) async throws -> [TorrentResult] {
-        var components = URLComponents(string: "https://yts.mx/api/v2/list_movies.json")
-        components?.queryItems = [URLQueryItem(name: "query_term", value: query)]
-        guard let url = components?.url else { return [] }
-        
-        do {
-            let (data, _) = try await session.data(from: url)
-            let response = try decoder.decode(YTSResponse.self, from: data)
-            return response.data.movies?.flatMap { movie in
-                movie.torrents.map { torrent in
-                    TorrentResult(
-                        title: "\(movie.title) \(torrent.quality) \(torrent.type)",
-                        magnetURI: Self.magnet(hash: torrent.hash, title: movie.title),
-                        quality: ReleaseParser.parseQuality(from: torrent.quality),
-                        hdrType: ReleaseParser.parseHDR(from: "\(torrent.quality) \(torrent.type)"),
-                        codec: torrent.videoCodec,
-                        audioFormat: nil,
-                        source: torrent.type.lowercased().contains("bluray") ? .bluray : .webdl,
-                        sizeBytes: torrent.sizeBytes,
-                        seeders: torrent.seeds,
-                        leechers: torrent.peers,
-                        trackerSource: .yts,
-                        infoHash: torrent.hash
-                    )
-                }
-            } ?? []
-        } catch {
-            // YTS API unavailable - return empty gracefully
-            print("YTS search failed: \(error.localizedDescription)")
-            return []
+        let hosts = ["yts.mx", "yts.pm", "yts.lt", "yts.am"]
+        var lastError: Error?
+
+        for host in hosts {
+            var components = URLComponents(string: "https://\(host)/api/v2/list_movies.json")
+            components?.queryItems = [URLQueryItem(name: "query_term", value: query)]
+            guard let url = components?.url else { continue }
+
+            do {
+                let (data, _) = try await session.data(from: url)
+                let response = try decoder.decode(YTSResponse.self, from: data)
+                return response.data.movies?.flatMap { movie in
+                    movie.torrents.map { torrent in
+                        TorrentResult(
+                            title: "\(movie.title) \(torrent.quality) \(torrent.type)",
+                            magnetURI: Self.magnet(hash: torrent.hash, title: movie.title),
+                            quality: ReleaseParser.parseQuality(from: torrent.quality),
+                            hdrType: ReleaseParser.parseHDR(from: "\(torrent.quality) \(torrent.type)"),
+                            codec: torrent.videoCodec,
+                            audioFormat: nil,
+                            source: torrent.type.lowercased().contains("bluray") ? .bluray : .webdl,
+                            sizeBytes: torrent.sizeBytes,
+                            seeders: torrent.seeds,
+                            leechers: torrent.peers,
+                            trackerSource: .yts,
+                            infoHash: torrent.hash
+                        )
+                    }
+                } ?? []
+            } catch {
+                NSLog("YTS search failed on \(host): \(error). Trying next mirror...")
+                lastError = error
+            }
         }
+
+        if let lastError {
+            throw lastError
+        }
+        return []
     }
 
     private static func magnet(hash: String, title: String) -> String {

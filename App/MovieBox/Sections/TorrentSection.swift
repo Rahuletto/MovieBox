@@ -103,7 +103,24 @@ private struct TorrentResultRow: View {
             await session.start(torrent: result)
 
             if case .ready(let url) = session.state {
-                playerState.load(url: url, title: result.title, movieId: movieId, subtitleURL: subtitleURL)
+                let playerHdr: PlayerHDRType? = {
+                    guard let type = result.hdrType else { return nil }
+                    switch type {
+                    case .hdr: return .hdr
+                    case .hdr10: return .hdr10
+                    case .hdr10Plus: return .hdr10Plus
+                    case .dolbyVisionOnly: return .dolbyVision
+                    case .dolbyVisionWithHDR10: return .dolbyVisionWithHDR10
+                    case .hlg: return .hdr
+                    }
+                }()
+                playerState.load(
+                    url: url,
+                    title: result.title,
+                    movieId: movieId,
+                    subtitleURL: subtitleURL,
+                    hdrType: playerHdr
+                )
             }
         }
     }

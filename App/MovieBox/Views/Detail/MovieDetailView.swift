@@ -83,7 +83,9 @@ struct MovieDetailView: View {
             // Preparing Stream Glass Overlay
             if isPreparingStream, let session = activeStreamSession {
                 GlassStreamOverlay(session: session) {
-                    session.cancel()
+                    Task {
+                        await session.cancel()
+                    }
                     isPreparingStream = false
                 }
                 .transition(.opacity)
@@ -97,12 +99,6 @@ struct MovieDetailView: View {
         }
         .task(id: movieId) {
             await load()
-        }
-        .sheet(isPresented: $showTrailer) {
-            if let url = trailerURL {
-                TrailerPlayerView(videoURL: url, onDismiss: { showTrailer = false })
-                    .frame(minWidth: 800, minHeight: 500)
-            }
         }
         .keyboardShortcut(.cancelAction)
         .onKeyPress(.upArrow) {
@@ -162,7 +158,7 @@ struct MovieDetailView: View {
                     aggregator = TorrentSearchAggregator()
                 }
                 var latest: [TorrentResult] = []
-                for await batch in await aggregator.search(movieTitle: title) {
+                for await batch in await aggregator.search(movieTitle: title, imdbId: imdb) {
                     latest = batch
                 }
                 return latest
@@ -274,8 +270,43 @@ struct MovieDetailView: View {
 
     private func playTrailer(_ url: URL?) {
         guard let url else { return }
-        trailerURL = url
-        showTrailer = true
+        
+        let absoluteString = url.absoluteString
+        var key: String?
+        
+        if absoluteString.contains("v=") {
+            key = absoluteString.components(separatedBy: "v=").last?.components(separatedBy: "&").first
+        } else if absoluteString.contains("embed/") {
+            key = absoluteString.components(separatedBy: "embed/").last?.components(separatedBy: "?").first
+        } else if absoluteString.contains("youtu.be/") {
+            key = absoluteString.components(separatedBy: "youtu.be/").last?.components(separatedBy: "?").first
+        }
+        
+        guard let trailerKey = key else { return }
+        
+        isPreparingStream = true
+        
+        Task {
+            do {
+                let client = MetadataClient(mode: metadataMode)
+                let resolvedURL = try await client.resolveTrailer(key: trailerKey)
+                
+                await MainActor.run {
+                    isPreparingStream = false
+                    playerState.load(
+                        url: resolvedURL,
+                        title: "Trailer: \(detail?.movie.title ?? "")",
+                        movieId: movieId,
+                        subtitleURL: nil
+                    )
+                }
+            } catch {
+                await MainActor.run {
+                    isPreparingStream = false
+                    errorMessage = "Failed to resolve trailer stream: \(error.localizedDescription)"
+                }
+            }
+        }
     }
 
     private func playBestTorrent() {
@@ -294,7 +325,26 @@ struct MovieDetailView: View {
             await MainActor.run {
                 if case .ready(let url) = session.state {
                     isPreparingStream = false
-                    playerState.load(url: url, title: bestTorrent.title, movieId: movieId, subtitleURL: subtitleFileURL)
+                    
+                    let playerHdr: PlayerHDRType? = {
+                        guard let type = bestTorrent.hdrType else { return nil }
+                        switch type {
+                        case .hdr: return .hdr
+                        case .hdr10: return .hdr10
+                        case .hdr10Plus: return .hdr10Plus
+                        case .dolbyVisionOnly: return .dolbyVision
+                        case .dolbyVisionWithHDR10: return .dolbyVisionWithHDR10
+                        case .hlg: return .hdr
+                        }
+                    }()
+                    
+                    playerState.load(
+                        url: url,
+                        title: bestTorrent.title,
+                        movieId: movieId,
+                        subtitleURL: subtitleFileURL,
+                        hdrType: playerHdr
+                    )
                 } else if case .failed(let err) = session.state {
                     isPreparingStream = false
                     errorMessage = "Failed to stream best torrent: \(err)"

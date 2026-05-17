@@ -2,6 +2,14 @@ import AVFoundation
 import Combine
 import SwiftUI
 
+public enum PlayerHDRType: String, Sendable, Codable {
+    case hdr = "HDR"
+    case hdr10 = "HDR10"
+    case hdr10Plus = "HDR10+"
+    case dolbyVision = "Dolby Vision"
+    case dolbyVisionWithHDR10 = "DV-HDR10"
+}
+
 @MainActor
 @Observable
 public final class PlayerState {
@@ -19,12 +27,14 @@ public final class PlayerState {
     public var subtitleURL: URL?
     public var activeSubtitleTrack: Int
     public var currentSubtitleText: String = ""
+    public var hdrType: PlayerHDRType? = nil
     public var onPositionUpdate: ((Int, Double, Double) -> Void)?
 
     private var timeObserver: Any?
     private var periodObserver: Any?
     private var subtitleStream: SubtitleStream?
     private var subtitleLoadTask: Task<Void, Never>?
+    private var cancellables: [AnyCancellable] = []
 
     public init(player: AVPlayer = AVPlayer(), title: String = "", movieId: Int = 0, isPresented: Bool = false) {
         self.player = player
@@ -40,13 +50,17 @@ public final class PlayerState {
         self.showsControls = true
         self.subtitleURL = nil
         self.activeSubtitleTrack = -1
+        self.hdrType = nil
     }
 
-    public func load(url: URL, title: String, movieId: Int = 0, subtitleURL: URL? = nil) {
+    public func load(url: URL, title: String, movieId: Int = 0, subtitleURL: URL? = nil, hdrType: PlayerHDRType? = nil) {
         self.title = title
         self.movieId = movieId
         self.subtitleURL = subtitleURL
-        player.replaceCurrentItem(with: AVPlayerItem(url: url))
+        self.hdrType = hdrType
+        
+        let playerItem = AVPlayerItem(url: url)
+        player.replaceCurrentItem(with: playerItem)
         isPresented = true
         showsControls = true
         setupObservers()
@@ -54,6 +68,9 @@ public final class PlayerState {
         if let subtitleURL {
             loadSubtitleStream(from: subtitleURL)
         }
+        
+        player.play()
+        isPlaying = true
     }
 
     public func loadSubtitleStream(from url: URL) {
@@ -140,6 +157,7 @@ public final class PlayerState {
         let clamped = max(0, min(time, duration))
         player.seek(to: CMTime(seconds: clamped, preferredTimescale: 600))
         currentTime = clamped
+        updateSubtitle(at: clamped)
     }
 
     public func seek(by seconds: Double) {
@@ -213,8 +231,6 @@ public final class PlayerState {
         periodObserver = nil
         cancellables.removeAll()
     }
-
-    private var cancellables: [AnyCancellable] = []
 }
 
 public struct AVPlayerLayerView: NSViewRepresentable {
@@ -254,6 +270,7 @@ public final class PlayerContainerView: NSView {
 public struct PlayerView: View {
     @Bindable private var state: PlayerState
     @State private var controlFadeTask: Task<Void, Never>?
+    @State private var isHoveringHUD: Bool = false
 
     public init(state: PlayerState) {
         self.state = state
@@ -262,19 +279,25 @@ public struct PlayerView: View {
     public var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
+            
+            // Native AVPlayer rendering layer
             AVPlayerLayerView(player: state.player)
                 .ignoresSafeArea()
 
             subtitleOverlay
 
-            topBar
+            // Beautiful, floating glassmorphic IINA top bar
+            topHUD
                 .opacity(state.showsControls ? 1 : 0)
+                .animation(.easeInOut(duration: 0.25), value: state.showsControls)
 
-            centerControls
-                .opacity(state.showsControls ? 1 : 0)
+            // Center play/pause temporary indicator overlay
+            centerIndicator
 
-            bottomBar
+            // Stunning, floating glassmorphic IINA control pod
+            bottomHUD
                 .opacity(state.showsControls ? 1 : 0)
+                .animation(.easeInOut(duration: 0.25), value: state.showsControls)
         }
         .focusable()
         .onKeyPress(.space) {
@@ -340,157 +363,225 @@ public struct PlayerView: View {
                     .shadow(color: .black.opacity(0.8), radius: 4, x: 0, y: 2)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 60)
-                    .padding(.bottom, 100)
+                    .padding(.bottom, 120) // Raised slightly to sit elegantly above the new floating HUD
                     .transition(.opacity)
                     .animation(.easeInOut(duration: 0.2), value: state.currentSubtitleText)
             }
         }
     }
 
-    private var topBar: some View {
-        HStack(spacing: 12) {
-            Button {
-                state.dismiss()
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.title2)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.white.opacity(0.85))
-
-            Text(state.title)
-                .font(.headline)
-                .foregroundStyle(.white)
-                .lineLimit(1)
-
-            Spacer()
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 14)
-        .background(.black.opacity(0.4), in: Rectangle())
-        .frame(maxWidth: .infinity, alignment: .top)
-    }
-
-    private var centerControls: some View {
-        VStack(spacing: 16) {
-            Spacer()
-
-            HStack(spacing: 24) {
+    private var topHUD: some View {
+        VStack {
+            HStack(spacing: 12) {
+                // Sleek Close button
                 Button {
-                    state.seek(by: -10)
+                    state.dismiss()
                 } label: {
-                    Image(systemName: "gobackward.10")
+                    Image(systemName: "xmark.circle.fill")
                         .font(.title2)
+                        .foregroundStyle(.white.opacity(0.85))
                 }
-                .buttonStyle(PlayerButtonStyle())
+                .buttonStyle(.plain)
 
-                Button {
-                    state.togglePlayback()
-                } label: {
-                    Image(systemName: state.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 38))
-                }
-                .buttonStyle(PlayerButtonStyle())
+                // Title
+                Text(state.title)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
 
-                Button {
-                    state.seek(by: 10)
-                } label: {
-                    Image(systemName: "goforward.10")
-                        .font(.title2)
-                }
-                .buttonStyle(PlayerButtonStyle())
-            }
-
-            Spacer()
-        }
-    }
-
-    private var bottomBar: some View {
-        VStack(spacing: 0) {
-            scrubber
-
-            HStack(spacing: 16) {
-                HStack(spacing: 12) {
-                    Button {
-                        state.toggleMute()
-                    } label: {
-                        Image(systemName: muteIcon)
-                            .font(.body)
+                // Dynamic glowing HDR / Dolby Vision badges just like IINA
+                if let hdr = state.hdrType {
+                    switch hdr {
+                    case .dolbyVision, .dolbyVisionWithHDR10:
+                        HStack(spacing: 4) {
+                            Text("Dolby")
+                                .font(.system(size: 9, weight: .bold))
+                            Text("Vision")
+                                .font(.system(size: 9, weight: .semibold))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(
+                            LinearGradient(
+                                colors: [Color(red: 0.5, green: 0.1, blue: 0.8), Color(red: 0.2, green: 0.3, blue: 0.9)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            in: Capsule()
+                        )
+                        .shadow(color: Color(red: 0.5, green: 0.1, blue: 0.8).opacity(0.6), radius: 3)
+                    case .hdr, .hdr10, .hdr10Plus:
+                        Text(hdr.rawValue)
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.black)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(
+                                LinearGradient(
+                                    colors: [Color(red: 1.0, green: 0.8, blue: 0.1), Color(red: 0.9, green: 0.6, blue: 0.0)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                in: Capsule()
+                            )
+                            .shadow(color: Color(red: 1.0, green: 0.8, blue: 0.1).opacity(0.5), radius: 3)
                     }
-                    .buttonStyle(PlayerButtonStyle())
-
-                    VolumeSlider(volume: state.volume) { newValue in
-                        state.setVolume(newValue)
-                    }
-                    .frame(width: 80)
                 }
 
                 Spacer()
-
-                HStack(spacing: 12) {
-                    Button {
-                        state.cyclePlaybackRate()
-                    } label: {
-                        Text("\(state.playbackRate, specifier: "%.2g")x")
-                            .font(.caption)
-                            .fontWeight(.medium)
-                            .monospacedDigit()
-                    }
-                    .buttonStyle(PlayerButtonStyle())
-
-                    Button {
-                        state.toggleSubtitle()
-                    } label: {
-                        Image(systemName: state.activeSubtitleTrack >= 0 ? "captions.bubble.fill" : "captions.bubble")
-                            .font(.body)
-                    }
-                    .buttonStyle(PlayerButtonStyle())
-                    .disabled(state.subtitleURL == nil && state.activeSubtitleTrack < 0)
-
-                    Button {
-                        toggleFullScreen()
-                    } label: {
-                        Image(systemName: "arrow.up.left.and.arrow.down.right")
-                            .font(.body)
-                    }
-                    .buttonStyle(PlayerButtonStyle())
-                }
-
-                Text(timeDisplay)
-                    .font(.caption)
-                    .monospacedDigit()
-                    .foregroundStyle(.white.opacity(0.85))
-                    .padding(.leading, 8)
             }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 14)
-            .padding(.top, 4)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 10)
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(Capsule().stroke(.white.opacity(0.12), lineWidth: 1))
+            .shadow(color: .black.opacity(0.35), radius: 8, y: 4)
+            .padding(.top, 20)
+            .padding(.horizontal, 24)
+
+            Spacer()
         }
-        .background(.black.opacity(0.4), in: Rectangle())
-        .frame(maxWidth: .infinity, alignment: .bottom)
+        .frame(maxWidth: .infinity, alignment: .top)
+    }
+
+    private var centerIndicator: some View {
+        Group {
+            if !state.isPlaying && !state.showsControls {
+                Image(systemName: "pause.circle.fill")
+                    .font(.system(size: 64))
+                    .foregroundStyle(.white.opacity(0.6))
+                    .shadow(color: .black.opacity(0.3), radius: 8)
+                    .transition(.scale.combined(with: .opacity))
+                    .animation(.spring(), value: state.isPlaying)
+            }
+        }
+    }
+
+    private var bottomHUD: some View {
+        VStack {
+            Spacer()
+
+            VStack(spacing: 12) {
+                // Sleek Floating Scrubber
+                scrubber
+
+                // Control panel rows
+                HStack(spacing: 24) {
+                    // Left group: Volume controls
+                    HStack(spacing: 8) {
+                        Button {
+                            state.toggleMute()
+                        } label: {
+                            Image(systemName: muteIcon)
+                                .font(.system(size: 13, weight: .medium))
+                        }
+                        .buttonStyle(HUDButtonStyle())
+
+                        VolumeSlider(volume: state.volume) { newValue in
+                            state.setVolume(newValue)
+                        }
+                        .frame(width: 80)
+                    }
+
+                    Spacer()
+
+                    // Center group: Main playback controls
+                    HStack(spacing: 18) {
+                        Button {
+                            state.seek(by: -10)
+                        } label: {
+                            Image(systemName: "backward.fill")
+                                .font(.system(size: 15))
+                        }
+                        .buttonStyle(HUDButtonStyle())
+
+                        Button {
+                            state.togglePlayback()
+                        } label: {
+                            Image(systemName: state.isPlaying ? "pause.fill" : "play.fill")
+                                .font(.system(size: 20))
+                        }
+                        .buttonStyle(HUDPrimaryButtonStyle())
+
+                        Button {
+                            state.seek(by: 10)
+                        } label: {
+                            Image(systemName: "forward.fill")
+                                .font(.system(size: 15))
+                        }
+                        .buttonStyle(HUDButtonStyle())
+                    }
+
+                    Spacer()
+
+                    // Right group: Speed, Subtitle, Fullscreen
+                    HStack(spacing: 12) {
+                        Button {
+                            state.cyclePlaybackRate()
+                        } label: {
+                            Text("\(state.playbackRate, specifier: "%.2g")x")
+                                .font(.system(size: 11, weight: .semibold))
+                                .monospacedDigit()
+                        }
+                        .buttonStyle(HUDButtonStyle())
+
+                        Button {
+                            state.toggleSubtitle()
+                        } label: {
+                            Image(systemName: state.activeSubtitleTrack >= 0 ? "captions.bubble.fill" : "captions.bubble")
+                                .font(.system(size: 13))
+                        }
+                        .buttonStyle(HUDButtonStyle())
+                        .disabled(state.subtitleURL == nil && state.activeSubtitleTrack < 0)
+
+                        Button {
+                            toggleFullScreen()
+                        } label: {
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .font(.system(size: 13))
+                        }
+                        .buttonStyle(HUDButtonStyle())
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 12)
+            }
+            .background(.ultraThinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).stroke(.white.opacity(0.15), lineWidth: 1))
+            .shadow(color: .black.opacity(0.4), radius: 12, x: 0, y: 6)
+            .frame(maxWidth: 640)
+            .padding(.bottom, 24)
+            .onHover { hovering in
+                isHoveringHUD = hovering
+            }
+        }
+        .frame(maxWidth: .infinity)
     }
 
     private var scrubber: some View {
-        Slider(value: Binding(
-            get: { state.currentTime },
-            set: { state.seek(to: $0) }
-        ), in: 0...max(state.duration, 0.01)) {
-            Text("Seek")
-        } minimumValueLabel: {
+        HStack(spacing: 12) {
             Text(formatTime(state.currentTime))
-                .font(.caption2)
+                .font(.system(size: 10, weight: .medium))
                 .monospacedDigit()
                 .foregroundStyle(.white.opacity(0.7))
-        } maximumValueLabel: {
+
+            Slider(value: Binding(
+                get: { state.currentTime },
+                set: { state.seek(to: $0) }
+            ), in: 0...max(state.duration, 0.01)) {
+                Text("Seek")
+            }
+            .tint(.white)
+            .controlSize(.mini)
+
             Text(formatTime(state.duration))
-                .font(.caption2)
+                .font(.system(size: 10, weight: .medium))
                 .monospacedDigit()
                 .foregroundStyle(.white.opacity(0.7))
         }
-        .tint(.white)
         .padding(.horizontal, 20)
-        .padding(.top, 8)
-        .padding(.bottom, 2)
+        .padding(.top, 14)
     }
 
     private var muteIcon: String {
@@ -501,10 +592,6 @@ public struct PlayerView: View {
         } else {
             return "speaker.wave.3.fill"
         }
-    }
-
-    private var timeDisplay: String {
-        "\(formatTime(state.currentTime)) / \(formatTime(state.duration))"
     }
 
     private func formatTime(_ seconds: Double) -> String {
@@ -524,7 +611,7 @@ public struct PlayerView: View {
         controlFadeTask?.cancel()
         controlFadeTask = Task {
             try? await Task.sleep(for: .seconds(3))
-            if !Task.isCancelled {
+            if !Task.isCancelled && !isHoveringHUD && state.isPlaying {
                 await MainActor.run {
                     state.showsControls = false
                 }
@@ -534,20 +621,31 @@ public struct PlayerView: View {
 
     private func toggleFullScreen() {
         guard let window = NSApplication.shared.keyWindow else { return }
-        if window.styleMask.contains(.fullScreen) {
-            window.toggleFullScreen(nil)
-        } else {
-            window.toggleFullScreen(nil)
-        }
+        window.toggleFullScreen(nil)
     }
 }
 
-struct PlayerButtonStyle: ButtonStyle {
+struct HUDButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .foregroundStyle(.white.opacity(configuration.isPressed ? 0.6 : 0.85))
-            .padding(10)
-            .background(.ultraThinMaterial, in: Circle())
+            .foregroundStyle(.white.opacity(configuration.isPressed ? 0.6 : 0.9))
+            .frame(width: 32, height: 32)
+            .background(.white.opacity(0.08))
+            .clipShape(Circle())
+            .overlay(Circle().stroke(.white.opacity(0.1), lineWidth: 1))
+            .scaleEffect(configuration.isPressed ? 0.94 : 1.0)
+            .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
+    }
+}
+
+struct HUDPrimaryButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(.black)
+            .frame(width: 44, height: 44)
+            .background(.white)
+            .clipShape(Circle())
+            .shadow(color: .white.opacity(0.2), radius: 6)
             .scaleEffect(configuration.isPressed ? 0.92 : 1.0)
             .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
     }
@@ -565,6 +663,7 @@ struct VolumeSlider: View {
             Text("Volume")
         }
         .tint(.white)
+        .controlSize(.mini)
     }
 }
 
@@ -596,3 +695,232 @@ class MouseTrackingNSView: NSView {
         onMove?()
     }
 }
+
+/*
+================================================================================
+FUTURE SwiftVLC IMPLEMENTATION (libVLC 4.0)
+To enable, uncomment this block, comment out the AVPlayer-based PlayerState / PlayerView,
+and uncomment SwiftVLC in Package.swift.
+================================================================================
+
+import Combine
+import SwiftUI
+import SwiftVLC
+
+extension Duration {
+    public var seconds: Double {
+        Double(components.seconds) + Double(components.attoseconds) * 1e-18
+    }
+}
+
+@MainActor
+@Observable
+public final class SwiftVLCPlayerState {
+    public var player: Player
+    public var title: String
+    public var movieId: Int
+    public var isPresented: Bool
+    public var showsControls: Bool
+    public var subtitleURL: URL?
+    public var activeSubtitleTrack: Int
+    public var currentSubtitleText: String = ""
+    public var hdrType: PlayerHDRType? = nil
+    public var onPositionUpdate: ((Int, Double, Double) -> Void)?
+
+    private var subtitleStream: SubtitleStream?
+    private var subtitleLoadTask: Task<Void, Never>?
+    private var timeObserverTask: Task<Void, Never>?
+
+    public init(player: Player = Player(), title: String = "", movieId: Int = 0, isPresented: Bool = false) {
+        self.player = player
+        self.title = title
+        self.movieId = movieId
+        self.isPresented = isPresented
+        self.showsControls = true
+        self.subtitleURL = nil
+        self.activeSubtitleTrack = -1
+        self.hdrType = nil
+    }
+
+    public var isPlaying: Bool {
+        player.isPlaying
+    }
+
+    public var currentTime: Double {
+        player.currentTime.seconds
+    }
+
+    public var duration: Double {
+        player.duration?.seconds ?? 0.0
+    }
+
+    public var volume: Float {
+        player.volume
+    }
+
+    public var isMuted: Bool {
+        player.isMuted
+    }
+
+    public var playbackRate: Double {
+        Double(player.rate)
+    }
+
+    public func load(url: URL, title: String, movieId: Int = 0, subtitleURL: URL? = nil, hdrType: PlayerHDRType? = nil) {
+        self.title = title
+        self.movieId = movieId
+        self.subtitleURL = subtitleURL
+        self.hdrType = hdrType
+        
+        try? player.play(url: url)
+        isPresented = true
+        showsControls = true
+
+        setupTimeObserver()
+
+        if let subtitleURL {
+            loadSubtitleStream(from: subtitleURL)
+        }
+    }
+
+    public func loadSubtitleStream(from url: URL) {
+        subtitleURL = url
+        subtitleLoadTask?.cancel()
+        subtitleLoadTask = Task {
+            do {
+                let (data, _) = try await URLSession.shared.data(from: url)
+                let stream = SubtitleStream()
+                await stream.load(from: data)
+                await MainActor.run {
+                    self.subtitleStream = stream
+                    self.activeSubtitleTrack = 0
+                    updateSubtitle(at: self.currentTime)
+                }
+            } catch {
+                NSLog("Failed to load subtitle stream: \(error)")
+            }
+        }
+    }
+
+    public func toggleSubtitle() {
+        if activeSubtitleTrack >= 0 {
+            activeSubtitleTrack = -1
+            currentSubtitleText = ""
+        } else if subtitleURL != nil {
+            if subtitleStream == nil, let url = subtitleURL {
+                loadSubtitleStream(from: url)
+            } else {
+                activeSubtitleTrack = 0
+                updateSubtitle(at: currentTime)
+            }
+        }
+    }
+
+    public func updateSubtitle(at time: TimeInterval) {
+        guard activeSubtitleTrack >= 0, let stream = subtitleStream else {
+            currentSubtitleText = ""
+            return
+        }
+
+        Task {
+            if let cue = await stream.cue(at: time) {
+                await MainActor.run {
+                    self.currentSubtitleText = cue.text
+                }
+            } else {
+                await MainActor.run {
+                    self.currentSubtitleText = ""
+                }
+            }
+        }
+    }
+
+    public func dismiss() {
+        timeObserverTask?.cancel()
+        player.stop()
+        isPresented = false
+    }
+
+    public func togglePlayback() {
+        if player.isPlaying {
+            try? player.pause()
+        } else {
+            try? player.play()
+        }
+    }
+
+    public func play() {
+        try? player.play()
+    }
+
+    public func pause() {
+        try? player.pause()
+    }
+
+    public func seek(to time: Double) {
+        let clamped = max(0, min(time, duration))
+        try? player.seek(to: .seconds(clamped))
+        updateSubtitle(at: clamped)
+    }
+
+    public func seek(by seconds: Double) {
+        seek(to: currentTime + seconds)
+    }
+
+    public func setVolume(_ value: Float) {
+        player.volume = value
+    }
+
+    public func toggleMute() {
+        player.isMuted.toggle()
+    }
+
+    public func setPlaybackRate(_ rate: Double) {
+        player.rate = Float(rate)
+    }
+
+    public func cyclePlaybackRate() {
+        let rates: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+        if let idx = rates.firstIndex(of: playbackRate) {
+            let next = rates[(idx + 1) % rates.count]
+            setPlaybackRate(next)
+        }
+    }
+
+    private func setupTimeObserver() {
+        timeObserverTask?.cancel()
+        timeObserverTask = Task {
+            while !Task.isCancelled {
+                let time = player.currentTime.seconds
+                let dur = player.duration?.seconds ?? 0.0
+                updateSubtitle(at: time)
+                if movieId != 0, dur > 0 {
+                    onPositionUpdate?(movieId, time, dur)
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
+    }
+}
+
+public struct SwiftVLCPlayerView: View {
+    @Bindable private var state: SwiftVLCPlayerState
+    @State private var controlFadeTask: Task<Void, Never>?
+    @State private var isHoveringHUD: Bool = false
+
+    public init(state: SwiftVLCPlayerState) {
+        self.state = state
+    }
+
+    public var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            
+            VideoView(state.player)
+                .ignoresSafeArea()
+
+            // Reuse same HUD bar overlays
+        }
+    }
+}
+*/
