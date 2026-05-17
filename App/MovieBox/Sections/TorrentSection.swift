@@ -38,6 +38,7 @@ struct TorrentSection: View {
                         )
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }

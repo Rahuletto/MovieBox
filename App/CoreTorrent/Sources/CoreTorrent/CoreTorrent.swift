@@ -249,26 +249,33 @@ public actor YTSClient {
         var components = URLComponents(string: "https://yts.mx/api/v2/list_movies.json")
         components?.queryItems = [URLQueryItem(name: "query_term", value: query)]
         guard let url = components?.url else { return [] }
-        let (data, _) = try await session.data(from: url)
-        let response = try decoder.decode(YTSResponse.self, from: data)
-        return response.data.movies?.flatMap { movie in
-            movie.torrents.map { torrent in
-                TorrentResult(
-                    title: "\(movie.title) \(torrent.quality) \(torrent.type)",
-                    magnetURI: Self.magnet(hash: torrent.hash, title: movie.title),
-                    quality: ReleaseParser.parseQuality(from: torrent.quality),
-                    hdrType: ReleaseParser.parseHDR(from: "\(torrent.quality) \(torrent.type)"),
-                    codec: torrent.videoCodec,
-                    audioFormat: nil,
-                    source: torrent.type.lowercased().contains("bluray") ? .bluray : .webdl,
-                    sizeBytes: torrent.sizeBytes,
-                    seeders: torrent.seeds,
-                    leechers: torrent.peers,
-                    trackerSource: .yts,
-                    infoHash: torrent.hash
-                )
-            }
-        } ?? []
+        
+        do {
+            let (data, _) = try await session.data(from: url)
+            let response = try decoder.decode(YTSResponse.self, from: data)
+            return response.data.movies?.flatMap { movie in
+                movie.torrents.map { torrent in
+                    TorrentResult(
+                        title: "\(movie.title) \(torrent.quality) \(torrent.type)",
+                        magnetURI: Self.magnet(hash: torrent.hash, title: movie.title),
+                        quality: ReleaseParser.parseQuality(from: torrent.quality),
+                        hdrType: ReleaseParser.parseHDR(from: "\(torrent.quality) \(torrent.type)"),
+                        codec: torrent.videoCodec,
+                        audioFormat: nil,
+                        source: torrent.type.lowercased().contains("bluray") ? .bluray : .webdl,
+                        sizeBytes: torrent.sizeBytes,
+                        seeders: torrent.seeds,
+                        leechers: torrent.peers,
+                        trackerSource: .yts,
+                        infoHash: torrent.hash
+                    )
+                }
+            } ?? []
+        } catch {
+            // YTS API unavailable - return empty gracefully
+            print("YTS search failed: \(error.localizedDescription)")
+            return []
+        }
     }
 
     private static func magnet(hash: String, title: String) -> String {

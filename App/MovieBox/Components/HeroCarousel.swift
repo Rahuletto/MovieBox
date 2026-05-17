@@ -4,6 +4,8 @@ import DesignSystem
 import Combine
 
 struct HeroCarousel: View {
+    @Environment(\.colorScheme) private var colorScheme
+
     let movies: [Movie]
     let action: (Movie) -> Void
     
@@ -11,7 +13,20 @@ struct HeroCarousel: View {
     @State private var progress: CGFloat = 0
     
     let timer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
-    
+
+    /// Fade color follows the system appearance so the carousel dissolves
+    /// into the surrounding chrome instead of always fading to black under
+    /// a light-mode UI.
+    private var fadeColor: Color {
+        colorScheme == .dark ? .black : .white
+    }
+
+    /// Foreground color for hero text/arrows/dots — the opposite of
+    /// `fadeColor` so it stays legible against the faded backdrop.
+    private var contentColor: Color {
+        colorScheme == .dark ? .white : .black
+    }
+
     var body: some View {
         guard !movies.isEmpty else { return AnyView(EmptyView()) }
         let currentMovie = movies[currentIndex]
@@ -28,43 +43,45 @@ struct HeroCarousel: View {
                                     .aspectRatio(contentMode: .fill)
                                     .transition(.opacity.animation(.easeInOut(duration: 0.5)))
                             } else {
-                                Color.black
+                                fadeColor
                             }
                         }
                     } else {
-                        Color.black
+                        fadeColor
                     }
                 }
                 .frame(maxWidth: .infinity)
-                .frame(height: 520)
+                .frame(height: 620)
                 .clipped()
                 .id("hero-bg-\(currentIndex)")
                 
-                // Dark Gradient overlays
-                LinearGradient(colors: [.clear, .black.opacity(0.8)], startPoint: .top, endPoint: .bottom)
-                    .frame(height: 520)
-                LinearGradient(colors: [.black.opacity(0.6), .clear], startPoint: .leading, endPoint: .trailing)
-                    .frame(height: 520)
+                // Gradient overlays — tinted by `fadeColor` so the carousel
+                // edges blend into the page background in both color schemes.
+                LinearGradient(colors: [.clear, fadeColor.opacity(0.7)], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 620)
+
                 
                 // Content
                 HStack {
-                    VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 20) {
                         Spacer()
                         
                         // Logo or Native Title fallback
-                        AsyncLogoView(movieId: currentMovie.id, title: currentMovie.title)
+                        AsyncLogoView(movieId: currentMovie.id, title: currentMovie.title, kind: .movie)
                         
                         HStack {
-                            GlassBadge("Trending", color: .red)
-                            GlassBadge(String(format: "%.1f IMDb", currentMovie.voteAverage), color: MovieBoxColors.accent)
+                            GlassBadge("Trending")
+                            // TMDB community rating — the real IMDb score is only
+                            // available after we hit /api/title bundle (detail screen).
+                            GlassBadge(String(format: "%.1f TMDB", currentMovie.voteAverage), color: MovieBoxColors.accent)
                         }
                         
                         Text(currentMovie.overview)
                             .font(MovieBoxTypography.body)
-                            .foregroundStyle(.white.opacity(0.9))
+                            .foregroundStyle(contentColor.opacity(0.9))
                             .lineLimit(3)
                             .frame(maxWidth: 600, alignment: .leading)
-                            .shadow(color: .black.opacity(0.8), radius: 4, x: 0, y: 2)
+//                            .shadow(color: fadeColor.opacity(0.6), radius: 4, x: 0, y: 2)
                         
                         Button {
                             action(currentMovie)
@@ -77,49 +94,53 @@ struct HeroCarousel: View {
                                 .foregroundStyle(.black)
                         }
                         .buttonStyle(.plain)
-                        .padding(.top, 8)
+                        .padding(.top, 12)
+                        .padding(.bottom, 60)
                     }
                     Spacer()
                 }
                 .padding(40)
                 
-                // Navigation Arrows (Top positioned, minimal)
-                 VStack {
-                      HStack {
-                          Button {
-                              withAnimation(.easeInOut) {
-                                  currentIndex = (currentIndex - 1 + movies.count) % movies.count
-                                  progress = 0
-                              }
-                          } label: {
-                              Image(systemName: "chevron.left")
-                                  .font(.system(size: 18, weight: .light))
-                                  .foregroundStyle(.white)
-                                  .padding(8)
-                          }
-                          .buttonStyle(.plain)
-                          .help("Previous movie")
-                          
-                          Spacer()
-                          
-                          Button {
-                              withAnimation(.easeInOut) {
-                                  currentIndex = (currentIndex + 1) % movies.count
-                                  progress = 0
-                              }
-                          } label: {
-                              Image(systemName: "chevron.right")
-                                  .font(.system(size: 18, weight: .light))
-                                  .foregroundStyle(.white)
-                                  .padding(8)
-                          }
-                          .buttonStyle(.plain)
-                          .help("Next movie")
-                      }
-                      .padding(.horizontal, 20)
-                      
-                      Spacer()
-                  }
+                // Navigation Arrows (centered vertically)
+                  VStack(spacing: 0) {
+                       Spacer()
+                           .padding(.top, 20)
+                       
+                       HStack {
+                           Button {
+                               withAnimation(.easeInOut) {
+                                   currentIndex = (currentIndex - 1 + movies.count) % movies.count
+                                   progress = 0
+                               }
+                           } label: {
+                               Image(systemName: "chevron.left")
+                                   .font(.system(size: 18, weight: .light))
+                                   .foregroundStyle(contentColor)
+                                   .padding(8)
+                           }
+                           .buttonStyle(.plain)
+                           .help("Previous movie")
+                           
+                           Spacer()
+                           
+                           Button {
+                               withAnimation(.easeInOut) {
+                                   currentIndex = (currentIndex + 1) % movies.count
+                                   progress = 0
+                               }
+                           } label: {
+                               Image(systemName: "chevron.right")
+                                   .font(.system(size: 18, weight: .light))
+                                   .foregroundStyle(contentColor)
+                                   .padding(8)
+                           }
+                           .buttonStyle(.plain)
+                           .help("Next movie")
+                       }
+                       .padding(.horizontal, 20)
+                       
+                       Spacer()
+                   }
                  
                  // Pagination Indicator
                  HStack(spacing: 8) {
@@ -127,37 +148,33 @@ struct HeroCarousel: View {
                          if index == currentIndex {
                              ZStack(alignment: .leading) {
                                  Capsule()
-                                     .fill(.white.opacity(0.3))
+                                     .fill(contentColor.opacity(0.3))
                                      .frame(width: 40, height: 4)
                                  
                                  Capsule()
-                                     .fill(.white)
+                                     .fill(contentColor)
                                      .frame(width: max(0, 40 * progress), height: 4)
                              }
                          } else {
                              Circle()
-                                 .fill(.white.opacity(0.3))
+                                 .fill(contentColor.opacity(0.3))
                                  .frame(width: 6, height: 6)
                          }
                      }
                  }
                  .padding(.bottom, 24)
              }
-             .frame(height: 520)
+             .frame(height: 620)
              .ignoresSafeArea(edges: .horizontal)
              .contentShape(Rectangle())
              .onTapGesture {
                  action(currentMovie)
              }
-             .gesture(
-                 MagnificationGesture()
-                     .onChanged { _ in }
-                     .onEnded { _ in }
-             )
-             .gesture(
-                 DragGesture(minimumDistance: 100)
+             .highPriorityGesture(
+                 DragGesture(minimumDistance: 30)
                      .onEnded { value in
                          let translation = value.translation.width
+                         
                          if translation < -50 {
                              // Swipe left -> next
                              withAnimation(.easeInOut) {

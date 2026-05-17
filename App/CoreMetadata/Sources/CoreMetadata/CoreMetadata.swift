@@ -1,6 +1,12 @@
 import Foundation
 import SwiftUI
 
+/// TMDB-shaped movie metadata. Source: TMDB only.
+///
+/// Fields sourced from OMDB (IMDb rating, IMDb id, Rotten Tomatoes, Metascore,
+/// director, awards, etc.) live exclusively on `MovieDetail.enrichment`
+/// (`MovieEnrichment`) and `MovieDetail.imdbId`. They never appear on `Movie`
+/// to keep the boundary between TMDB and OMDB explicit.
 public struct Movie: Sendable, Codable, Identifiable, Hashable {
     public let id: Int
     public let title: String
@@ -11,8 +17,6 @@ public struct Movie: Sendable, Codable, Identifiable, Hashable {
     public let voteAverage: Double
     public let genreIds: [Int]
     public var runtime: Int?
-    public var imdbRating: String?
-    public var imdbId: String?
 
     public init(
         id: Int,
@@ -23,9 +27,7 @@ public struct Movie: Sendable, Codable, Identifiable, Hashable {
         releaseDate: String,
         voteAverage: Double,
         genreIds: [Int],
-        runtime: Int? = nil,
-        imdbRating: String? = nil,
-        imdbId: String? = nil
+        runtime: Int? = nil
     ) {
         self.id = id
         self.title = title
@@ -36,8 +38,6 @@ public struct Movie: Sendable, Codable, Identifiable, Hashable {
         self.voteAverage = voteAverage
         self.genreIds = genreIds
         self.runtime = runtime
-        self.imdbRating = imdbRating
-        self.imdbId = imdbId
     }
 }
 
@@ -65,6 +65,28 @@ public struct CastMember: Sendable, Codable, Identifiable, Hashable {
     }
 }
 
+/// Rich metadata sourced from OMDB and merged in server-side. Lives alongside
+/// the TMDB-derived fields so we never block on TMDB for ratings / awards /
+/// director / etc.
+public struct MovieEnrichment: Sendable, Codable, Hashable {
+    public let imdbRating: Double?       // 7.8
+    public let imdbVotes: Int?           // 1_234_567
+    public let metascore: Int?           // 74 (out of 100)
+    public let rottenTomatoes: Int?      // 91 (percent)
+    public let runtimeMin: Int?
+    public let rated: String?            // "PG-13"
+    public let released: String?         // "07 Nov 2014"
+    public let director: String?
+    public let writer: String?
+    public let actors: String?           // comma-separated
+    public let awards: String?
+    public let country: String?
+    public let language: String?
+    public let boxOffice: String?
+    public let production: String?
+    public let genre: String?            // comma-separated
+}
+
 public struct MovieDetail: Sendable, Codable, Identifiable, Hashable {
     public var id: Int { movie.id }
     public let movie: Movie
@@ -72,13 +94,33 @@ public struct MovieDetail: Sendable, Codable, Identifiable, Hashable {
     public let cast: [CastMember]
     public let trailerURL: URL?
     public let similar: [Movie]
+    /// Pre-resolved fanart logo (returned by the backend bundle endpoint).
+    /// When non-nil, `AsyncLogoView` will skip its own network fetch.
+    public let logoURL: URL?
+    /// IMDb id pulled from TMDB external_ids — useful for subtitle / OMDb lookups
+    /// without doing another /external_ids call.
+    public let imdbId: String?
+    /// OMDB-sourced enrichment (IMDB rating, RT, Metascore, director, awards…).
+    public let enrichment: MovieEnrichment?
 
-    public init(movie: Movie, genres: [Genre], cast: [CastMember] = [], trailerURL: URL? = nil, similar: [Movie] = []) {
+    public init(
+        movie: Movie,
+        genres: [Genre],
+        cast: [CastMember] = [],
+        trailerURL: URL? = nil,
+        similar: [Movie] = [],
+        logoURL: URL? = nil,
+        imdbId: String? = nil,
+        enrichment: MovieEnrichment? = nil
+    ) {
         self.movie = movie
         self.genres = genres
         self.cast = cast
         self.trailerURL = trailerURL
         self.similar = similar
+        self.logoURL = logoURL
+        self.imdbId = imdbId
+        self.enrichment = enrichment
     }
 }
 
@@ -142,10 +184,12 @@ public actor MetadataClient {
     private let mode: MetadataEndpointMode?
     private let session: URLSession
     private let decoder: JSONDecoder
+    private let tmdbToken: String?
 
-    public init(mode: MetadataEndpointMode? = nil, session: URLSession = .shared) {
+    public init(mode: MetadataEndpointMode? = nil, session: URLSession = .shared, tmdbToken: String? = nil) {
         self.mode = mode
         self.session = session
+        self.tmdbToken = tmdbToken
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         self.decoder = decoder
@@ -182,6 +226,33 @@ public actor MetadataClient {
     }
 
     public func movieDetail(id: Int, kind: MediaKind = .movie) async throws -> MovieDetail {
+        guard let mode else { throw MetadataError.missingConfiguration }
+
+        // Backend mode: use the bundle endpoint (1 RTT, server resolves credits +
+        // similar + external_ids + videos + fanart logo from KV).
+        if case .backend(let baseURL, let appToken) = mode {
+            let url = baseURL.appending(path: "api/title/\(kind.rawValue)/\(id)")
+            var request = URLRequest(url: url)
+            request.setValue(appToken, forHTTPHeaderField: "X-MovieBox-Token")
+            request.timeoutInterval = 20
+            let (data, response) = try await session.data(for: request)
+            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                throw MetadataError.upstream(http.statusCode)
+            }
+            let bundle = try decoder.decode(TitleBundleDTO.self, from: data)
+            let detail = bundle.detail(kind: kind)
+
+            // Pre-seed LogoCache so AsyncLogoView in the detail header skips its fetch.
+            if let logoURL = detail.logoURL {
+                await LogoCache.shared.seed(kind: kind, id: id, url: logoURL)
+            } else {
+                // Negative result is also worth seeding so we don't re-resolve.
+                await LogoCache.shared.seed(kind: kind, id: id, url: nil)
+            }
+            return detail
+        }
+
+        // Direct mode (no backend): fall back to the three individual TMDB calls.
         let base = kind == .movie ? "/movie" : "/tv"
         async let movieResponse: TMDBMovieDTO = request(path: "\(base)/\(id)")
         async let creditsResponse: CreditsResponse = request(path: "\(base)/\(id)/credits")
@@ -193,24 +264,68 @@ public actor MetadataClient {
         return MovieDetail(movie: movie, genres: try await movieResponse.genres ?? [], cast: Array(credits), similar: similar)
     }
 
-    public func movieLogoPath(id: Int, kind: MediaKind = .movie) async throws -> String? {
-        let base = kind == .movie ? "/movie" : "/tv"
-        let response: ImagesResponse = try await request(
-            path: "\(base)/\(id)/images",
-            queryItems: [URLQueryItem(name: "include_image_language", value: "en,null")]
-        )
-        return response.logos.first?.filePath
+    /// Returns an absolute Fanart.tv logo URL (NOT a TMDB path).
+    /// Single backend RTT — server-side resolves external_ids → fanart and caches
+    /// every step (including negatives) in KV. Frontend additionally caches in
+    /// process memory via `LogoCache` to deduplicate concurrent lookups.
+    public func movieLogoURL(id: Int, kind: MediaKind = .movie) async throws -> URL? {
+        let cache = LogoCache.shared
+        if let cached = await cache.lookup(kind: kind, id: id) {
+            return cached.url
+        }
+
+        return try await cache.resolve(kind: kind, id: id) { [self] in
+            do {
+                let response: LogoResponse = try await logoRequest(kind: kind, id: id)
+                guard let raw = response.url else { return nil }
+                return URL(string: raw)
+            } catch {
+                return nil
+            }
+        }
     }
 
-    public func movieImages(id: Int, kind: MediaKind = .movie) async throws -> (logo: String?, backdrop: String?) {
+    /// Deprecated: previous API returned a String that callers mistakenly fed back
+    /// into `imageURL(path:)`, producing broken `https://image.tmdb.org/t/p/w1000https://...`
+    /// URLs. Use `movieLogoURL(id:kind:)` instead.
+    @available(*, deprecated, renamed: "movieLogoURL(id:kind:)")
+    public func movieLogoPath(id: Int, kind: MediaKind = .movie) async throws -> String? {
+        return try await movieLogoURL(id: id, kind: kind)?.absoluteString
+    }
+
+    private func logoRequest(kind: MediaKind, id: Int) async throws -> LogoResponse {
+        guard let mode else { throw MetadataError.missingConfiguration }
+        switch mode {
+        case .backend(let baseURL, let appToken):
+            let url = baseURL.appending(path: "api/logo/\(kind.rawValue)/\(id)")
+            var request = URLRequest(url: url)
+            request.setValue(appToken, forHTTPHeaderField: "X-MovieBox-Token")
+            request.timeoutInterval = 20
+            let (data, response) = try await session.data(for: request)
+            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                throw MetadataError.upstream(http.statusCode)
+            }
+            return try decoder.decode(LogoResponse.self, from: data)
+        case .direct:
+            // Direct mode has no backend; cannot resolve logos without it.
+            return LogoResponse(url: nil)
+        }
+    }
+
+    public func movieImages(id: Int, kind: MediaKind = .movie) async throws -> (logo: URL?, backdrop: String?) {
         let base = kind == .movie ? "/movie" : "/tv"
+
+        // Get logo from Fanart (absolute URL)
+        let logoURL = try await movieLogoURL(id: id, kind: kind)
+
+        // Get backdrop from TMDB (relative path — combine with `imageURL(path:)` to render)
         let response: ImagesResponse = try await request(
-            path: "\(base)/\(id)/images",
-            queryItems: [URLQueryItem(name: "include_image_language", value: "en,null")]
+            path: "\(base)/\(id)/images"
         )
+
         return (
-            logo: response.logos.first?.filePath,
-            backdrop: response.backdrops.first?.filePath
+            logo: logoURL,
+            backdrop: (response.backdrops ?? []).first?.filePath
         )
     }
 
@@ -222,6 +337,20 @@ public actor MetadataClient {
     private func request<T: Decodable & Sendable>(path: String, queryItems: [URLQueryItem] = []) async throws -> T {
         guard let mode else { throw MetadataError.missingConfiguration }
         var request = try makeRequest(path: path, queryItems: queryItems, mode: mode)
+        request.timeoutInterval = 20
+        let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw MetadataError.upstream(http.statusCode)
+        }
+        return try decoder.decode(T.self, from: data)
+    }
+    
+    private func requestDirect<T: Decodable & Sendable>(path: String, queryItems: [URLQueryItem] = [], token: String) async throws -> T {
+        var components = URLComponents(string: "https://api.themoviedb.org/3\(path)")
+        components?.queryItems = queryItems.isEmpty ? nil : queryItems
+        guard let url = components?.url else { throw MetadataError.invalidURL }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 20
         let (data, response) = try await session.data(for: request)
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
@@ -294,8 +423,290 @@ private struct CreditsResponse: Decodable, Sendable {
 }
 
 private struct ImagesResponse: Decodable, Sendable {
-    let logos: [TMDBImageDTO]
-    let backdrops: [TMDBImageDTO]
+    let posters: [TMDBImageDTO]?
+    let backdrops: [TMDBImageDTO]?
+}
+
+private struct LogoResponse: Decodable, Sendable {
+    let url: String?
+}
+
+/// Process-wide cache + request coalescer for resolved logo URLs.
+///
+/// - Positive cache entries live for 24h (the backend's URL is stable).
+/// - Negative entries (movies/TV with no logo on fanart) live for 1h to avoid
+///   re-hammering the backend during scrolls/re-renders.
+/// - Concurrent requests for the same `(kind, id)` are coalesced onto a single
+///   in-flight Task so we never do duplicate network work.
+public actor LogoCache {
+    public struct Entry: Sendable {
+        public let url: URL?
+        public let expires: Date
+    }
+
+    public static let shared = LogoCache()
+
+    private var entries: [String: Entry] = [:]
+    private var inFlight: [String: Task<URL?, Error>] = [:]
+
+    private static let positiveTTL: TimeInterval = 60 * 60 * 24  // 24h
+    private static let negativeTTL: TimeInterval = 60 * 60       // 1h
+
+    private func key(_ kind: MediaKind, _ id: Int) -> String { "\(kind.rawValue):\(id)" }
+
+    /// Returns a cached entry if still valid, otherwise nil.
+    public func lookup(kind: MediaKind, id: Int) -> Entry? {
+        let k = key(kind, id)
+        guard let entry = entries[k] else { return nil }
+        if entry.expires < Date() {
+            entries.removeValue(forKey: k)
+            return nil
+        }
+        return entry
+    }
+
+    /// Resolves the logo URL, deduplicating concurrent calls.
+    /// `loader` is invoked at most once per (kind, id) per refresh cycle.
+    public func resolve(
+        kind: MediaKind,
+        id: Int,
+        loader: @Sendable @escaping () async -> URL?
+    ) async throws -> URL? {
+        let k = key(kind, id)
+        if let entry = lookup(kind: kind, id: id) { return entry.url }
+        if let inflight = inFlight[k] { return try await inflight.value }
+
+        let task = Task<URL?, Error> {
+            await loader()
+        }
+        inFlight[k] = task
+        defer { inFlight.removeValue(forKey: k) }
+
+        let resolved = try await task.value
+        let ttl = resolved == nil ? Self.negativeTTL : Self.positiveTTL
+        entries[k] = Entry(url: resolved, expires: Date().addingTimeInterval(ttl))
+        return resolved
+    }
+
+    public func clear() {
+        entries.removeAll()
+    }
+
+    /// Seed an entry from a known source (e.g., the backend bundle endpoint)
+    /// so subsequent lookups are immediate.
+    public func seed(kind: MediaKind, id: Int, url: URL?) {
+        let ttl = url == nil ? Self.negativeTTL : Self.positiveTTL
+        entries[key(kind, id)] = Entry(url: url, expires: Date().addingTimeInterval(ttl))
+    }
+}
+
+/// Prefetches detail bundles in the background to warm the backend KV cache.
+/// Triggered on hover (and could also be used for carousel-next-slide warming).
+/// Idempotent — never re-prefetches an id already fetched or in-flight.
+public actor Prefetcher {
+    public static let shared = Prefetcher()
+
+    private var done: Set<String> = []
+    private var inflight: Set<String> = []
+    private let session: URLSession
+
+    public init() {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 15
+        config.httpMaximumConnectionsPerHost = 6
+        // Discard the response body — we only care about warming the backend cache.
+        self.session = URLSession(configuration: config)
+    }
+
+    /// Fire-and-forget — warms `/api/title/:kind/:id` for the given movie.
+    /// Safe to call repeatedly; deduplicates internally.
+    public func prefetchDetail(id: Int, kind: MediaKind, mode: MetadataEndpointMode) {
+        guard case .backend(let baseURL, let appToken) = mode else { return }
+        let key = "\(kind.rawValue):\(id)"
+        if done.contains(key) || inflight.contains(key) { return }
+        inflight.insert(key)
+
+        let url = baseURL.appending(path: "api/title/\(kind.rawValue)/\(id)")
+        var request = URLRequest(url: url)
+        request.setValue(appToken, forHTTPHeaderField: "X-MovieBox-Token")
+        request.timeoutInterval = 15
+
+        Task.detached { [session] in
+            // We intentionally swallow errors — prefetch is best-effort.
+            _ = try? await session.data(for: request)
+            await Prefetcher.shared.complete(key: key)
+        }
+    }
+
+    /// Pre-warms an image URL through the on-disk URLCache so a subsequent
+    /// `CachedImageView` / `AsyncImage` returns instantly.
+    public func prefetchImage(url: URL?) {
+        guard let url else { return }
+        let key = "img:\(url.absoluteString)"
+        if done.contains(key) || inflight.contains(key) { return }
+        inflight.insert(key)
+
+        Task.detached { [session] in
+            _ = try? await session.data(from: url)
+            await Prefetcher.shared.complete(key: key)
+        }
+    }
+
+    private func complete(key: String) {
+        inflight.remove(key)
+        done.insert(key)
+    }
+
+    /// Clear the dedupe set — call when user signs out / changes endpoints.
+    public func reset() {
+        done.removeAll()
+        inflight.removeAll()
+    }
+}
+
+// MARK: - Backend bundle decoding
+
+private struct TitleBundleDTO: Decodable, Sendable {
+    let id: Int
+    let title: String?
+    let name: String?
+    let overview: String?
+    let posterPath: String?
+    let backdropPath: String?
+    let releaseDate: String?
+    let firstAirDate: String?
+    let voteAverage: Double?
+    let genreIds: [Int]?
+    let runtime: Int?
+    let episodeRunTime: [Int]?
+    let genres: [Genre]?
+    let credits: CreditsBundleDTO?
+    let similar: SimilarBundleDTO?
+    let externalIds: ExternalIdsDTO?
+    let videos: VideosBundleDTO?
+    let movieboxLogo: String?
+    /// OMDB-sourced enrichment payload (ratings, director, awards, etc.).
+    /// This is the *only* place OMDB-derived data enters the type system.
+    let movieboxEnrichment: EnrichmentDTO?
+
+    func detail(kind: MediaKind) -> MovieDetail {
+        let resolvedTitle = title ?? name ?? "Untitled"
+        let resolvedDate = releaseDate ?? firstAirDate ?? ""
+        // Runtime: prefer TMDB's; for TV, fall back to first episode runtime;
+        // last resort OMDB's reported runtime. Pure TMDB-vs-OMDB precedence.
+        let resolvedRuntime = runtime ?? episodeRunTime?.first ?? movieboxEnrichment?.runtimeMin
+        // IMDb id is always read from `external_ids.imdb_id` — the backend has
+        // already merged any OMDB-recovered id into that field, so this stays
+        // a single source of truth on the wire.
+        let resolvedImdbId = externalIds?.imdbId
+
+        let movie = Movie(
+            id: id,
+            title: resolvedTitle,
+            overview: overview ?? "",
+            posterPath: posterPath,
+            backdropPath: backdropPath,
+            releaseDate: resolvedDate,
+            voteAverage: voteAverage ?? 0,
+            genreIds: genreIds ?? genres?.map(\.id) ?? [],
+            runtime: resolvedRuntime
+        )
+
+        let cast = (credits?.cast ?? []).prefix(16).map(\.castMember)
+        let similarMovies = (similar?.results ?? []).map(\.movie)
+        let trailer = videos?.preferredTrailerURL
+
+        return MovieDetail(
+            movie: movie,
+            genres: genres ?? [],
+            cast: Array(cast),
+            trailerURL: trailer,
+            similar: similarMovies,
+            logoURL: movieboxLogo.flatMap(URL.init(string:)),
+            imdbId: resolvedImdbId,
+            enrichment: movieboxEnrichment?.toEnrichment()
+        )
+    }
+}
+
+private struct EnrichmentDTO: Decodable, Sendable {
+    let imdbRating: Double?
+    let imdbVotes: Int?
+    let metascore: Int?
+    let rottenTomatoes: Int?
+    let runtimeMin: Int?
+    let rated: String?
+    let released: String?
+    let director: String?
+    let writer: String?
+    let actors: String?
+    let awards: String?
+    let country: String?
+    let language: String?
+    let boxOffice: String?
+    let production: String?
+    let genre: String?
+
+    func toEnrichment() -> MovieEnrichment {
+        MovieEnrichment(
+            imdbRating: imdbRating,
+            imdbVotes: imdbVotes,
+            metascore: metascore,
+            rottenTomatoes: rottenTomatoes,
+            runtimeMin: runtimeMin,
+            rated: rated,
+            released: released,
+            director: director,
+            writer: writer,
+            actors: actors,
+            awards: awards,
+            country: country,
+            language: language,
+            boxOffice: boxOffice,
+            production: production,
+            genre: genre
+        )
+    }
+}
+
+private struct CreditsBundleDTO: Decodable, Sendable {
+    let cast: [TMDBCastDTO]
+}
+
+private struct SimilarBundleDTO: Decodable, Sendable {
+    let results: [TMDBMovieDTO]
+}
+
+private struct ExternalIdsDTO: Decodable, Sendable {
+    let imdbId: String?
+    let tvdbId: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case imdbId = "imdb_id"
+        case tvdbId = "tvdb_id"
+    }
+}
+
+private struct VideosBundleDTO: Decodable, Sendable {
+    let results: [VideoDTO]
+
+    /// Pick the first official YouTube trailer; fall back to any trailer / teaser.
+    var preferredTrailerURL: URL? {
+        let trailers = results.filter { $0.site?.lowercased() == "youtube" && $0.key != nil }
+        let chosen = trailers.first(where: { ($0.type ?? "").lowercased() == "trailer" && ($0.official ?? false) })
+            ?? trailers.first(where: { ($0.type ?? "").lowercased() == "trailer" })
+            ?? trailers.first(where: { ($0.type ?? "").lowercased() == "teaser" })
+            ?? trailers.first
+        guard let key = chosen?.key else { return nil }
+        return URL(string: "https://www.youtube.com/watch?v=\(key)")
+    }
+}
+
+private struct VideoDTO: Decodable, Sendable {
+    let key: String?
+    let site: String?
+    let type: String?
+    let official: Bool?
 }
 
 private struct TMDBImageDTO: Decodable, Sendable {

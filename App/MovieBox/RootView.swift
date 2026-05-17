@@ -42,6 +42,13 @@ public final class LogStore {
     }
 }
 
+@MainActor
+extension AppRouter {
+    func backFromDetail() {
+        show(activeTab)
+    }
+}
+
 struct RootView: View {
     @Environment(AppRouter.self) private var router
     @Environment(PlayerState.self) private var playerState
@@ -119,45 +126,48 @@ struct RootView: View {
 
     @ViewBuilder
     private var content: some View {
-        ZStack {
-            // 1. Home View
-            HomeView()
-                .opacity(router.activeTab == .home ? 1 : 0)
-                .allowsHitTesting(router.activeTab == .home)
+        // Movie Detail View takes full page
+        if case .movieDetail(let id) = router.selectedRoute {
+            MovieDetailView(
+                movieId: id,
+                kind: router.detailKind,
+                orchestrator: streamingOrchestrator,
+                onBack: { router.backFromDetail() }
+            )
+            .id("movie-detail-\(id)")
+        } else {
+            // Tab-based views
+            ZStack {
+                // 1. Home View
+                HomeView()
+                    .opacity(router.activeTab == .home ? 1 : 0)
+                    .allowsHitTesting(router.activeTab == .home)
 
-            // 2. Movies Catalog
-            CatalogView(kind: .movie)
-                .opacity(router.activeTab == .movies ? 1 : 0)
-                .allowsHitTesting(router.activeTab == .movies)
+                // 2. Movies Catalog
+                CatalogView(kind: .movie)
+                    .opacity(router.activeTab == .movies ? 1 : 0)
+                    .allowsHitTesting(router.activeTab == .movies)
 
-            // 3. TV Shows Catalog
-            CatalogView(kind: .tv)
-                .opacity(router.activeTab == .tvShows ? 1 : 0)
-                .allowsHitTesting(router.activeTab == .tvShows)
+                // 3. TV Shows Catalog
+                CatalogView(kind: .tv)
+                    .opacity(router.activeTab == .tvShows ? 1 : 0)
+                    .allowsHitTesting(router.activeTab == .tvShows)
 
-            // 4. Library View
-            LibraryView()
-                .opacity(router.activeTab == .library ? 1 : 0)
-                .allowsHitTesting(router.activeTab == .library)
+                // 4. Library View
+                LibraryView()
+                    .opacity(router.activeTab == .library ? 1 : 0)
+                    .allowsHitTesting(router.activeTab == .library)
 
-            // 5. Downloads View
-            DownloadsView()
-                .opacity(router.activeTab == .downloads ? 1 : 0)
-                .allowsHitTesting(router.activeTab == .downloads)
+                // 5. Downloads View
+                DownloadsView()
+                    .opacity(router.activeTab == .downloads ? 1 : 0)
+                    .allowsHitTesting(router.activeTab == .downloads)
 
-            // 6. Search View
-            SearchView()
-                .opacity(router.activeTab == .search ? 1 : 0)
-                .allowsHitTesting(router.activeTab == .search)
-
-            // 7. Movie Detail View (Transient Overlay)
-            if case .movieDetail(let id) = router.selectedRoute {
-                MovieDetailView(movieId: id, orchestrator: streamingOrchestrator)
-                    .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .center)))
-                    .id("movie-detail-\(id)")
+                // 6. Search View
+                SearchView()
+                    .opacity(router.activeTab == .search ? 1 : 0)
+                    .allowsHitTesting(router.activeTab == .search)
             }
-
-
         }
     }
 
@@ -176,923 +186,78 @@ struct RootView: View {
 
 /// Approximate height reserved at the top of each screen so content scrolls
 /// beneath the floating pill tab bar instead of being hidden by it.
-private let topBarReservedHeight: CGFloat = 54
+let topBarReservedHeight: CGFloat = 54
 
-// MARK: - Home
+// MARK: - Home (moved to Views/HomeView.swift)
 
-struct HomeView: View {
-    @Environment(AppRouter.self) private var router
-    @Query private var settings: [AppSettings]
-    @Query private var ratings: [RatingRecord]
-    @Query private var storedMovies: [MovieRecord]
-    @State private var rows: [MetadataCategory: [Movie]] = [:]
-    @State private var recommended: [Movie] = []
-    @State private var continueWatching: [MovieRecord] = []
-    @State private var errorMessage: String?
-    @State private var isLoading = false
-    @State private var scrollOffset: CGFloat = 0
+// MARK: - Movie Detail (moved to Views/Detail/MovieDetailView.swift)
 
-    var body: some View {
-        ZStack {
-            // Ambient subtle background gradient for an elite glow
-            RadialGradient(
-                colors: [Color.red.opacity(0.12), Color.clear],
-                center: .topLeading,
-                startRadius: 20,
-                endRadius: 480
-            )
-            .ignoresSafeArea()
-            
-
-
-            if metadataMode == nil {
-                ContentUnavailableView(
-                    "Metadata Not Configured",
-                    systemImage: "key",
-                    description: Text("Open Settings and add either a backend URL with app token or a TMDB bearer token.")
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(.top, topBarReservedHeight)
-            } else {
-                ScrollView {
-                    ZStack(alignment: .top) {
-                        LazyVStack(alignment: .leading, spacing: 42) {
-                                 if let trending = rows[.trending], !trending.isEmpty {
-                                     HeroCarousel(movies: Array(trending.prefix(5))) { movie in
-                                         router.showDetail(id: movie.id, kind: .movie)
-                                     }
-                                 }
-
-                            if !continueWatching.isEmpty {
-                                ContinueWatchingRow(records: continueWatching) { movie in
-                                    router.showDetail(id: movie.tmdbId, kind: .movie)
-                                }
-                            }
-
-                            if !recommended.isEmpty {
-                                HorizontalMovieRow(title: "Recommended For You", items: recommended) { movie in
-                                    MoviePosterCard(
-                                        title: movie.title,
-                                        subtitle: movie.releaseDate,
-                                        posterURL: MetadataClient().imageURL(path: movie.posterPath)
-                                    ) {
-                                        router.showDetail(id: movie.id, kind: .movie)
-                                    }
-                                }
-                            }
-
-                            if isLoading && rows.isEmpty {
-                                ProgressView("Loading movies...")
-                                    .controlSize(.large)
-                                    .frame(maxWidth: .infinity, minHeight: 260)
-                            }
-
-                            ForEach(MetadataCategory.allCases) { category in
-                                if let movies = rows[category], !movies.isEmpty {
-                                    HorizontalMovieRow(title: category.rawValue, items: movies) { movie in
-                                        MoviePosterCard(
-                                            title: movie.title,
-                                            subtitle: movie.releaseDate,
-                                            posterURL: MetadataClient().imageURL(path: movie.posterPath)
-                                        ) {
-                                            router.showDetail(id: movie.id, kind: .movie)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        .padding(.bottom, 28)
-                        
-                        // Scroll offset tracker (invisible)
-                        GeometryReader { geo in
-                            Color.clear.preference(key: ScrollOffsetPreferenceKey.self, value: geo.frame(in: .named("scroll")).minY)
-                        }
-                        .frame(height: 0)
-                    }
-                }
-                .coordinateSpace(name: "scroll")
-                .onPreferenceChange(ScrollOffsetPreferenceKey.self) { offset in
-                    scrollOffset = offset
-                }
-                .scrollIndicators(.hidden)
-                .blur(radius: errorMessage != nil ? 18 : 0)
-                .opacity(rows.isEmpty ? 0 : 1)
-            }
-            
-            // Full screen loading (if rows is empty)
-            if isLoading && rows.isEmpty && metadataMode != nil {
-                ProgressView("Loading movies...")
-                    .controlSize(.large)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-
-            // Fixed centered Error card floating on a blurred panel
-            if let errorMessage {
-                ZStack {
-                    Rectangle()
-                        .fill(.ultraThinMaterial)
-                        .ignoresSafeArea()
-                    
-                    if let mode = metadataMode {
-                        RetryCard(message: errorMessage) {
-                            Task { await load(mode: mode) }
-                        }
-                        .frame(maxWidth: 420)
-                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
-                    } else {
-                        RetryCard(message: errorMessage) {
-                            if let mode = metadataMode {
-                                Task { await load(mode: mode) }
-                            }
-                        }
-                        .frame(maxWidth: 420)
-                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-        .ignoresSafeArea(edges: .top)
-        .task(id: settingsKey) {
-            guard let mode = metadataMode else { return }
-            await load(mode: mode)
-        }
-    }
-
-    private var metadataMode: MetadataEndpointMode? {
-        settings.first?.metadataMode
-    }
-
-    private var settingsKey: String {
-        settings.first?.cacheKey ?? "missing"
-    }
-
-    private func load(mode: MetadataEndpointMode) async {
-        isLoading = true
-        errorMessage = nil
-        let client = MetadataClient(mode: mode)
-        do {
-            async let trending = client.movies(for: .trending)
-            async let popular = client.movies(for: .popular)
-            async let topRated = client.movies(for: .topRated)
-            async let nowPlaying = client.movies(for: .nowPlaying)
-            rows = [
-                .trending: try await trending,
-                .popular: try await popular,
-                .topRated: try await topRated,
-                .nowPlaying: try await nowPlaying
-            ]
-
-            let allMovies = (try await trending) + (try await popular) + (try await topRated)
-            let ratingSignals = ratings.map { RatingSignal(tmdbId: $0.tmdbId, rating: $0.rating, genreIds: $0.genres) }
-            if !ratingSignals.isEmpty {
-                let engine = GenreAffinityEngine()
-                let candidates = allMovies.map { RecommendationCandidate(id: $0.id, genreIds: $0.genreIds, baseScore: Float($0.voteAverage / 10)) }
-                let ranked = await engine.rank(candidates: candidates, ratings: ratingSignals)
-                let rankedIds = Set(ranked.map(\.id))
-                recommended = allMovies.filter { rankedIds.contains($0.id) }.prefix(12).map { $0 }
-            }
-
-            continueWatching = storedMovies
-                .filter { $0.watchedFraction > 0.05 && $0.watchedFraction < 0.95 }
-                .sorted { ($0.lastWatchedAt ?? .distantPast) > ($1.lastWatchedAt ?? .distantPast) }
-                .prefix(8)
-                .map { $0 }
-        } catch {
-            if let urlError = error as? URLError, urlError.code == .cancelled {
-                return
-            }
-            LogStore.shared.log("Error loading Catalog: \(error)")
-            LogStore.shared.log("Stack Trace:\n\(Thread.callStackSymbols.prefix(8).joined(separator: "\n"))")
-            errorMessage = error.localizedDescription
-        }
-        isLoading = false
-    }
-}
-
-private struct ContinueWatchingRow: View {
-    @Environment(AppRouter.self) private var router
-    let records: [MovieRecord]
-    let action: (MovieRecord) -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Continue Watching")
-                .font(MovieBoxTypography.title)
-                .foregroundStyle(.primary)
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 14) {
-                    ForEach(records, id: \.tmdbId) { record in
-                        Button {
-                            action(record)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 6) {
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .fill(Color(nsColor: .controlBackgroundColor))
-                                    .frame(width: 180, height: 100)
-                                    .overlay {
-                                        Image(systemName: "film.stack")
-                                            .font(.system(size: 28))
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    .overlay(alignment: .bottom) {
-                                        ProgressView(value: record.watchedFraction)
-                                            .progressViewStyle(.linear)
-                                            .tint(.blue)
-                                            .padding(.horizontal, 4)
-                                            .padding(.bottom, 4)
-                                    }
-
-                                Text(record.title)
-                                    .font(.caption)
-                                    .fontWeight(.medium)
-                                    .lineLimit(1)
-                                    .frame(width: 180, alignment: .leading)
-
-                                Text("\(Int(record.watchedFraction * 100))% watched")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 180, alignment: .leading)
-                            }
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 4)
-            }
-        }
-    }
-}
-
-private struct AsyncLogoView: View {
-    let movieId: Int
-    let title: String
-    
-    @State private var logoURL: URL?
-    @State private var loadFailed = false
-    @Query private var settings: [AppSettings]
-    
-    var body: some View {
-        Group {
-            if let url = logoURL {
-                AsyncImage(url: url) { phase in
-                    if let image = phase.image {
-                        image
-                            .resizable()
-                            .scaledToFit()
-                            .frame(maxHeight: 160, alignment: .bottomLeading)
-                            .shadow(color: .black.opacity(0.6), radius: 10, x: 0, y: 5)
-                    } else if phase.error != nil {
-                        fallbackTitle
-                    } else {
-                        ProgressView().frame(height: 160)
-                    }
-                }
-            } else if loadFailed {
-                fallbackTitle
-            } else {
-                ProgressView().frame(height: 160)
-            }
-        }
-        .task(id: movieId) {
-            guard let mode = resolveMetadataMode(from: settings) else {
-                loadFailed = true
-                return
-            }
-            do {
-                let client = MetadataClient(mode: mode)
-                // Timeout after 2 seconds
-                let path = try await withThrowingTaskGroup(of: String?.self) { group in
-                    group.addTask {
-                        try await client.movieLogoPath(id: movieId)
-                    }
-                    try? await Task.sleep(nanoseconds: 2_000_000_000) // 2 seconds
-                    group.cancelAll()
-                    return try await group.next() ?? nil
-                }
-                if let path = path {
-                    logoURL = client.imageURL(path: path, width: 1000)
-                } else {
-                    loadFailed = true
-                }
-            } catch {
-                loadFailed = true
-            }
-        }
-    }
-    
-    private var fallbackTitle: some View {
-        Text(title)
-            .font(.system(size: 24, weight: .bold))
-            .foregroundStyle(.white)
-            .shadow(color: .black.opacity(0.6), radius: 10, x: 0, y: 5)
-            .frame(maxHeight: 160, alignment: .bottomLeading)
-            .lineLimit(2)
-    }
-}
-
-private struct HeroCarousel: View {
-    let movies: [Movie]
-    let action: (Movie) -> Void
-    
-    @State private var currentIndex: Int = 0
-    @State private var progress: CGFloat = 0
-    
-    let timer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
-    
-    var body: some View {
-        guard !movies.isEmpty else { return AnyView(EmptyView()) }
-        let currentMovie = movies[currentIndex]
-        
-        return AnyView(
-            ZStack(alignment: .bottom) {
-                // Background Backdrop
-                ZStack {
-                    if let backdropPath = currentMovie.backdropPath {
-                        AsyncImage(url: MetadataClient().imageURL(path: backdropPath, width: 1920)) { phase in
-                            if let image = phase.image {
-                                image
-                                    .resizable()
-                                    .aspectRatio(contentMode: .fill)
-                                    .transition(.opacity.animation(.easeInOut(duration: 0.5)))
-                            } else {
-                                Color.black
-                            }
-                        }
-                    } else {
-                        Color.black
-                    }
-                }
-                .frame(maxWidth: .infinity)
-                .frame(height: 520)
-                .clipped()
-                .id("hero-bg-\(currentIndex)")
-                
-                // Dark Gradient overlays
-                LinearGradient(colors: [.clear, .black.opacity(0.8)], startPoint: .top, endPoint: .bottom)
-                    .frame(height: 520)
-                LinearGradient(colors: [.black.opacity(0.6), .clear], startPoint: .leading, endPoint: .trailing)
-                    .frame(height: 520)
-                
-                // Content
-                HStack {
-                    VStack(alignment: .leading, spacing: 16) {
-                        Spacer()
-                        
-                        // Logo or Native Title fallback
-                        AsyncLogoView(movieId: currentMovie.id, title: currentMovie.title)
-                        
-                        HStack {
-                            GlassBadge("Trending", color: .red)
-                            GlassBadge(String(format: "%.1f IMDb", currentMovie.voteAverage), color: MovieBoxColors.accent)
-                        }
-                        
-                        Text(currentMovie.overview)
-                            .font(MovieBoxTypography.body)
-                            .foregroundStyle(.white.opacity(0.9))
-                            .lineLimit(3)
-                            .frame(maxWidth: 600, alignment: .leading)
-                            .shadow(color: .black.opacity(0.8), radius: 4, x: 0, y: 2)
-                        
-                        Button {
-                            action(currentMovie)
-                        } label: {
-                            Label("Play Now", systemImage: "play.fill")
-                                .font(.headline)
-                                .padding(.horizontal, 20)
-                                .padding(.vertical, 10)
-                                .background(.white, in: Capsule())
-                                .foregroundStyle(.black)
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.top, 8)
-                    }
-                    Spacer()
-                }
-                .padding(40)
-                
-                // Navigation Arrows (Top positioned, minimal)
-                 VStack {
-                     HStack {
-                         Button {
-                             withAnimation(.easeInOut) {
-                                 currentIndex = (currentIndex - 1 + movies.count) % movies.count
-                                 progress = 0
-                             }
-                         } label: {
-                             Image(systemName: "chevron.left")
-                                 .font(.system(size: 18, weight: .light))
-                                 .foregroundStyle(.white)
-                                 .padding(8)
-                         }
-                         .buttonStyle(.plain)
-                         .help("Previous movie")
-                         
-                         Spacer()
-                         
-                         Button {
-                             withAnimation(.easeInOut) {
-                                 currentIndex = (currentIndex + 1) % movies.count
-                                 progress = 0
-                             }
-                         } label: {
-                             Image(systemName: "chevron.right")
-                                 .font(.system(size: 18, weight: .light))
-                                 .foregroundStyle(.white)
-                                 .padding(8)
-                         }
-                         .buttonStyle(.plain)
-                         .help("Next movie")
-                     }
-                     .padding(.horizontal, 20)
-                     
-                     Spacer()
-                 }
-                
-                // Pagination Indicator
-                HStack(spacing: 8) {
-                    ForEach(0..<movies.count, id: \.self) { index in
-                        if index == currentIndex {
-                            ZStack(alignment: .leading) {
-                                Capsule()
-                                    .fill(.white.opacity(0.3))
-                                    .frame(width: 40, height: 4)
-                                
-                                Capsule()
-                                    .fill(.white)
-                                    .frame(width: max(0, 40 * progress), height: 4)
-                            }
-                        } else {
-                            Circle()
-                                .fill(.white.opacity(0.3))
-                                .frame(width: 6, height: 6)
-                        }
-                    }
-                }
-                .padding(.bottom, 24)
-            }
-            .frame(height: 520)
-            .ignoresSafeArea(edges: .horizontal)
-            .contentShape(Rectangle())
-            .onTapGesture {
-                action(currentMovie)
-            }
-            .gesture(
-                MagnificationGesture()
-                    .onChanged { _ in }
-                    .onEnded { _ in }
-            )
-            .gesture(
-                DragGesture(minimumDistance: 100)
-                    .onEnded { value in
-                        let translation = value.translation.width
-                        if translation < -50 {
-                            // Swipe left -> next
-                            withAnimation(.easeInOut) {
-                                currentIndex = (currentIndex + 1) % movies.count
-                                progress = 0
-                            }
-                        } else if translation > 50 {
-                            // Swipe right -> previous
-                            withAnimation(.easeInOut) {
-                                currentIndex = (currentIndex - 1 + movies.count) % movies.count
-                                progress = 0
-                            }
-                        }
-                    }
-            )
-            .onReceive(timer) { _ in
-                if progress < 1.0 {
-                    progress += 0.05 / 5.0 // 5 seconds per slide
-                } else {
-                    withAnimation(.easeInOut(duration: 0.5)) {
-                        currentIndex = (currentIndex + 1) % movies.count
-                        progress = 0
-                    }
-                }
-            }
-        )
-    }
-}
-
-// MARK: - Movie Detail
-
-struct MovieDetailView: View {
-    @Environment(AppRouter.self) private var router
-    @Environment(PlayerState.self) private var playerState
-    @Environment(\.modelContext) private var modelContext
-    @Query private var settings: [AppSettings]
-    @Query private var storedMovies: [MovieRecord]
-    @Query private var ratings: [RatingRecord]
-    @State private var detail: MovieDetail?
-    @State private var torrents: [TorrentResult] = []
-    @State private var subtitles: [SubtitleInfo] = []
-    @State private var selectedSubtitle: SubtitleInfo?
-    @State private var subtitleData: Data?
-    @State private var errorMessage: String?
-    @State private var isLoading = false
-    @State private var isLoadingSubtitles = false
-    @State private var activeStreamSession: StreamSession?
-    @State private var subtitleFileURL: URL?
-    @State private var showTrailer = false
-    @State private var trailerPlayer: AVPlayer?
-    @State private var scrollOffset: CGFloat = 0
-    private let movieId: Int
-    private let orchestrator: StreamingOrchestrator
-
-    init(movieId: Int, orchestrator: StreamingOrchestrator) {
-        self.movieId = movieId
-        self.orchestrator = orchestrator
-    }
-
-    var body: some View {
-        ZStack {
-            Color(nsColor: .windowBackgroundColor)
-                .ignoresSafeArea()
-            
-
-            
-            RadialGradient(
-                colors: [Color.blue.opacity(0.12), Color.clear],
-                center: .topLeading,
-                startRadius: 20,
-                endRadius: 500
-            )
-            .ignoresSafeArea()
-            .blur(radius: min(max(scrollOffset / 100, 0), 20))
-
-            // Main content back panel
-             ScrollView {
-                 ZStack(alignment: .top) {
-                     LazyVStack(alignment: .leading, spacing: 0) {
-                     if let detail {
-                         DetailHeroHeader(
-                             detail: detail,
-                             addToMyList: { addToMyList(detail.movie) },
-                             onRate: { rateMovie($0) },
-                             onPlayTrailer: { playTrailer(detail.trailerURL) },
-                             currentRating: currentRating
-                         )
-                         
-                         // Rating Controls Section
-                         VStack(alignment: .leading, spacing: 12) {
-                             HStack(spacing: 12) {
-                                 Text("Your Rating:")
-                                     .font(.caption)
-                                     .foregroundStyle(.secondary)
-                                 HStack(spacing: 12) {
-                                     // Thumbs Down (-1)
-                                     Button {
-                                         rateMovie(-1)
-                                     } label: {
-                                         Image(systemName: (currentRating ?? 0) == -1 ? "hand.thumbsdown.fill" : "hand.thumbsdown")
-                                             .font(.system(size: 16, weight: .semibold))
-                                             .foregroundStyle((currentRating ?? 0) == -1 ? .red : .secondary)
-                                     }
-                                     .buttonStyle(.plain)
-                                     .help("Dislike (-1)")
-                                     
-                                     // Heart (+1)
-                                     Button {
-                                         rateMovie(1)
-                                     } label: {
-                                         Image(systemName: (currentRating ?? 0) == 1 ? "heart.fill" : "heart")
-                                             .font(.system(size: 16, weight: .semibold))
-                                             .foregroundStyle((currentRating ?? 0) == 1 ? .red : .secondary)
-                                     }
-                                     .buttonStyle(.plain)
-                                     .help("Like (+1)")
-                                     
-                                     // Fire (+2)
-                                     Button {
-                                         rateMovie(2)
-                                     } label: {
-                                         Image(systemName: (currentRating ?? 0) == 2 ? "flame.fill" : "flame")
-                                             .font(.system(size: 16, weight: .semibold))
-                                             .foregroundStyle((currentRating ?? 0) == 2 ? .orange : .secondary)
-                                     }
-                                     .buttonStyle(.plain)
-                                     .help("Love (+2)")
-                                     
-                                     if let currentRating, currentRating != 0 {
-                                         Button {
-                                             rateMovie(0)
-                                         } label: {
-                                             Image(systemName: "xmark.circle.fill")
-                                                 .font(.caption)
-                                                 .foregroundStyle(.secondary)
-                                         }
-                                         .buttonStyle(.plain)
-                                         .help("Clear rating")
-                                     }
-                                 }
-                                 Spacer()
-                             }
-                         }
-                         .padding(.horizontal, 32)
-                         .padding(.vertical, 18)
-                         .background(Color.black.opacity(0.3))
-
-                         if !detail.cast.isEmpty {
-                             CastSection(cast: detail.cast)
-                                 .padding(.top, 28)
-                         }
-
-                        TorrentSection(
-                            movie: detail.movie,
-                            torrents: torrents,
-                            orchestrator: orchestrator,
-                            subtitleURL: subtitleFileURL
-                        )
-                        .padding(.top, 28)
-
-                        SubtitleSection(
-                            movie: detail.movie,
-                            subtitles: subtitles,
-                            selectedSubtitle: $selectedSubtitle,
-                            isLoading: isLoadingSubtitles,
-                            onSearch: { searchSubtitles(for: detail.movie) },
-                            onSelect: { downloadSubtitle($0) }
-                        )
-                        .padding(.top, 28)
-
-                        if !detail.similar.isEmpty {
-                            SimilarMoviesSection(movies: detail.similar)
-                                .padding(.top, 28)
-                        }
-                    } else if isLoading {
-                        ProgressView("Loading movie...")
-                            .controlSize(.large)
-                            .frame(maxWidth: .infinity, minHeight: 360)
-                    } else if errorMessage == nil {
-                        ContentUnavailableView("Movie Not Loaded", systemImage: "film")
-                    }
-                }
-                .padding(.horizontal, 28)
-                .padding(.bottom, 28)
-                      
-                      // Scroll offset tracker
-                      GeometryReader { geo in
-                          Color.clear.preference(key: ScrollOffsetPreferenceKey.self, value: geo.frame(in: .named("detail-scroll")).minY)
-                      }
-                      .frame(height: 0)
+struct DetailHeroHeader: View {
+      @Environment(\.modelContext) private var modelContext
+      @Query private var storedMovies: [MovieRecord]
+      
+      let detail: MovieDetail
+      let kind: MediaKind
+      let addToMyList: () -> Void
+      let onRate: (Float) -> Void
+      let onPlayTrailer: () -> Void
+      let currentRating: Float?
+      
+      private var isInList: Bool {
+          storedMovies.contains { $0.tmdbId == detail.movie.id }
+      }
+      
+      var body: some View {
+         VStack(alignment: .leading, spacing: 14) {
+              // Logo or Title fallback
+              AsyncLogoView(movieId: detail.movie.id, title: detail.movie.title, kind: kind)
+              
+              HStack(spacing: 8) {
+                  // Prefer the real IMDb rating (from OMDB enrichment); fall back
+                  // to TMDB's vote average when OMDB has nothing for this title.
+                  if let imdbRating = detail.enrichment?.imdbRating {
+                      GlassBadge(String(format: "%.1f IMDb", imdbRating), color: MovieBoxColors.accent)
+                  } else {
+                      GlassBadge(String(format: "%.1f TMDB", detail.movie.voteAverage), color: MovieBoxColors.accent)
                   }
-                  .coordinateSpace(name: "detail-scroll")
-                  .onPreferenceChange(ScrollOffsetPreferenceKey.self) { offset in
-                      scrollOffset = offset
+                  if let rt = detail.enrichment?.rottenTomatoes {
+                      RottenTomatoesBadge(score: rt)
                   }
-                }
-                .blur(radius: errorMessage != nil ? 18 : 0)
-            .opacity(detail != nil ? 1 : 0)
-            
-            // Loading full-screen (if detail is nil)
-            if isLoading && detail == nil {
-                ProgressView("Loading movie...")
-                    .controlSize(.large)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-
-            // Fixed centered Error card floating on a blurred panel
-            if let errorMessage {
-                ZStack {
-                    // Soft blur overlay
-                    Rectangle()
-                        .fill(.ultraThinMaterial)
-                        .ignoresSafeArea()
-                    
-                    RetryCard(message: errorMessage) {
-                        Task { await load() }
-                    }
-                    .frame(maxWidth: 420)
-                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-                }
-                .task(id: "\(movieId)-\(router.detailKind.rawValue)-\(settingsKey)") {
-                await load()
-                }
-        .sheet(isPresented: $showTrailer) {
-            if let player = trailerPlayer {
-                TrailerPlayerView(player: player, onDismiss: { showTrailer = false })
-                    .frame(minWidth: 800, minHeight: 500)
-            }
-        }
-    }
-
-    private var currentRating: Float? {
-        ratings.first(where: { $0.tmdbId == movieId })?.rating
-    }
-
-    private var settingsKey: String {
-        settings.first?.cacheKey ?? "missing"
-    }
-
-    private func load() async {
-        guard let mode = settings.first?.metadataMode else {
-            errorMessage = "Open Settings and configure metadata access first."
-            return
-        }
-
-        isLoading = true
-        errorMessage = nil
-        do {
-            let client = MetadataClient(mode: mode)
-            let loadedDetail = try await client.movieDetail(id: movieId, kind: router.detailKind)
-            detail = loadedDetail
-
-            var latest: [TorrentResult] = []
-            for await batch in await TorrentSearchAggregator().search(movieTitle: loadedDetail.movie.title) {
-                latest = batch
-            }
-            torrents = latest
-
-            let year = Int(loadedDetail.movie.releaseDate.prefix(4))
-            let subtitleClient = SubtitleClient(mode: mode)
-            subtitles = try await subtitleClient.searchSubtitles(
-                title: loadedDetail.movie.title,
-                year: year,
-                language: settings.first?.preferredSubtitleLang ?? "en"
-            )
-        } catch {
-            if let urlError = error as? URLError, urlError.code == .cancelled {
-                return
-            }
-            LogStore.shared.log("Error loading Movie Detail: \(error)")
-            LogStore.shared.log("Stack Trace:\n\(Thread.callStackSymbols.prefix(8).joined(separator: "\n"))")
-            errorMessage = error.localizedDescription
-        }
-        isLoading = false
-    }
-
-    private func addToMyList(_ movie: Movie) {
-        if let existing = storedMovies.first(where: { $0.tmdbId == movie.id }) {
-            existing.watchlistAddedAt = Date()
-            try? modelContext.save()
-            return
-        }
-
-        let record = MovieRecord(
-            tmdbId: movie.id,
-            title: movie.title,
-            posterPath: movie.posterPath,
-            genres: movie.genreIds,
-            watchlistAddedAt: Date()
-        )
-        modelContext.insert(record)
-        try? modelContext.save()
-    }
-
-    private func rateMovie(_ rating: Float) {
-        if let existing = ratings.first(where: { $0.tmdbId == movieId }) {
-            if rating == 0 {
-                modelContext.delete(existing)
-            } else {
-                existing.rating = rating
-                existing.ratedAt = Date()
-            }
-        } else if rating > 0 {
-            let record = RatingRecord(
-                tmdbId: movieId,
-                rating: rating,
-                genres: detail?.movie.genreIds ?? []
-            )
-            modelContext.insert(record)
-        }
-        try? modelContext.save()
-    }
-
-    private func searchSubtitles(for movie: Movie) {
-        Task {
-            isLoadingSubtitles = true
-            do {
-                guard let mode = settings.first?.metadataMode else { return }
-                let year = Int(movie.releaseDate.prefix(4))
-                let client = SubtitleClient(mode: mode)
-                subtitles = try await client.searchSubtitles(
-                    title: movie.title,
-                    year: year,
-                    language: settings.first?.preferredSubtitleLang ?? "en"
-                )
-            } catch {
-                errorMessage = error.localizedDescription
-            }
-            isLoadingSubtitles = false
-        }
-    }
-
-    private func downloadSubtitle(_ subtitle: SubtitleInfo) {
-        selectedSubtitle = subtitle
-        Task {
-            do {
-                guard let mode = settings.first?.metadataMode else { return }
-                let client = SubtitleClient(mode: mode)
-                let data = try await client.downloadSubtitle(url: subtitle.downloadUrl)
-                let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("moviebox_subtitles")
-                try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-                let fileURL = tempDir.appendingPathComponent("\(subtitle.id).srt")
-                try data.write(to: fileURL)
-                await MainActor.run {
-                    subtitleFileURL = fileURL
-                }
-            } catch {
-                errorMessage = error.localizedDescription
-            }
-        }
-    }
-
-    private func playTrailer(_ url: URL?) {
-        guard let url else { return }
-        trailerPlayer = AVPlayer(url: url)
-        showTrailer = true
-    }
-}
-
-private struct DetailHeroHeader: View {
-     let detail: MovieDetail
-     let addToMyList: () -> Void
-     let onRate: (Float) -> Void
-     let onPlayTrailer: () -> Void
-     let currentRating: Float?
-     
-     var body: some View {
-         ZStack(alignment: .bottom) {
-             // Backdrop
-             ZStack {
-                 if let backdropPath = detail.movie.backdropPath {
-                     AsyncImage(url: MetadataClient().imageURL(path: backdropPath, width: 1920)) { phase in
-                         if let image = phase.image {
-                             image
-                                 .resizable()
-                                 .aspectRatio(contentMode: .fill)
-                         } else {
-                             Color.black
-                         }
-                     }
-                 } else {
-                     Color.black
-                 }
-             }
-             .frame(maxWidth: .infinity)
-             .frame(height: 500)
-             .clipped()
-             
-             // Dark Gradient overlays
-             LinearGradient(colors: [.clear, .black.opacity(0.85)], startPoint: .top, endPoint: .bottom)
-                 .frame(height: 500)
-             LinearGradient(colors: [.black.opacity(0.6), .clear], startPoint: .leading, endPoint: .trailing)
-                 .frame(height: 500)
-             
-             // Content
-             HStack {
-                 VStack(alignment: .leading, spacing: 14) {
-                     Spacer()
-                     
-                     // Title (smaller than home hero)
-                     Text(detail.movie.title)
-                         .font(.system(size: 28, weight: .bold))
-                         .foregroundStyle(.white)
-                         .lineLimit(2)
-                         .shadow(color: .black.opacity(0.6), radius: 10, x: 0, y: 5)
-                     
-                     HStack {
-                         GlassBadge(String(format: "%.1f IMDb", detail.movie.voteAverage), color: MovieBoxColors.accent)
-                         if let runtime = detail.movie.runtime {
-                             GlassBadge("\(runtime) min")
-                         }
-                         ForEach(detail.genres.prefix(2)) { genre in
-                             GlassBadge(genre.name)
-                         }
-                     }
-                     
-                     // CTA Buttons
-                     HStack(spacing: 12) {
-                         Button {
-                             onPlayTrailer()
-                         } label: {
-                             Label("Play Now", systemImage: "play.fill")
-                                 .font(.headline)
-                                 .padding(.horizontal, 16)
-                                 .padding(.vertical, 8)
-                                 .background(.white, in: Capsule())
-                                 .foregroundStyle(.black)
-                         }
-                         .buttonStyle(.plain)
-                         
-                         GlassButton(action: addToMyList) {
-                             Label("Add To My List", systemImage: "plus")
-                         }
-                     }
-                 }
-                 Spacer()
-             }
-             .padding(32)
-         }
-         .frame(height: 500)
-         .ignoresSafeArea(edges: .horizontal)
-     }
- }
+                  if let runtime = detail.movie.runtime {
+                      GlassBadge("\(runtime) min")
+                  }
+                  if let rated = detail.enrichment?.rated {
+                      GlassBadge(rated)
+                  }
+                  ForEach(detail.genres.prefix(2)) { genre in
+                      GlassBadge(genre.name)
+                  }
+              }
+              
+              Spacer()
+                .frame(height: 24)
+              
+              HStack(spacing: 12) {
+                  Button {
+                      onPlayTrailer()
+                  } label: {
+                      Label("Play Now", systemImage: "play.fill")
+                          .font(.headline)
+                          .padding(.horizontal, 16)
+                          .padding(.vertical, 8)
+                          .background(.white, in: Capsule())
+                          .foregroundStyle(.black)
+                  }
+                  .buttonStyle(.plain)
+                  
+                  GlassButton(action: addToMyList) {
+                      Label(isInList ? "Added to List" : "Add To My List", systemImage: isInList ? "checkmark" : "plus")
+                  }
+              }
+              
+          }
+      }
+  }
 
 private struct DetailHeader: View {
      let detail: MovieDetail
@@ -1189,358 +354,11 @@ private struct DetailHeader: View {
             }
         }
         .padding(28)
-        .adaptiveGlass(cornerRadius: 28)
-    }
-}
-
-private struct TorrentSection: View {
-    let movie: Movie
-    let torrents: [TorrentResult]
-    let orchestrator: StreamingOrchestrator
-    let subtitleURL: URL?
-    @Environment(PlayerState.self) private var playerState
-    @StateObject private var downloadManager = DownloadManager()
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Available Versions")
-                .font(MovieBoxTypography.title)
-                .foregroundStyle(.primary)
-
-            if torrents.isEmpty {
-                ContentUnavailableView(
-                    "No Versions Found",
-                    systemImage: "magnifyingglass",
-                    description: Text("YTS did not return torrent results for \(movie.title).")
-                )
-                .frame(maxWidth: .infinity, minHeight: 180)
-            } else {
-                LazyVStack(spacing: 12) {
-                    ForEach(torrents) { torrent in
-                        TorrentResultRow(
-                            movieId: movie.id,
-                            result: torrent,
-                            orchestrator: orchestrator,
-                            subtitleURL: subtitleURL,
-                            downloadManager: downloadManager
-                        )
-                    }
-                }
-            }
+         .adaptiveGlass(cornerRadius: 28)
         }
-    }
-}
-
-private struct TorrentResultRow: View {
-    let movieId: Int
-    let result: TorrentResult
-    let orchestrator: StreamingOrchestrator
-    let subtitleURL: URL?
-    let downloadManager: DownloadManager
-    @Environment(PlayerState.self) private var playerState
-    @State private var streamSession: StreamSession?
-    @State private var isStreaming = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                VStack(alignment: .leading, spacing: 9) {
-                    HStack {
-                        GlassBadge(result.quality.rawValue)
-                        if let hdr = result.hdrType {
-                            GlassBadge(hdr.rawValue, color: BadgePalette.hdrColor(label: hdr.rawValue))
-                        }
-                        if let audio = result.audioFormat {
-                            GlassBadge(audio.rawValue, color: .blue)
-                        }
-                        GlassBadge(result.codec.rawValue)
-                        GlassBadge(result.source.rawValue)
-                    }
-                    HStack(spacing: 14) {
-                        Text("\(result.seeders) seeders")
-                            .foregroundStyle(BadgePalette.seedColor(result.seeders))
-                        Text("\(result.leechers) leechers")
-                        Text(result.trackerSource.label)
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-                Spacer()
-
-                if isStreaming, let session = streamSession {
-                    StreamProgressView(session: session)
-                } else {
-                    HStack(spacing: 8) {
-                        Button("Stream", action: startStream)
-                        Button("Download", action: startDownload)
-                    }
-                }
-            }
         }
-        .padding(16)
-        .adaptiveGlass(cornerRadius: 18)
-    }
-
-    private func startStream() {
-        isStreaming = true
-        let session = StreamSession(orchestrator: orchestrator)
-        streamSession = session
-
-        Task {
-            await session.start(torrent: result)
-
-            if case .ready(let url) = session.state {
-                playerState.load(url: url, title: result.title, movieId: movieId, subtitleURL: subtitleURL)
-            }
-        }
-    }
-
-    private func startDownload() {
-        downloadManager.startDownload(
-            tmdbId: movieId,
-            title: result.title,
-            magnetURI: result.magnetURI,
-            quality: result.quality.rawValue,
-            hdrType: result.hdrType?.rawValue
-        )
-    }
-}
-
-private struct StreamProgressView: View {
-    @ObservedObject var session: StreamSession
-
-    var body: some View {
-        VStack(alignment: .trailing, spacing: 6) {
-            switch session.state {
-            case .preparing:
-                ProgressView()
-                    .controlSize(.small)
-                Text("Preparing...")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-            case .buffering(let progress):
-                ProgressView(value: progress)
-                    .progressViewStyle(.linear)
-                    .frame(width: 120)
-                HStack(spacing: 8) {
-                    Text("\(Int(progress * 100))%")
-                        .font(.caption)
-                    if session.downloadSpeed > 0 {
-                        Text(formatSpeed(session.downloadSpeed))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    if session.bufferedPieces > 0 {
-                        Text("(\(session.bufferedPieces) pieces)")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-
-            case .ready:
-                Label("Streaming", systemImage: "checkmark.circle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.green)
-
-            case .failed(let error):
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-
-            case .cancelled:
-                Text("Cancelled")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-            case .idle:
-                EmptyView()
-            }
-        }
-    }
-
-    private func formatSpeed(_ bytesPerSecond: Double) -> String {
-        if bytesPerSecond >= 1_000_000 {
-            return String(format: "%.1f MB/s", bytesPerSecond / 1_000_000)
-        } else if bytesPerSecond >= 1000 {
-            return String(format: "%.1f KB/s", bytesPerSecond / 1000)
-        }
-        return String(format: "%.0f B/s", bytesPerSecond)
-    }
-}
-
-private struct CastSection: View {
-    let cast: [CastMember]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Cast")
-                .font(MovieBoxTypography.title)
-                .foregroundStyle(.primary)
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 16) {
-                    ForEach(cast) { member in
-                        VStack(spacing: 6) {
-                            if let path = member.profilePath, let url = URL(string: "https://image.tmdb.org/t/p/w185\(path)") {
-                                CachedImageView(url: url) {
-                                    Image(systemName: "person.circle.fill")
-                                        .font(.system(size: 32))
-                                        .foregroundStyle(.secondary)
-                                } content: { image in
-                                    image.resizable().scaledToFill()
-                                }
-                                .frame(width: 80, height: 80)
-                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                            } else {
-                                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    .fill(Color(nsColor: .controlBackgroundColor))
-                                    .frame(width: 80, height: 80)
-                                    .overlay {
-                                        Image(systemName: "person.circle.fill")
-                                            .font(.system(size: 32))
-                                            .foregroundStyle(.secondary)
-                                    }
-                            }
-
-                            Text(member.name)
-                                .font(.caption)
-                                .fontWeight(.medium)
-                                .lineLimit(1)
-                                .frame(width: 80)
-
-                            Text(member.character)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .frame(width: 80)
-                        }
-                    }
-                }
-                .padding(.horizontal, 4)
-            }
-        }
-    }
-}
-
-private struct SubtitleSection: View {
-    let movie: Movie
-    let subtitles: [SubtitleInfo]
-    @Binding var selectedSubtitle: SubtitleInfo?
-    let isLoading: Bool
-    let onSearch: () -> Void
-    let onSelect: (SubtitleInfo) -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Subtitles")
-                    .font(MovieBoxTypography.title)
-                    .foregroundStyle(.primary)
-                Spacer()
-                Button("Search") {
-                    onSearch()
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
-
-            if isLoading {
-                ProgressView()
-                    .controlSize(.small)
-                    .frame(maxWidth: .infinity, minHeight: 60)
-            } else if subtitles.isEmpty {
-                Text("No subtitles found. Try searching.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, minHeight: 40)
-            } else {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 10) {
-                        ForEach(subtitles.prefix(10)) { sub in
-                            SubtitleCard(
-                                subtitle: sub,
-                                isSelected: selectedSubtitle?.id == sub.id,
-                                action: { onSelect(sub) }
-                            )
-                        }
-                    }
-                    .padding(.horizontal, 4)
-                }
-            }
-        }
-    }
-}
-
-private struct SubtitleCard: View {
-    let subtitle: SubtitleInfo
-    let isSelected: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Image(systemName: isSelected ? "checkmark.circle.fill" : "text.bubble")
-                        .foregroundStyle(isSelected ? .green : .secondary)
-                    Text(subtitle.language.capitalized)
-                        .font(.caption)
-                        .fontWeight(.medium)
-                    Spacer()
-                }
-                Text(subtitle.name)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                Text("by \(subtitle.author)")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-            }
-            .padding(10)
-            .frame(width: 160)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(isSelected ? Color.green.opacity(0.1) : Color(nsColor: .controlBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(isSelected ? Color.green : Color.secondary.opacity(0.2), lineWidth: isSelected ? 1.5 : 0.5)
-            )
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-private struct SimilarMoviesSection: View {
-    @Environment(AppRouter.self) private var router
-    let movies: [Movie]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Similar Movies")
-                .font(MovieBoxTypography.title)
-                .foregroundStyle(.primary)
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 14) {
-                    ForEach(movies.prefix(12)) { movie in
-                        MoviePosterCard(
-                            title: movie.title,
-                            subtitle: movie.releaseDate,
-                            posterURL: MetadataClient().imageURL(path: movie.posterPath)
-                        ) {
-                            router.showDetail(id: movie.id, kind: router.detailKind)
-                        }
-                    }
-                }
-                .padding(.horizontal, 4)
-            }
-        }
-    }
-}
-
-// MARK: - Catalog (Movies / TV Shows)
+        
+        // MARK: - Catalog (Movies / TV Shows)
 
 struct CatalogView: View {
     @Environment(AppRouter.self) private var router
@@ -1552,18 +370,14 @@ struct CatalogView: View {
     @State private var errorMessage: String?
     @State private var isLoading = false
 
-    private var title: String { kind == .movie ? "Movies" : "TV Shows" }
+    
 
     var body: some View {
         ZStack {
             // Main content scroll view
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 36) {
-                    Text(title)
-                        .font(MovieBoxTypography.display)
-                        .padding(.horizontal, 28)
-                        .padding(.top, 4)
-
+                    
                     if isLoading && rows.isEmpty {
                         ProgressView()
                             .controlSize(.large)
@@ -1580,6 +394,7 @@ struct CatalogView: View {
                             HeroCarousel(movies: Array(trending.prefix(5))) { movie in
                                 router.showDetail(id: movie.id, kind: kind)
                             }
+                            .frame(maxWidth: .infinity)
                         }
 
                         ForEach(MetadataCategory.allCases) { category in
@@ -1588,7 +403,14 @@ struct CatalogView: View {
                                     MoviePosterCard(
                                         title: movie.title,
                                         subtitle: movie.releaseDate,
-                                        posterURL: MetadataClient().imageURL(path: movie.posterPath)
+                                        posterURL: MetadataClient().imageURL(path: movie.posterPath),
+                                        onHover: {
+                                            // Warm /api/title bundle before the user clicks — by the
+                                            // time the detail view loads, it's a sub-50ms KV hit.
+                                            if let mode = settings.first?.metadataMode {
+                                                Task { await Prefetcher.shared.prefetchDetail(id: movie.id, kind: kind, mode: mode) }
+                                            }
+                                        }
                                     ) {
                                         router.showDetail(id: movie.id, kind: kind)
                                     }
@@ -1599,7 +421,6 @@ struct CatalogView: View {
                 }
                 .padding(.bottom, 28)
             }
-            .ignoresSafeArea(edges: .top)
             .blur(radius: errorMessage != nil ? 18 : 0)
             .opacity(rows.isEmpty ? 0 : 1)
             
@@ -1692,7 +513,6 @@ struct DownloadsView: View {
             }
         }
         .padding(.top, topBarReservedHeight)
-        .ignoresSafeArea(edges: .top)
         .navigationTitle("Downloads")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -1863,11 +683,10 @@ struct LibraryView: View {
     var body: some View {
         MyListView()
             .padding(.top, topBarReservedHeight)
-            .ignoresSafeArea(edges: .top)
-    }
-}
+            }
+            }
 
-// MARK: - My List
+            // MARK: - My List
 
 struct MyListView: View {
     @Environment(AppRouter.self) private var router

@@ -24,8 +24,9 @@ struct SimilarMoviesSection: View {
                         }
                     }
                 }
-                .padding(.horizontal, 4)
+                .padding(.trailing, 100)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

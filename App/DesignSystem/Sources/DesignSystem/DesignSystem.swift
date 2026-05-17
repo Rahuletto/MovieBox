@@ -59,10 +59,14 @@ public struct GlassBadge: View {
         Text(text)
             .font(MovieBoxTypography.caption)
             .foregroundStyle(.primary)
+            .lineLimit(1)
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             .background(color.opacity(0.16), in: Capsule())
             .overlay(Capsule().stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
+            // Pill always sizes to its content — never truncates ("108 mi…")
+            // or wraps when squeezed inside a tight HStack.
+            .fixedSize(horizontal: true, vertical: false)
     }
 }
 
@@ -93,11 +97,21 @@ public struct MoviePosterCard: View {
     private let subtitle: String
     private let posterURL: URL?
     private let action: () -> Void
+    /// Optional hover callback — fired once when the cursor enters the card.
+    /// Use it to kick off background prefetches (detail bundle, backdrop, etc.).
+    private let onHover: (() -> Void)?
 
-    public init(title: String, subtitle: String = "", posterURL: URL?, action: @escaping () -> Void) {
+    public init(
+        title: String,
+        subtitle: String = "",
+        posterURL: URL?,
+        onHover: (() -> Void)? = nil,
+        action: @escaping () -> Void
+    ) {
         self.title = title
         self.subtitle = subtitle
         self.posterURL = posterURL
+        self.onHover = onHover
         self.action = action
     }
 
@@ -128,6 +142,9 @@ public struct MoviePosterCard: View {
             }
         }
         .buttonStyle(.plain)
+        .onHover { hovering in
+            if hovering, let onHover { onHover() }
+        }
     }
 
     @ViewBuilder private var poster: some View {

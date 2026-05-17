@@ -55,7 +55,7 @@ struct HeroSection: View {
                     
                     // Logo or Title fallback
                     if let logoId {
-                        AsyncLogoView(movieId: logoId, title: title ?? "")
+                        AsyncLogoView(movieId: logoId, title: title ?? "", kind: .movie)
                     } else if let title {
                         Text(title)
                             .font(.system(size: 24, weight: .bold))
