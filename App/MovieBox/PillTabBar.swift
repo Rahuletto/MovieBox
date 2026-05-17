@@ -14,28 +14,33 @@ struct PillTabBar: View {
         TabItem(id: .home, title: "Home", systemImage: "house.fill"),
         TabItem(id: .tvShows, title: "TV Shows", systemImage: "tv"),
         TabItem(id: .movies, title: "Movies", systemImage: "film"),
-        TabItem(id: .library, title: "Library", systemImage: "books.vertical.fill")
+        TabItem(id: .library, title: "Library", systemImage: "books.vertical.fill"),
+        TabItem(id: .downloads, title: "Downloads", systemImage: "arrow.down.circle")
     ]
 
     var body: some View {
-        HStack(spacing: 4) {
-            ForEach(Array(tabs.enumerated()), id: \.element.id) { index, tab in
-                tabButton(tab)
-                if index < tabs.count - 1 {
-                    separator
+        HStack(spacing: 8) {
+            HStack(spacing: 2) {
+                ForEach(Array(tabs.enumerated()), id: \.element.id) { index, tab in
+                    tabButton(tab)
+                    if index < tabs.count - 1 {
+                        separator
+                    }
                 }
             }
-
-            separator
+            .padding(.horizontal, 4)
+            .padding(.vertical, 3)
+            .adaptiveGlass(cornerRadius: 32)
+            .clipShape(Capsule(style: .continuous))
+            .shadow(color: .black.opacity(0.12), radius: 12, x: 0, y: 4)
 
             searchButton
+                .frame(width: 32, height: 32)
+                .adaptiveGlass(cornerRadius: 32)
+                .clipShape(Capsule(style: .continuous))
+                .shadow(color: .black.opacity(0.12), radius: 12, x: 0, y: 4)
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 6)
-        .adaptiveGlass(cornerRadius: 32)
-        .clipShape(Capsule(style: .continuous))
         .compositingGroup()
-        .shadow(color: .black.opacity(0.14), radius: 12, x: 0, y: 4)
         .zIndex(10)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Primary navigation")
@@ -48,18 +53,14 @@ struct PillTabBar: View {
         } label: {
             Label(tab.title, systemImage: tab.systemImage)
                 .labelStyle(.titleOnly)
-                .font(.system(size: 13.5, weight: .semibold, design: .rounded))
+                .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(isSelected ? Color.primary : Color.secondary)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 9)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
                 .background {
                     if isSelected {
                         Capsule(style: .continuous)
-                            .fill(.primary.opacity(0.14))
-                            .overlay {
-                                Capsule(style: .continuous)
-                                    .stroke(Color.primary.opacity(0.10), lineWidth: 0.5)
-                            }
+                            .fill(.primary.opacity(0.22))
                     }
                 }
                 .contentShape(Capsule(style: .continuous))
@@ -76,16 +77,16 @@ struct PillTabBar: View {
             router.show(.search)
         } label: {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: 13.5, weight: .medium))
                 .foregroundStyle(isSelected ? Color.primary : Color.secondary)
-                .frame(width: 36, height: 32)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background {
                     if isSelected {
-                        Capsule(style: .continuous)
-                            .fill(.primary.opacity(0.14))
+                        Circle()
+                            .fill(.primary.opacity(0.22))
                     }
                 }
-                .contentShape(Capsule(style: .continuous))
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Search")
@@ -94,8 +95,8 @@ struct PillTabBar: View {
 
     private var separator: some View {
         Capsule()
-            .fill(Color.primary.opacity(0.12))
-            .frame(width: 1, height: 18)
+            .fill(Color.primary.opacity(0.10))
+            .frame(width: 1, height: 14)
     }
 
     /// When the user is on a non-tab route (e.g. movieDetail), no tab is highlighted.

@@ -20,11 +20,16 @@ struct RootView: View {
 
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .ignoresSafeArea(edges: .top)
 
-            PillTabBar()
-                .padding(.top, 10)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .zIndex(5)
+            VStack(spacing: 0) {
+                PillTabBar()
+                    .padding(.top, 8)
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .ignoresSafeArea(edges: .top)
+            .zIndex(5)
 
             if playerState.isPresented {
                 PlayerView(state: playerState)
@@ -33,7 +38,7 @@ struct RootView: View {
             }
         }
         .background(
-            WindowConfigurator(trafficLightInset: CGPoint(x: 20, y: 16))
+            WindowConfigurator(trafficLightInset: CGPoint(x: 24, y: 20))
                 .frame(width: 0, height: 0)
         )
         .onAppear {
@@ -79,7 +84,7 @@ struct RootView: View {
 
 /// Approximate height reserved at the top of each screen so content scrolls
 /// beneath the floating pill tab bar instead of being hidden by it.
-private let topBarReservedHeight: CGFloat = 56
+private let topBarReservedHeight: CGFloat = 54
 
 // MARK: - Home
 
@@ -1070,6 +1075,7 @@ struct DownloadsView: View {
                 .padding(.vertical, 18)
             }
         }
+        .padding(.top, topBarReservedHeight)
         .navigationTitle("Downloads")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -1237,33 +1243,9 @@ private extension DownloadState {
 // MARK: - Library (Watchlist + Downloads)
 
 struct LibraryView: View {
-    enum Section: String, CaseIterable, Identifiable {
-        case watchlist = "Watchlist"
-        case downloads = "Downloads"
-        var id: String { rawValue }
-    }
-
-    @State private var section: Section = .watchlist
-
     var body: some View {
-        VStack(spacing: 0) {
-            Picker("Library Section", selection: $section) {
-                ForEach(Section.allCases) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(maxWidth: 320)
+        MyListView()
             .padding(.top, topBarReservedHeight)
-            .padding(.bottom, 12)
-
-            Group {
-                switch section {
-                case .watchlist: MyListView()
-                case .downloads: DownloadsView()
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
     }
 }
 
@@ -1353,6 +1335,7 @@ private struct RetryCard: View {
         .padding(18)
         .adaptiveGlass(cornerRadius: 18)
         .padding(.horizontal, 28)
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 }
 

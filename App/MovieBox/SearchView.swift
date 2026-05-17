@@ -83,6 +83,9 @@ struct SearchView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
+                searchField
+                    .padding(.top, 54)
+
                 if query.isEmpty && selectedGenre == nil {
                     categoriesGrid
                 } else if let genre = selectedGenre, query.isEmpty {
@@ -93,24 +96,6 @@ struct SearchView: View {
             }
             .padding(.horizontal, 28)
             .padding(.bottom, 40)
-        }
-        .scrollClipDisabled()
-        .safeAreaInset(edge: .top, spacing: 0) {
-            searchField
-                .padding(.horizontal, 28)
-                .padding(.top, 4)
-                .padding(.bottom, 14)
-                .background {
-                    LinearGradient(
-                        colors: [
-                            Color(nsColor: .windowBackgroundColor),
-                            Color(nsColor: .windowBackgroundColor).opacity(0.0)
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                    .allowsHitTesting(false)
-                }
         }
         .onChange(of: query) { _, newValue in
             if newValue.isEmpty {
@@ -129,7 +114,7 @@ struct SearchView: View {
 
             TextField("Search movies and shows", text: $query)
                 .textFieldStyle(.plain)
-                .font(.system(size: 15, weight: .medium, design: .rounded))
+                .font(.system(size: 15, weight: .medium))
                 .onSubmit { Task { await search() } }
 
             if !query.isEmpty {
@@ -152,6 +137,7 @@ struct SearchView: View {
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
         .adaptiveGlass(cornerRadius: 24)
+        .shadow(color: .black.opacity(0.14), radius: 12, x: 0, y: 4)
         .frame(maxWidth: 720)
         .frame(maxWidth: .infinity, alignment: .center)
     }
@@ -254,7 +240,7 @@ private struct GenreCardView: View {
                     .clipped()
 
                 Text(genre.name)
-                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                    .font(.system(size: 18, weight: .bold))
                     .foregroundStyle(.white)
                     .shadow(color: .black.opacity(0.45), radius: 4, x: 0, y: 1)
                     .padding(16)
@@ -288,18 +274,19 @@ private struct GenreResultsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            HStack(spacing: 12) {
+            HStack(spacing: 14) {
                 Button {
                     onBack()
                 } label: {
-                    Label("Categories", systemImage: "chevron.left")
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 7)
-                        .contentShape(Capsule())
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 34, height: 34)
+                        .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
                 .adaptiveGlass(cornerRadius: 999)
+                .accessibilityLabel("Back to Categories")
 
                 Text(genre.name)
                     .font(MovieBoxTypography.display)

@@ -54,23 +54,17 @@ struct WindowConfigurator: NSViewRepresentable {
             }
             self.window = window
 
-            // 1. Core Window Setup
             window.styleMask.insert(.fullSizeContentView)
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
             window.titlebarSeparatorStyle = .none
 
-            // 2. Attach a transparent dummy toolbar.
-            // This tricks the macOS Window Server into applying the gorgeous, premium, large round native corner radius
-            // automatically to the window frame (concentric design language), with perfect native border and shadow,
-            // while keeping all standard system buttons completely unclipped!
             if window.toolbar == nil {
                 let dummyToolbar = NSToolbar(identifier: "MovieBox.WindowChromeToolbar")
                 dummyToolbar.showsBaselineSeparator = false
                 window.toolbar = dummyToolbar
             }
 
-            // 3. Clear any manual clipping/layer overrides from previous sessions to prevent double-border or clipping issues
             if let contentView = window.contentView {
                 contentView.wantsLayer = true
                 contentView.layer?.mask = nil

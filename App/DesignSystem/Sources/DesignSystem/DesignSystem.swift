@@ -12,10 +12,10 @@ public enum MovieBoxColors {
 }
 
 public enum MovieBoxTypography {
-    public static let display = Font.system(.largeTitle, design: .rounded, weight: .bold)
-    public static let title = Font.system(.title2, design: .rounded, weight: .semibold)
-    public static let body = Font.system(.body, design: .rounded)
-    public static let caption = Font.system(.caption, design: .rounded, weight: .medium)
+    public static let display = Font.system(.largeTitle, weight: .bold)
+    public static let title = Font.system(.title2, weight: .semibold)
+    public static let body = Font.system(.body)
+    public static let caption = Font.system(.caption, weight: .medium)
 }
 
 public struct AdaptiveGlass: ViewModifier {
