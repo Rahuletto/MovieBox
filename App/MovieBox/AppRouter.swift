@@ -13,6 +13,7 @@ final class AppRouter {
         case search
         case downloads
         case movieDetail(Int)
+        // case demoDetail(String) // Demos disabled
     }
 
     var selectedRoute: Route = .home {
@@ -57,6 +58,12 @@ final class AppRouter {
         }
     }
 
+    // func showDemoDetail(id: String) {
+    //     withAnimation(MovieBoxMotion.navigation) {
+    //         selectedRoute = .demoDetail(id)
+    //     }
+    // }
+
     func backFromDetail() {
         withAnimation(MovieBoxMotion.navigation) {
             selectedRoute = activeTab
@@ -64,8 +71,11 @@ final class AppRouter {
     }
 
     var isShowingDetail: Bool {
-        if case .movieDetail = selectedRoute { return true }
-        return false
+        switch selectedRoute {
+        case .movieDetail: true
+        // case .demoDetail: true
+        default: false
+        }
     }
 }
 
@@ -79,6 +89,7 @@ extension AppRouter.Route {
         case .search: "Search"
         case .downloads: "Downloads"
         case .movieDetail: "Movie Detail"
+        // case .demoDetail: "Demo"
         }
     }
 

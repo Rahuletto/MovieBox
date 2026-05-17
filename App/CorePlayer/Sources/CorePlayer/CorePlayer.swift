@@ -53,6 +53,7 @@ public final class PlayerState {
     public var currentSubtitleText: String = ""
     public var currentSubtitleCueID: UUID?
     public var subtitleAppearance: SubtitleAppearance = .cinematic
+    public var subtitleFontSize: CGFloat = 20
     
     public var hdrType: PlayerHDRType? = nil
     public var errorMessage: String? = nil
@@ -128,6 +129,7 @@ public final class PlayerState {
         subtitleURL: URL? = nil,
         hdrType: PlayerHDRType? = nil,
         subtitleAppearance: SubtitleAppearance = .cinematic,
+        subtitleFontSize: CGFloat = 20,
         episodeTitle: String? = nil,
         episodes: [PlayerEpisode] = [],
         currentEpisodeIndex: Int? = nil
@@ -139,6 +141,7 @@ public final class PlayerState {
         self.subtitleURL = subtitleURL
         self.hdrType = hdrType
         self.subtitleAppearance = subtitleAppearance
+        self.subtitleFontSize = subtitleFontSize
         self.errorMessage = nil
         if !episodes.isEmpty {
             self.episodes = episodes
@@ -260,8 +263,13 @@ public final class PlayerState {
     }
 
     /// Applies live Settings changes while playback is active.
-    public func applyPlaybackSettings(subtitleStyle: String, subtitlesEnabled: Bool) {
+    public func applyPlaybackSettings(
+        subtitleStyle: String,
+        subtitlesEnabled: Bool,
+        subtitleFontSize: Double = 20
+    ) {
         subtitleAppearance = SubtitleAppearance.from(settingsValue: subtitleStyle)
+        self.subtitleFontSize = CGFloat(subtitleFontSize)
 
         if !subtitlesEnabled {
             if activeSubtitleTrack >= 0 {
@@ -914,6 +922,7 @@ public struct PlayerView: View {
             text: state.currentSubtitleText,
             cueID: state.currentSubtitleCueID,
             appearance: state.subtitleAppearance,
+            fontSize: state.subtitleFontSize,
             isVisible: state.activeSubtitleTrack >= 0
         )
     }

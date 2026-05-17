@@ -48,7 +48,8 @@ final class TorrentPlaybackCoordinator {
         playerState: PlayerState,
         movieId: Int,
         subtitleURL: URL?,
-        subtitleAppearance: SubtitleAppearance = .cinematic
+        subtitleAppearance: SubtitleAppearance = .cinematic,
+        subtitleFontSize: CGFloat = 20
     ) throws {
         configureSources(on: playerState, torrents: allTorrents, selected: torrent)
 
@@ -65,7 +66,8 @@ final class TorrentPlaybackCoordinator {
             movieId: movieId,
             subtitleURL: subtitleURL,
             hdrType: playerHDRType(from: torrent.hdrType),
-            subtitleAppearance: subtitleAppearance
+            subtitleAppearance: subtitleAppearance,
+            subtitleFontSize: subtitleFontSize
         )
     }
 
@@ -92,7 +94,8 @@ final class TorrentPlaybackCoordinator {
                 movieId: movieId,
                 subtitleURL: subtitleURL,
                 hdrType: playerHDRType(from: torrent.hdrType),
-                subtitleAppearance: subtitleAppearance
+                subtitleAppearance: subtitleAppearance,
+                subtitleFontSize: playerState.subtitleFontSize
             )
             if savedTime > 1 {
                 playerState.seek(to: savedTime)

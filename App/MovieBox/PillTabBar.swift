@@ -32,8 +32,7 @@ struct PillTabBar: View {
     /// detail view renders its own NavigationHeader, so we hide the genre
     /// "Animation" nav to avoid two stacked back buttons.
     private var isInDetailView: Bool {
-        if case .movieDetail = router.selectedRoute { return true }
-        return false
+        router.isShowingDetail
     }
 
     var body: some View {

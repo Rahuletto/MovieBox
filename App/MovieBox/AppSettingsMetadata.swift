@@ -27,10 +27,15 @@ extension AppSettings {
         SubtitleAppearance.from(settingsValue: subtitleStyle)
     }
 
+    var subtitleFontSizePoints: CGFloat {
+        CGFloat(subtitleFontSize > 0 ? subtitleFontSize : 20)
+    }
+
     func applyLivePlaybackSettings(to playerState: PlayerState) {
         playerState.applyPlaybackSettings(
             subtitleStyle: subtitleStyle,
-            subtitlesEnabled: subtitlesEnabled
+            subtitlesEnabled: subtitlesEnabled,
+            subtitleFontSize: subtitleFontSize
         )
     }
 

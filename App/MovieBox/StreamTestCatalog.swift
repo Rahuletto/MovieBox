@@ -1,3 +1,6 @@
+// Demos disabled — kept for local playback/HDR/subtitle testing. Re-enable with `#if true`.
+#if false
+
 import Foundation
 import CorePlayer
 import SwiftUI
@@ -23,8 +26,17 @@ enum StreamTestCatalog {
 
         var isSubtitleDemo: Bool { id == "subtitle-demo" }
 
+        var posterImageURL: URL? {
+            if case .image(let url) = poster { return url }
+            return nil
+        }
+
         static func == (lhs: Item, rhs: Item) -> Bool { lhs.id == rhs.id }
         func hash(into hasher: inout Hasher) { hasher.combine(id) }
+    }
+
+    static func item(id: String) -> Item? {
+        all.first { $0.id == id }
     }
 
     private static let appleHDRBase =
@@ -133,3 +145,5 @@ enum StreamTestCatalog {
         Bundle.main.url(forResource: "sample-en", withExtension: "srt")
     }
 }
+
+#endif

@@ -140,6 +140,8 @@ struct RootView: View {
                 .transition(.opacity)
                 .zIndex(1)
             }
+
+            // Demos disabled — see StreamTestCatalog.swift
         }
     }
 
@@ -504,7 +506,6 @@ struct DownloadsView: View {
     @State private var magnetInput: String = ""
     @State private var showsMagnetSheet = false
     @State private var showsTorrentFileImporter = false
-    @State private var selectedDemo: StreamTestCatalog.Item?
     @State private var errorMessage: String? = nil
     @State private var isStreaming = false
     @State private var activeStreamSession: StreamSession? = nil
@@ -513,9 +514,8 @@ struct DownloadsView: View {
     var body: some View {
         downloadsScrollContent
             .padding(.top, topBarReservedHeight)
-            .navigationTitle("Downloads")
-            .toolbar { downloadsToolbarContent }
-            .sheet(isPresented: $showsMagnetSheet) { magnetSheetContent }
+        .navigationTitle("Downloads")
+        .sheet(isPresented: $showsMagnetSheet) { magnetSheetContent }
             .fileImporter(
                 isPresented: $showsTorrentFileImporter,
                 allowedContentTypes: [UTType(filenameExtension: "torrent") ?? .data],
@@ -531,56 +531,14 @@ struct DownloadsView: View {
             }
             .onChange(of: settings.first?.proxyBaseURL) { _, _ in syncMetadataBackend() }
             .onChange(of: settings.first?.appToken) { _, _ in syncMetadataBackend() }
-            .sheet(item: $selectedDemo) { demo in
-                DemoDetailSheet(item: demo) {
-                    playTestItem(demo)
-                }
-            }
     }
 
     private var downloadsScrollContent: some View {
         ScrollView {
             VStack(spacing: 20) {
-                demosSection
+                // demosSection — disabled (local test streams only)
                 downloadsErrorBanner
                 downloadsListSection
-            }
-        }
-    }
-
-    private var demosSection: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Demos")
-                .font(MovieBoxTypography.title)
-            Text("Reference streams to verify playback, subtitles, and HDR on a wide-gamut display.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            demoGroup(title: "SDR", items: StreamTestCatalog.sdrDemos)
-            demoGroup(title: "HDR", items: StreamTestCatalog.hdrDemos)
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .adaptiveGlass(cornerRadius: 16)
-        .padding(.horizontal, 28)
-        .padding(.top, 10)
-    }
-
-    private func demoGroup(title: String, items: [StreamTestCatalog.Item]) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
-
-            LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 168, maximum: 220), spacing: 14)],
-                spacing: 14
-            ) {
-                ForEach(items) { item in
-                    DemoStreamCard(item: item) {
-                        selectedDemo = item
-                    }
-                }
             }
         }
     }
@@ -601,17 +559,17 @@ struct DownloadsView: View {
             ContentUnavailableView(
                 "No Downloads",
                 systemImage: "arrow.down.circle",
-                description: Text("Download movies from details, or use the magnet button in the toolbar to open a torrent.")
+                description: Text("Download movies from details, or use File → Open Torrent / Magnet Link.")
             )
             .frame(maxWidth: .infinity, minHeight: 260)
         } else {
             LazyVStack(spacing: 12) {
                 ForEach(downloadManager.tasks) { task in
-                    DownloadTaskRow(
-                        task: task,
-                        downloadManager: downloadManager,
-                        subtitleAppearance: subtitleAppearance
-                    )
+                            DownloadTaskRow(
+                                task: task,
+                                downloadManager: downloadManager,
+                                playbackSettings: playbackSettings
+                            )
                 }
 
                 ForEach(downloads, id: \.tmdbId) { download in
@@ -620,28 +578,6 @@ struct DownloadsView: View {
             }
             .padding(.horizontal, 28)
             .padding(.vertical, 10)
-        }
-    }
-
-    @ToolbarContentBuilder
-    private var downloadsToolbarContent: some ToolbarContent {
-        ToolbarItem(placement: .primaryAction) {
-            HStack(spacing: 12) {
-                if downloadManager.totalDownloadSpeed > 0 {
-                    Text(formatSpeed(downloadManager.totalDownloadSpeed))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Button {
-                    errorMessage = nil
-                    showsMagnetSheet = true
-                } label: {
-                    Image(systemName: "link.circle.fill")
-                        .font(.title3)
-                }
-                .buttonStyle(.plain)
-                .help("Open magnet link or .torrent file")
-            }
         }
     }
 
@@ -674,37 +610,26 @@ struct DownloadsView: View {
         )
     }
 
-    private var subtitleAppearance: SubtitleAppearance {
-        SubtitleAppearance.from(settingsValue: settings.first?.subtitleStyle ?? "cinematic")
+    private var playbackSettings: (appearance: SubtitleAppearance, fontSize: CGFloat) {
+        let settings = settings.first
+        return (
+            SubtitleAppearance.from(settingsValue: settings?.subtitleStyle ?? "cinematic"),
+            CGFloat(settings?.subtitleFontSize ?? 20)
+        )
     }
 
     private func playStream(url: URL, title: String, subtitleURL: URL? = nil, hdrType: PlayerHDRType? = nil) {
         errorMessage = nil
+        let playback = playbackSettings
         playerState.load(
             url: url,
             title: title,
             movieId: 0,
             subtitleURL: subtitleURL,
             hdrType: hdrType,
-            subtitleAppearance: subtitleAppearance
+            subtitleAppearance: playback.appearance,
+            subtitleFontSize: playback.fontSize
         )
-    }
-
-    private func playTestItem(_ item: StreamTestCatalog.Item) {
-        if item.isSubtitleDemo {
-            guard StreamTestCatalog.bundledSubtitle != nil else {
-                errorMessage = "Bundled subtitle sample is missing from the app bundle."
-                return
-            }
-            playStream(
-                url: item.url,
-                title: item.title,
-                subtitleURL: StreamTestCatalog.bundledSubtitle,
-                hdrType: item.hdrType
-            )
-        } else {
-            playStream(url: item.url, title: item.title, hdrType: item.hdrType)
-        }
     }
 
     private func applyPendingMagnetImport() {
@@ -801,7 +726,8 @@ struct DownloadsView: View {
                             playerState: playerState,
                             movieId: 0,
                             subtitleURL: nil,
-                            subtitleAppearance: subtitleAppearance
+                            subtitleAppearance: playbackSettings.appearance,
+                            subtitleFontSize: playbackSettings.fontSize
                         )
                         magnetInput = ""
                         showsMagnetSheet = false
@@ -913,7 +839,7 @@ private struct DownloadTaskRow: View {
     @Environment(PlayerState.self) private var playerState
     let task: DownloadManager.DownloadTask
     let downloadManager: DownloadManager
-    let subtitleAppearance: SubtitleAppearance
+    let playbackSettings: (appearance: SubtitleAppearance, fontSize: CGFloat)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -967,7 +893,8 @@ private struct DownloadTaskRow: View {
                                 url: URL(fileURLWithPath: path),
                                 title: task.title,
                                 movieId: task.tmdbId,
-                                subtitleAppearance: subtitleAppearance
+                                subtitleAppearance: playbackSettings.appearance,
+                                subtitleFontSize: playbackSettings.fontSize
                             )
                         }
                     }

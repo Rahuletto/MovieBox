@@ -115,6 +115,7 @@ public final class AppSettings {
     public var preferHDR: Bool
     public var subtitlesEnabled: Bool
     public var subtitleStyle: String
+    public var subtitleFontSize: Double
     public var audioFormatPriority: String
     public var resumePlayback: Bool
     public var fullScreenOnPlayback: Bool
@@ -153,6 +154,7 @@ public final class AppSettings {
         preferHDR: Bool = true,
         subtitlesEnabled: Bool = true,
         subtitleStyle: String = "cinematic",
+        subtitleFontSize: Double = 20,
         audioFormatPriority: String = "best",
         resumePlayback: Bool = true,
         fullScreenOnPlayback: Bool = false,
@@ -190,6 +192,7 @@ public final class AppSettings {
         self.preferHDR = preferHDR
         self.subtitlesEnabled = subtitlesEnabled
         self.subtitleStyle = subtitleStyle
+        self.subtitleFontSize = subtitleFontSize
         self.audioFormatPriority = audioFormatPriority
         self.resumePlayback = resumePlayback
         self.fullScreenOnPlayback = fullScreenOnPlayback

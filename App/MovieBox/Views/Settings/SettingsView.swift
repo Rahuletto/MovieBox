@@ -326,6 +326,14 @@ private struct PlaybackSettingsSection: View {
                         Text(style.displayName).tag(style.rawValue)
                     }
                 }
+                HStack {
+                    Text("Subtitle size")
+                    Slider(value: $draft.subtitleFontSize, in: 14...36, step: 1)
+                    Text("\(Int(draft.subtitleFontSize)) pt")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .frame(width: 44, alignment: .trailing)
+                }
             }
 
             Section("Player Behavior") {
@@ -391,6 +399,7 @@ private struct SettingsDraft: Equatable {
     var preferHDR = true
     var subtitlesEnabled = true
     var subtitleStyle = "cinematic"
+    var subtitleFontSize = 20.0
     var audioFormatPriority = "best"
     var resumePlayback = true
     var fullScreenOnPlayback = false
@@ -436,6 +445,7 @@ private struct SettingsDraft: Equatable {
         preferHDR = settings.preferHDR
         subtitlesEnabled = settings.subtitlesEnabled
         subtitleStyle = settings.subtitleStyle
+        subtitleFontSize = settings.subtitleFontSize
         audioFormatPriority = settings.audioFormatPriority
         resumePlayback = settings.resumePlayback
         fullScreenOnPlayback = settings.fullScreenOnPlayback
@@ -475,6 +485,7 @@ private struct SettingsDraft: Equatable {
         settings.preferHDR = preferHDR
         settings.subtitlesEnabled = subtitlesEnabled
         settings.subtitleStyle = subtitleStyle
+        settings.subtitleFontSize = subtitleFontSize
         settings.audioFormatPriority = audioFormatPriority
         settings.resumePlayback = resumePlayback
         settings.fullScreenOnPlayback = fullScreenOnPlayback

@@ -17,10 +17,11 @@ struct TorrentSection: View {
     let orchestrator: StreamingOrchestrator
     let subtitleURL: URL?
     var subtitleAppearance: SubtitleAppearance = .cinematic
+    var subtitleFontSize: CGFloat = 20
 
     @StateObject private var downloadManager = DownloadManager()
     @State private var showUnseeded = false
-    @State private var visibleLimit = 24
+    @State private var currentPage = 0
     @State private var busyTorrentID: UUID?
     @State private var cardErrors: [UUID: String] = [:]
     @State private var errorDismissTasks: [UUID: Task<Void, Never>] = [:]
@@ -28,7 +29,7 @@ struct TorrentSection: View {
     @State private var playbackCoordinator: TorrentPlaybackCoordinator?
     @State private var downloadWatchTask: Task<Void, Never>?
 
-    private let pageSize = 24
+    private let pageSize = 12
     private let gridColumns = [GridItem(.adaptive(minimum: 280, maximum: 360), spacing: 10)]
 
     private var seededTorrents: [TorrentResult] { torrents.filter { $0.seeders > 0 } }
@@ -38,8 +39,25 @@ struct TorrentSection: View {
         return seededTorrents
     }
 
+    private var pageCount: Int {
+        max(1, (displayedTorrents.count + pageSize - 1) / pageSize)
+    }
+
+    private var clampedPage: Int {
+        min(currentPage, max(0, pageCount - 1))
+    }
+
     private var visibleTorrents: [TorrentResult] {
-        Array(displayedTorrents.prefix(visibleLimit))
+        let start = clampedPage * pageSize
+        guard start < displayedTorrents.count else { return [] }
+        return Array(displayedTorrents[start..<min(start + pageSize, displayedTorrents.count)])
+    }
+
+    private var pageRangeLabel: String {
+        guard !displayedTorrents.isEmpty else { return "" }
+        let start = clampedPage * pageSize + 1
+        let end = min((clampedPage + 1) * pageSize, displayedTorrents.count)
+        return "\(start)–\(end) of \(displayedTorrents.count)"
     }
 
     var body: some View {
@@ -76,6 +94,10 @@ struct TorrentSection: View {
                 footerControls
             }
         }
+        .onChange(of: movie.id) { _, _ in currentPage = 0 }
+        .onChange(of: torrents.count) { _, _ in
+            currentPage = min(currentPage, max(0, pageCount - 1))
+        }
     }
 
     private var header: some View {
@@ -84,7 +106,7 @@ struct TorrentSection: View {
                 .font(MovieBoxTypography.title)
             Spacer()
             if !displayedTorrents.isEmpty {
-                Text("\(displayedTorrents.count) total")
+                Text(pageRangeLabel)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -94,19 +116,40 @@ struct TorrentSection: View {
     @ViewBuilder
     private var footerControls: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if visibleLimit < displayedTorrents.count {
-                Button("Show \(min(pageSize, displayedTorrents.count - visibleLimit)) more") {
-                    visibleLimit = min(visibleLimit + pageSize, displayedTorrents.count)
+            if pageCount > 1 {
+                HStack(spacing: 12) {
+                    Button {
+                        currentPage = max(0, clampedPage - 1)
+                    } label: {
+                        Label("Previous", systemImage: "chevron.left")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(clampedPage == 0)
+
+                    Spacer(minLength: 0)
+
+                    Text("Page \(clampedPage + 1) of \(pageCount)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Spacer(minLength: 0)
+
+                    Button {
+                        currentPage = min(pageCount - 1, clampedPage + 1)
+                    } label: {
+                        Label("Next", systemImage: "chevron.right")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(clampedPage >= pageCount - 1)
                 }
-                .buttonStyle(.plain)
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(.secondary)
             }
 
             if !unseededTorrents.isEmpty {
                 Button {
                     showUnseeded.toggle()
-                    visibleLimit = pageSize
+                    currentPage = 0
                 } label: {
                     Label(
                         showUnseeded
@@ -167,7 +210,8 @@ struct TorrentSection: View {
                         playerState: playerState,
                         movieId: movie.id,
                         subtitleURL: subtitleURL,
-                        subtitleAppearance: subtitleAppearance
+                        subtitleAppearance: subtitleAppearance,
+                        subtitleFontSize: subtitleFontSize
                     )
                 } catch {
                     presentError(error.localizedDescription, for: torrent.id)

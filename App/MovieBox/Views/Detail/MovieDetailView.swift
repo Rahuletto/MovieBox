@@ -64,6 +64,7 @@ struct MovieDetailView: View {
                 isLoadingSubtitles: isLoadingSubtitles,
                 subtitleFileURL: subtitleFileURL,
                 subtitleAppearance: settings.first?.subtitleAppearance ?? .cinematic,
+                subtitleFontSize: settings.first?.subtitleFontSizePoints ?? 20,
                 currentRating: currentRating,
                 scrollOffset: $scrollOffset,
                 orchestrator: orchestrator,
@@ -326,6 +327,7 @@ struct MovieDetailView: View {
                         movieId: movieId,
                         subtitleURL: nil,
                         subtitleAppearance: settings.first?.subtitleAppearance ?? .cinematic,
+                subtitleFontSize: settings.first?.subtitleFontSizePoints ?? 20,
                         episodeTitle: "Trailer"
                     )
                 }
@@ -390,7 +392,8 @@ struct MovieDetailView: View {
                             playerState: playerState,
                             movieId: movieId,
                             subtitleURL: subtitleFileURL,
-                            subtitleAppearance: settings.first?.subtitleAppearance ?? .cinematic
+                            subtitleAppearance: settings.first?.subtitleAppearance ?? .cinematic,
+                            subtitleFontSize: settings.first?.subtitleFontSizePoints ?? 20
                         )
                     } catch {
                         errorMessage = error.localizedDescription
@@ -533,6 +536,7 @@ private struct MainContentView: View {
     let isLoadingSubtitles: Bool
     let subtitleFileURL: URL?
     let subtitleAppearance: SubtitleAppearance
+    let subtitleFontSize: CGFloat
     let currentRating: Float?
     @Binding var scrollOffset: CGFloat
     let orchestrator: StreamingOrchestrator
@@ -580,7 +584,8 @@ private struct MainContentView: View {
                             isTV: kind == .tv,
                             orchestrator: orchestrator,
                             subtitleURL: subtitleFileURL,
-                            subtitleAppearance: subtitleAppearance
+                            subtitleAppearance: subtitleAppearance,
+                            subtitleFontSize: subtitleFontSize
                         )
                         .frame(maxWidth: .infinity)
 

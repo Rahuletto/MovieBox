@@ -13,6 +13,7 @@ struct AppSettingsPlaybackSync: View {
             .frame(width: 0, height: 0)
             .onAppear(perform: sync)
             .onChange(of: settings.first?.subtitleStyle) { _, _ in sync() }
+            .onChange(of: settings.first?.subtitleFontSize) { _, _ in sync() }
             .onChange(of: settings.first?.subtitlesEnabled) { _, _ in sync() }
     }
 
@@ -20,7 +21,8 @@ struct AppSettingsPlaybackSync: View {
         guard let settings = settings.first else { return }
         playerState.applyPlaybackSettings(
             subtitleStyle: settings.subtitleStyle,
-            subtitlesEnabled: settings.subtitlesEnabled
+            subtitlesEnabled: settings.subtitlesEnabled,
+            subtitleFontSize: settings.subtitleFontSize
         )
     }
 }
