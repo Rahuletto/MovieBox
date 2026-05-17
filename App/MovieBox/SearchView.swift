@@ -128,6 +128,8 @@ struct SearchView: View {
                 return d1 < d2
             }
         } catch {
+            LogStore.shared.log("Error searching movies: \(error)")
+            LogStore.shared.log("Stack Trace:\n\(Thread.callStackSymbols.prefix(8).joined(separator: "\n"))")
             errorMessage = error.localizedDescription
         }
         isSearching = false

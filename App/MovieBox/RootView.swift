@@ -9,6 +9,31 @@ import SwiftData
 import SwiftUI
 import AVKit
 
+@MainActor
+public final class LogStore {
+    public static let shared = LogStore()
+    public private(set) var logs: [String] = []
+
+    public init() {}
+
+    public func log(_ message: String) {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        let timestamp = formatter.string(from: Date())
+        let formatted = "[\(timestamp)] \(message)"
+        logs.append(formatted)
+        NSLog("MovieBoxApp: %@", formatted)
+    }
+
+    public func clear() {
+        logs.removeAll()
+    }
+
+    public var allLogs: String {
+        logs.joined(separator: "\n")
+    }
+}
+
 struct RootView: View {
     @Environment(AppRouter.self) private var router
     @Environment(PlayerState.self) private var playerState
@@ -51,21 +76,33 @@ struct RootView: View {
             }
         }
         .task {
+            LogStore.shared.log("RootView: Application launched.")
             let descriptor = FetchDescriptor<AppSettings>()
             if let existing = try? modelContext.fetch(descriptor) {
                 if existing.isEmpty {
+                    LogStore.shared.log("RootView: Inserting default AppSettings.")
                     let defaultSettings = AppSettings(
-                        proxyBaseURL: "http://localhost:8787",
+                        proxyBaseURL: "http://127.0.0.1:8787",
                         appToken: "165663371760d04a573abb26622164c12c508819da49dc01cc13c833d03ee9aa",
-                        omdbAPIKey: "d6407590"
+                        omdbAPIKey: "d6407590",
+                        defaultDownloadPath: "~/Movies/MovieBox"
                     )
                     modelContext.insert(defaultSettings)
                     try? modelContext.save()
-                } else if let first = existing.first, first.proxyBaseURL != "http://localhost:8787" {
-                    first.proxyBaseURL = "http://localhost:8787"
-                    first.appToken = "165663371760d04a573abb26622164c12c508819da49dc01cc13c833d03ee9aa"
-                    first.omdbAPIKey = "d6407590"
-                    try? modelContext.save()
+                } else if let first = existing.first {
+                    LogStore.shared.log("RootView: Loaded AppSettings. Proxy base URL is \(first.proxyBaseURL), downloads folder is \(first.defaultDownloadPath)")
+                    if first.proxyBaseURL.isEmpty || first.proxyBaseURL == "http://localhost:8787" {
+                        LogStore.shared.log("RootView: Migrating legacy localhost proxy base URL to 127.0.0.1")
+                        first.proxyBaseURL = "http://127.0.0.1:8787"
+                        first.appToken = "165663371760d04a573abb26622164c12c508819da49dc01cc13c833d03ee9aa"
+                        first.omdbAPIKey = "d6407590"
+                        try? modelContext.save()
+                    }
+                    if first.defaultDownloadPath == "~/Downloads/MovieBox" || first.defaultDownloadPath.isEmpty {
+                        LogStore.shared.log("RootView: Migrating default download path to ~/Movies/MovieBox")
+                        first.defaultDownloadPath = "~/Movies/MovieBox"
+                        try? modelContext.save()
+                    }
                 }
             }
         }
@@ -264,6 +301,8 @@ struct HomeView: View {
                 .prefix(8)
                 .map { $0 }
         } catch {
+            LogStore.shared.log("Error loading Catalog: \(error)")
+            LogStore.shared.log("Stack Trace:\n\(Thread.callStackSymbols.prefix(8).joined(separator: "\n"))")
             errorMessage = error.localizedDescription
         }
         isLoading = false
@@ -494,6 +533,8 @@ struct MovieDetailView: View {
                 language: settings.first?.preferredSubtitleLang ?? "en"
             )
         } catch {
+            LogStore.shared.log("Error loading Movie Detail: \(error)")
+            LogStore.shared.log("Stack Trace:\n\(Thread.callStackSymbols.prefix(8).joined(separator: "\n"))")
             errorMessage = error.localizedDescription
         }
         isLoading = false
@@ -1100,6 +1141,8 @@ struct CatalogView: View {
                 .nowPlaying: try await nowPlaying
             ]
         } catch {
+            LogStore.shared.log("Error loading CatalogView: \(error)")
+            LogStore.shared.log("Stack Trace:\n\(Thread.callStackSymbols.prefix(8).joined(separator: "\n"))")
             errorMessage = error.localizedDescription
         }
     }
@@ -1386,6 +1429,8 @@ struct MyListView: View {
 struct RetryCard: View {
     let message: String
     let retry: () -> Void
+    @State private var copied = false
+    @Query private var settings: [AppSettings]
 
     var body: some View {
         VStack(spacing: 16) {
@@ -1394,16 +1439,78 @@ struct RetryCard: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
-            Button(action: retry) {
-                Text("Retry")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 20)
+            HStack(spacing: 12) {
+                Button(action: retry) {
+                    Text("Retry")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 10)
+                        .background(Color.red)
+                        .clipShape(Capsule(style: .continuous))
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    let appLogs = LogStore.shared.allLogs
+                    let configSettings = settings.first
+                    
+                    let systemInfo = """
+                    ========================================
+                    MOVIEBOX DIAGNOSTIC SYSTEM ERROR REPORT
+                    ========================================
+                    Timestamp: \(Date().description)
+                    Error: \(message)
+                    
+                    --- SYSTEM CONFIGURATION ---
+                    Proxy Base URL: \(configSettings?.proxyBaseURL ?? "Not Configured")
+                    Default Download Path: \(configSettings?.defaultDownloadPath ?? "Not Configured")
+                    Preferred Quality: \(configSettings?.preferredQuality ?? "Not Configured")
+                    Metadata Mode: \(String(describing: configSettings?.metadataMode))
+                    Debug Logging Enabled: \(configSettings?.debugLogging ?? false ? "Yes" : "No")
+                    
+                    --- DIRECTORY WRITE DIAGNOSIS ---
+                    Target Downloads Folder: \(configSettings?.defaultDownloadPath ?? "Not Configured")
+                    Can Write Downloads Folder: \(FileManager.default.isWritableFile(atPath: (configSettings?.defaultDownloadPath as NSString?)?.expandingTildeInPath ?? "") ? "Yes" : "No")
+                    
+                    --- DETAILED APP WORKFLOW LOGS ---
+                    \(appLogs.isEmpty ? "No logs recorded yet." : appLogs)
+                    ========================================
+                    """
+                    
+                    #if os(macOS)
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(systemInfo, forType: .string)
+                    #elseif os(iOS)
+                    UIPasteboard.general.string = systemInfo
+                    #endif
+                    
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.7)) {
+                        copied = true
+                    }
+                    
+                    Task {
+                        try? await Task.sleep(for: .seconds(2))
+                        withAnimation(.spring(response: 0.28, dampingFraction: 0.7)) {
+                            copied = false
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: copied ? "checkmark.circle.fill" : "doc.on.doc")
+                            .font(.system(size: 11))
+                            .foregroundStyle(copied ? Color.green : Color.primary)
+                        Text(copied ? "Copied!" : "Copy Logs")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(copied ? Color.green : Color.primary)
+                    }
+                    .padding(.horizontal, 16)
                     .padding(.vertical, 10)
-                    .background(Color.red)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .background(Color.primary.opacity(0.12))
+                    .clipShape(Capsule(style: .continuous))
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
         }
         .padding(24)
         .adaptiveGlass(cornerRadius: 24)

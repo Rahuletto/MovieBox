@@ -22,41 +22,62 @@ struct PillTabBar: View {
         TabItem(id: .downloads, title: "Downloads", systemImage: "arrow.down.circle")
     ]
 
+    @State private var showSearchContents = false
+
+    private var isSearchExpanded: Bool {
+        router.selectedRoute == .search && !isMenuExpanded
+    }
+
     var body: some View {
         HStack(spacing: 8) {
-            if router.selectedRoute == .search {
-                if let genre = router.selectedGenre {
+            if let genre = router.selectedGenre {
+                HStack(spacing: 0) {
+                    HStack(spacing: 12) {
+                        Button {
+                            router.selectedGenre = nil
+                        } label: {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(.primary)
+                                .frame(width: 32, height: 32)
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .adaptiveGlass(cornerRadius: 32)
+                        .shadow(color: .black.opacity(0.12), radius: 8, x: 0, y: 3)
+                        .onTapGesture {}
+                        .gesture(DragGesture(minimumDistance: 0).onChanged { _ in }.onEnded { _ in })
+
+                        Text(genre.name)
+                            .font(.system(size: 18, weight: .bold))
+                            .foregroundStyle(.primary)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .padding(.leading, 96)
+
+                    Spacer()
+                }
+                .offset(y: 2)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            } else {
+                HStack(spacing: 8) {
+                    // Menu Capsule
                     HStack(spacing: 0) {
-                        HStack(spacing: 12) {
+                        if isSearchExpanded {
                             Button {
-                                router.selectedGenre = nil
+                                withAnimation(.spring(response: 0.36, dampingFraction: 0.64)) {
+                                    isMenuExpanded = true
+                                }
                             } label: {
-                                Image(systemName: "chevron.left")
+                                Image(systemName: "ellipsis")
                                     .font(.system(size: 13, weight: .bold))
                                     .foregroundStyle(.primary)
-                                    .frame(width: 32, height: 32)
+                                    .frame(width: 38, height: 38)
                                     .contentShape(Circle())
                             }
                             .buttonStyle(.plain)
-                            .adaptiveGlass(cornerRadius: 32)
-                            .shadow(color: .black.opacity(0.12), radius: 8, x: 0, y: 3)
-                            .onTapGesture {}
-                            .gesture(DragGesture(minimumDistance: 0).onChanged { _ in }.onEnded { _ in })
-
-                            Text(genre.name)
-                                .font(.system(size: 18, weight: .bold))
-                                .foregroundStyle(.primary)
-                                .fixedSize(horizontal: true, vertical: false)
-                        }
-                        .padding(.leading, 96)
-
-                        Spacer()
-                    }
-                    .offset(y: 2)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
-                } else {
-                    HStack(spacing: 8) {
-                        if isMenuExpanded {
+                            .transition(.opacity)
+                        } else {
                             HStack(spacing: 2) {
                                 ForEach(Array(tabs.enumerated()), id: \.element.id) { index, tab in
                                     tabButton(tab)
@@ -67,50 +88,20 @@ struct PillTabBar: View {
                             }
                             .padding(.horizontal, 4)
                             .padding(.vertical, 3)
-                            .adaptiveGlass(cornerRadius: 32)
-                            .clipShape(Capsule(style: .continuous))
-                            .shadow(color: .black.opacity(0.12), radius: 12, x: 0, y: 4)
-                            .matchedGeometryEffect(id: "menu-capsule", in: animationNamespace)
-                            .onTapGesture {}
-                            .gesture(DragGesture(minimumDistance: 0).onChanged { _ in }.onEnded { _ in })
+                            .frame(width: 420)
+                            .transition(.opacity)
+                        }
+                    }
+                    .frame(width: isSearchExpanded ? 38 : 420)
+                    .adaptiveGlass(cornerRadius: 32)
+                    .clipShape(Capsule(style: .continuous))
+                    .shadow(color: .black.opacity(0.12), radius: 12, x: 0, y: 4)
+                    .onTapGesture {}
+                    .gesture(DragGesture(minimumDistance: 0).onChanged { _ in }.onEnded { _ in })
 
-                            Button {
-                                withAnimation(.spring(response: 0.35, dampingFraction: 0.78)) {
-                                    isMenuExpanded = false
-                                }
-                            } label: {
-                                Image(systemName: "magnifyingglass")
-                                    .font(.system(size: 13, weight: .semibold))
-                                    .foregroundStyle(Color.primary)
-                                    .frame(width: 32, height: 32)
-                                    .background(Circle().fill(.primary.opacity(0.22)))
-                                    .contentShape(Circle())
-                            }
-                            .buttonStyle(.plain)
-                            .adaptiveGlass(cornerRadius: 32)
-                            .shadow(color: .black.opacity(0.12), radius: 12, x: 0, y: 4)
-                            .matchedGeometryEffect(id: "search-capsule", in: animationNamespace)
-                            .onTapGesture {}
-                            .gesture(DragGesture(minimumDistance: 0).onChanged { _ in }.onEnded { _ in })
-                        } else {
-                            Button {
-                                withAnimation(.spring(response: 0.35, dampingFraction: 0.78)) {
-                                    isMenuExpanded = true
-                                }
-                            } label: {
-                                Image(systemName: "ellipsis")
-                                    .font(.system(size: 13, weight: .bold))
-                                    .foregroundStyle(.primary)
-                                    .frame(width: 32, height: 32)
-                                    .contentShape(Circle())
-                            }
-                            .buttonStyle(.plain)
-                            .adaptiveGlass(cornerRadius: 32)
-                            .shadow(color: .black.opacity(0.12), radius: 12, x: 0, y: 4)
-                            .matchedGeometryEffect(id: "menu-capsule", in: animationNamespace)
-                            .onTapGesture {}
-                            .gesture(DragGesture(minimumDistance: 0).onChanged { _ in }.onEnded { _ in })
-
+                    // Search Capsule
+                    HStack(spacing: 0) {
+                        if isSearchExpanded {
                             HStack(spacing: 10) {
                                 Image(systemName: "magnifyingglass")
                                     .font(.system(size: 13, weight: .semibold))
@@ -123,9 +114,9 @@ struct PillTabBar: View {
                                 .textFieldStyle(.plain)
                                 .font(.system(size: 14, weight: .medium))
                                 .focused($isSearchFieldFocused)
-                                .fixedSize(horizontal: true, vertical: false)
+                                .opacity(showSearchContents ? 1 : 0)
 
-                                if !router.searchQuery.isEmpty {
+                                if showSearchContents && !router.searchQuery.isEmpty {
                                     Button {
                                         router.searchQuery = ""
                                     } label: {
@@ -135,47 +126,44 @@ struct PillTabBar: View {
                                     .buttonStyle(.plain)
                                 }
                             }
-                            .opacity(isMenuExpanded ? 0 : 1)
                             .padding(.horizontal, 14)
                             .padding(.vertical, 8)
-                            .frame(width: 380)
-                            .adaptiveGlass(cornerRadius: 32)
-                            .shadow(color: .black.opacity(0.12), radius: 12, x: 0, y: 4)
-                            .matchedGeometryEffect(id: "search-capsule", in: animationNamespace)
-                            .onTapGesture {}
-                            .gesture(DragGesture(minimumDistance: 0).onChanged { _ in }.onEnded { _ in })
-                        }
-                    }
-                }
-            } else {
-                HStack(spacing: 8) {
-                    HStack(spacing: 2) {
-                        ForEach(Array(tabs.enumerated()), id: \.element.id) { index, tab in
-                            tabButton(tab)
-                            if index < tabs.count - 1 {
-                                separator
+                            .frame(width: 420)
+                            .transition(.opacity)
+                        } else {
+                            Button {
+                                if router.selectedRoute == .search {
+                                    withAnimation(.spring(response: 0.36, dampingFraction: 0.64)) {
+                                        isMenuExpanded = false
+                                    }
+                                } else {
+                                    router.show(.search)
+                                }
+                            } label: {
+                                Image(systemName: "magnifyingglass")
+                                    .font(.system(size: 13.5, weight: .medium))
+                                    .foregroundStyle(router.selectedRoute == .search ? Color.primary : Color.secondary)
+                                    .frame(width: 38, height: 38)
+                                    .background {
+                                        if router.selectedRoute == .search {
+                                            Circle()
+                                                .fill(.primary.opacity(0.22))
+                                        }
+                                    }
+                                    .contentShape(Circle())
                             }
+                            .buttonStyle(.plain)
+                            .transition(.opacity)
                         }
                     }
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 3)
+                    .frame(width: isSearchExpanded ? 420 : 38)
                     .adaptiveGlass(cornerRadius: 32)
                     .clipShape(Capsule(style: .continuous))
                     .shadow(color: .black.opacity(0.12), radius: 12, x: 0, y: 4)
-                    .matchedGeometryEffect(id: "menu-capsule", in: animationNamespace)
                     .onTapGesture {}
                     .gesture(DragGesture(minimumDistance: 0).onChanged { _ in }.onEnded { _ in })
-
-                    searchButton
-                        .frame(width: 32, height: 32)
-                        .adaptiveGlass(cornerRadius: 32)
-                        .clipShape(Capsule(style: .continuous))
-                        .shadow(color: .black.opacity(0.12), radius: 12, x: 0, y: 4)
-                        .matchedGeometryEffect(id: "search-capsule", in: animationNamespace)
-                        .onTapGesture {}
-                        .gesture(DragGesture(minimumDistance: 0).onChanged { _ in }.onEnded { _ in })
                 }
-                .transition(.opacity.combined(with: .move(edge: .top)))
+                .frame(width: 466)
             }
         }
         .frame(maxWidth: .infinity)
@@ -183,30 +171,43 @@ struct PillTabBar: View {
         .zIndex(10)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Primary navigation")
+        .onAppear {
+            if router.selectedRoute == .search {
+                showSearchContents = true
+            }
+        }
         .onChange(of: router.selectedRoute) { _, newValue in
             if newValue == .search {
                 isMenuExpanded = false
+                withAnimation(.easeIn(duration: 0.12).delay(0.12)) {
+                    showSearchContents = true
+                }
                 Task {
                     try? await Task.sleep(for: .milliseconds(150))
                     isSearchFieldFocused = true
                 }
             } else {
+                showSearchContents = false
                 isSearchFieldFocused = false
             }
         }
         .onChange(of: isMenuExpanded) { _, newValue in
             if !newValue && router.selectedRoute == .search {
+                withAnimation(.easeIn(duration: 0.12).delay(0.12)) {
+                    showSearchContents = true
+                }
                 Task {
                     try? await Task.sleep(for: .milliseconds(150))
                     isSearchFieldFocused = true
                 }
             } else {
+                showSearchContents = false
                 isSearchFieldFocused = false
             }
         }
-        .animation(.spring(response: 0.38, dampingFraction: 0.74), value: router.selectedRoute)
-        .animation(.spring(response: 0.38, dampingFraction: 0.74), value: router.selectedGenre)
-        .animation(.spring(response: 0.38, dampingFraction: 0.74), value: isMenuExpanded)
+        .animation(.spring(response: 0.38, dampingFraction: 0.64), value: router.selectedRoute)
+        .animation(.spring(response: 0.38, dampingFraction: 0.64), value: router.selectedGenre)
+        .animation(.spring(response: 0.38, dampingFraction: 0.64), value: isMenuExpanded)
     }
 
     private func tabButton(_ tab: TabItem) -> some View {
@@ -231,7 +232,7 @@ struct PillTabBar: View {
                 .contentShape(Capsule(style: .continuous))
         }
         .buttonStyle(.plain)
-        .animation(.spring(response: 0.32, dampingFraction: 0.74), value: isSelected)
+        .animation(.spring(response: 0.32, dampingFraction: 0.58), value: isSelected)
         .accessibilityLabel(tab.title)
         .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : [.isButton])
     }
