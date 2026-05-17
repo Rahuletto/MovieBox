@@ -301,6 +301,9 @@ struct HomeView: View {
                 .prefix(8)
                 .map { $0 }
         } catch {
+            if let urlError = error as? URLError, urlError.code == .cancelled {
+                return
+            }
             LogStore.shared.log("Error loading Catalog: \(error)")
             LogStore.shared.log("Stack Trace:\n\(Thread.callStackSymbols.prefix(8).joined(separator: "\n"))")
             errorMessage = error.localizedDescription
@@ -533,6 +536,9 @@ struct MovieDetailView: View {
                 language: settings.first?.preferredSubtitleLang ?? "en"
             )
         } catch {
+            if let urlError = error as? URLError, urlError.code == .cancelled {
+                return
+            }
             LogStore.shared.log("Error loading Movie Detail: \(error)")
             LogStore.shared.log("Stack Trace:\n\(Thread.callStackSymbols.prefix(8).joined(separator: "\n"))")
             errorMessage = error.localizedDescription
@@ -1141,6 +1147,9 @@ struct CatalogView: View {
                 .nowPlaying: try await nowPlaying
             ]
         } catch {
+            if let urlError = error as? URLError, urlError.code == .cancelled {
+                return
+            }
             LogStore.shared.log("Error loading CatalogView: \(error)")
             LogStore.shared.log("Stack Trace:\n\(Thread.callStackSymbols.prefix(8).joined(separator: "\n"))")
             errorMessage = error.localizedDescription

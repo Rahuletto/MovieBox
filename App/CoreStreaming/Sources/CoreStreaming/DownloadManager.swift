@@ -49,7 +49,7 @@ public final class DownloadManager: ObservableObject {
             self.downloadDirectory = dir
         } else {
             self.downloadDirectory = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Downloads")
+                .appendingPathComponent("Movies")
                 .appendingPathComponent("MovieBox")
         }
         try? FileManager.default.createDirectory(at: self.downloadDirectory, withIntermediateDirectories: true)

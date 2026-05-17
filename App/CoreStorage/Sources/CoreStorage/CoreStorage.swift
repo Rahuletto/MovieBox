@@ -142,7 +142,7 @@ public final class AppSettings {
         jackettAPIKey: String = "",
         jackettHost: String = "localhost",
         jackettPort: Int = 9117,
-        defaultDownloadPath: String = "~/Downloads/MovieBox",
+        defaultDownloadPath: String = "~/Movies/MovieBox",
         preferredQuality: String = "best",
         preferredAudioLang: String = "en",
         preferredSubtitleLang: String = "en",

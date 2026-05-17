@@ -105,6 +105,11 @@ struct GenreResultsView: View {
             _ = try await movieResults
             _ = try await tvResults
         } catch {
+            if let urlError = error as? URLError, urlError.code == .cancelled {
+                return
+            }
+            LogStore.shared.log("Error loading GenreResults: \(error)")
+            LogStore.shared.log("Stack Trace:\n\(Thread.callStackSymbols.prefix(8).joined(separator: "\n"))")
             if movies.isEmpty && shows.isEmpty {
                 errorMessage = error.localizedDescription
             }

@@ -128,6 +128,9 @@ struct SearchView: View {
                 return d1 < d2
             }
         } catch {
+            if let urlError = error as? URLError, urlError.code == .cancelled {
+                return
+            }
             LogStore.shared.log("Error searching movies: \(error)")
             LogStore.shared.log("Stack Trace:\n\(Thread.callStackSymbols.prefix(8).joined(separator: "\n"))")
             errorMessage = error.localizedDescription
