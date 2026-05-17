@@ -12,6 +12,24 @@ public enum PlayerHDRType: String, Sendable, Codable {
     case dolbyVisionWithHDR10 = "DV-HDR10"
 }
 
+public struct PlayerEpisode: Identifiable, Sendable, Equatable {
+    public let id: String
+    public let title: String
+    public let episodeNumber: Int
+    public let seasonNumber: Int
+    public let url: URL
+    public let subtitleURL: URL?
+    
+    public init(id: String, title: String, episodeNumber: Int, seasonNumber: Int, url: URL, subtitleURL: URL? = nil) {
+        self.id = id
+        self.title = title
+        self.episodeNumber = episodeNumber
+        self.seasonNumber = seasonNumber
+        self.url = url
+        self.subtitleURL = subtitleURL
+    }
+}
+
 actor ThumbnailService {
     private let generator: AVAssetImageGenerator
 
@@ -62,6 +80,11 @@ public final class PlayerState {
     public var hdrType: PlayerHDRType? = nil
     public var errorMessage: String? = nil
     public var onPositionUpdate: ((Int, Double, Double) -> Void)?
+    
+    // TV Series Episode Listing
+    public var episodes: [PlayerEpisode] = []
+    public var currentEpisodeIndex: Int? = nil
+    public var isEpisodesSidebarOpen: Bool = false
 
     // Picture in Picture
     public var isPictureInPictureActive: Bool = false
@@ -97,7 +120,16 @@ public final class PlayerState {
         self.hdrType = nil
     }
 
-    public func load(url: URL, title: String, movieId: Int = 0, subtitleURL: URL? = nil, hdrType: PlayerHDRType? = nil, episodeTitle: String? = nil) {
+    public func load(
+        url: URL,
+        title: String,
+        movieId: Int = 0,
+        subtitleURL: URL? = nil,
+        hdrType: PlayerHDRType? = nil,
+        episodeTitle: String? = nil,
+        episodes: [PlayerEpisode] = [],
+        currentEpisodeIndex: Int? = nil
+    ) {
         print("[DEBUG] PlayerState.load() called")
         print("[DEBUG] - Title: \(title)")
         print("[DEBUG] - URL: \(url.absoluteString)")
@@ -111,6 +143,11 @@ public final class PlayerState {
         self.subtitleURL = subtitleURL
         self.hdrType = hdrType
         self.errorMessage = nil
+        if !episodes.isEmpty {
+            self.episodes = episodes
+            self.currentEpisodeIndex = currentEpisodeIndex
+        }
+        
         self.videoGravity = .resizeAspect // Reset to default
 
         if let ep = episodeTitle {
@@ -245,6 +282,28 @@ public final class PlayerState {
                 }
             }
         }
+    }
+
+    public func playEpisode(at index: Int) {
+        guard index >= 0 && index < episodes.count else { return }
+        let ep = episodes[index]
+        self.currentEpisodeIndex = index
+        self.episodeTitle = ep.title
+        
+        load(
+            url: ep.url,
+            title: seriesName,
+            movieId: movieId,
+            subtitleURL: ep.subtitleURL,
+            hdrType: hdrType,
+            episodeTitle: ep.title
+        )
+    }
+
+    public func playNextEpisode() {
+        guard let currentIndex = currentEpisodeIndex, currentIndex + 1 < episodes.count else { return }
+        let nextIndex = currentIndex + 1
+        playEpisode(at: nextIndex)
     }
 
     public func dismiss() {
@@ -406,6 +465,16 @@ public final class PlayerState {
                 Task { @MainActor in
                     print("[DEBUG] TimeControlStatus changed to: \(status.rawValue)")
                     self?.isPlaying = (status == .playing)
+                }
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] notification in
+                Task { @MainActor in
+                    print("[DEBUG] PlayerItem completed playback! Moving to next episode...")
+                    self?.playNextEpisode()
                 }
             }
             .store(in: &cancellables)
