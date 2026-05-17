@@ -279,15 +279,20 @@ public enum ReleaseParser {
 
 public actor TorrentSearchAggregator {
     private let torrentioClient: TorrentioClient
-    private let nativeIndexers: NativeIndexerRegistry
+    private let backendSearcher: BackendTorrentSearcher?
     public private(set) var lastDiagnostics = TorrentSearchDiagnostics()
 
     public init(
         torrentioClient: TorrentioClient = TorrentioClient(),
-        nativeIndexers: NativeIndexerRegistry = NativeIndexerRegistry()
+        backendBaseURL: URL? = nil,
+        backendAppToken: String? = nil
     ) {
         self.torrentioClient = torrentioClient
-        self.nativeIndexers = nativeIndexers
+        if let backendBaseURL, let backendAppToken, !backendAppToken.isEmpty {
+            self.backendSearcher = BackendTorrentSearcher(baseURL: backendBaseURL, appToken: backendAppToken)
+        } else {
+            self.backendSearcher = nil
+        }
     }
 
     public func search(
@@ -295,15 +300,13 @@ public actor TorrentSearchAggregator {
         year: Int? = nil,
         imdbId: String? = nil,
         kind: TorrentioClient.MediaKind = .movie,
-        enableYTS: Bool = true,
-        enableNativeIndexers: Bool = true
+        enableYTS: Bool = true
     ) -> AsyncStream<[TorrentResult]> {
         AsyncStream { continuation in
             Task {
                 var diagnostics = TorrentSearchDiagnostics()
                 let query = TorrentSearchQuery.make(title: movieTitle, year: year)
                 diagnostics.queryUsed = query
-                let context = TorrentSearchContext(query: query, year: year, imdbId: imdbId, kind: kind)
 
                 var allResults: [TorrentResult] = []
 
@@ -319,22 +322,32 @@ public actor TorrentSearchAggregator {
                     }
                 }
 
-                if enableNativeIndexers {
-                    let enabledIDs: Set<String>? = enableYTS
-                        ? nil
-                        : Set(NativeIndexerRegistry.defaultIndexers.filter { $0 != "yts" })
-                    let native = await nativeIndexers.search(context: context, enabledIDs: enabledIDs)
-                    diagnostics.nativeCounts = native.counts
-                    diagnostics.nativeErrors = native.errors
+                if let backendSearcher {
+                    do {
+                        let backend = try await backendSearcher.search(
+                            query: query,
+                            year: year,
+                            imdbId: imdbId,
+                            kind: kind,
+                            enableYTS: enableYTS
+                        )
+                        diagnostics.nativeCounts = backend.counts
+                        diagnostics.nativeErrors = backend.errors
+                        diagnostics.ytsCount = backend.counts["yts", default: 0]
+                        diagnostics.ytsAttempted = enableYTS && kind == .movie
 
-                    let existingHashes = Set(allResults.compactMap { $0.infoHash?.lowercased() })
-                    let filtered = native.results.filter { row in
-                        guard let hash = row.infoHash?.lowercased() else { return true }
-                        return !existingHashes.contains(hash)
+                        let existingHashes = Set(allResults.compactMap { $0.infoHash?.lowercased() })
+                        let filtered = backend.results.filter { row in
+                            guard let hash = row.infoHash?.lowercased() else { return true }
+                            return !existingHashes.contains(hash)
+                        }
+                        allResults.append(contentsOf: filtered)
+                    } catch {
+                        diagnostics.nativeErrors["backend"] = error.localizedDescription
+                        NSLog("Backend torrent search failed: \(error)")
                     }
-                    allResults.append(contentsOf: filtered)
-                    diagnostics.ytsCount = native.counts["yts", default: 0]
-                    diagnostics.ytsAttempted = enableYTS && kind == .movie
+                } else {
+                    diagnostics.nativeErrors["backend"] = "Configure backend URL and app token in Settings."
                 }
 
                 lastDiagnostics = diagnostics

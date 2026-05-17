@@ -152,8 +152,7 @@ struct MovieDetailView: View {
                     year: year,
                     imdbId: imdb,
                     kind: torrentKind,
-                    enableYTS: appSettings?.enableYTS ?? true,
-                    enableNativeIndexers: true
+                    enableYTS: appSettings?.enableYTS ?? true
                 ) {
                     latest = batch
                 }
@@ -258,7 +257,7 @@ struct MovieDetailView: View {
     private func downloadSubtitleAsync(_ subtitle: SubtitleInfo) async {
         selectedSubtitle = subtitle
         do {
-            guard let mode = metadataMode else { return }
+            guard let mode = settings.first?.metadataMode else { return }
             let client = SubtitleClient(mode: mode)
             let data = try await client.downloadSubtitle(url: subtitle.downloadUrl)
             let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("moviebox_subtitles")

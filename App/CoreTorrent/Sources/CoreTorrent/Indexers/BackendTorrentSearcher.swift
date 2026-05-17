@@ -43,12 +43,41 @@ public actor BackendTorrentSearcher {
         }
 
         let payload = try JSONDecoder().decode(BackendTorrentSearchResponse.self, from: data)
-        return (payload.results, payload.counts ?? [:], payload.errors ?? [:])
+        let mapped = payload.results.map { $0.torrentResult }
+        return (mapped, payload.counts ?? [:], payload.errors ?? [:])
     }
 }
 
 private struct BackendTorrentSearchResponse: Decodable, Sendable {
-    let results: [TorrentResult]
+    let results: [BackendTorrentHit]
     let counts: [String: Int]?
     let errors: [String: String]?
+}
+
+private struct BackendTorrentHit: Decodable, Sendable {
+    let title: String
+    let magnetURI: String
+    let infoHash: String?
+    let quality: String?
+    let sizeBytes: Int64?
+    let seeders: Int?
+    let leechers: Int?
+    let trackerSource: String
+
+    var torrentResult: TorrentResult {
+        TorrentResult(
+            title: title,
+            magnetURI: magnetURI,
+            quality: ReleaseParser.parseQuality(from: title),
+            hdrType: ReleaseParser.parseHDR(from: title),
+            codec: ReleaseParser.parseCodec(from: title),
+            audioFormat: ReleaseParser.parseAudio(from: title),
+            source: ReleaseParser.parseSource(from: title),
+            sizeBytes: sizeBytes ?? 0,
+            seeders: seeders ?? 0,
+            leechers: leechers ?? 0,
+            trackerSource: .native(site: trackerSource),
+            infoHash: infoHash
+        )
+    }
 }

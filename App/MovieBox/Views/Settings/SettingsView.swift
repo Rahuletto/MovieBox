@@ -140,20 +140,6 @@ private struct TorrentSettingsSection: View {
 
     var body: some View {
         Form {
-            Section("Built-in Indexers") {
-                Text("Torrentio plus native Swift indexers (YTS, EZTV, Pirate Bay). No Jackett or sidecar.")
-                    .foregroundStyle(.secondary)
-                Toggle("Include YTS (movies)", isOn: $draft.enableYTS)
-                LabeledContent("Movies") {
-                    Text("Torrentio, YTS, Pirate Bay")
-                        .foregroundStyle(.secondary)
-                }
-                LabeledContent("TV Shows") {
-                    Text("Torrentio, EZTV, Pirate Bay")
-                        .foregroundStyle(.secondary)
-                }
-            }
-
             Section("Torrent Behavior") {
                 Toggle("Seed after download completes", isOn: $draft.enableSeeding)
                 Stepper("Max Active Downloads: \(draft.maxActiveDownloads)", value: $draft.maxActiveDownloads, in: 1...5)

@@ -3,6 +3,7 @@ import { cors } from 'hono/cors'
 import { timing } from 'hono/timing'
 import { logger } from 'hono/logger'
 import { secureHeaders } from 'hono/secure-headers'
+import { searchTorrentIndexers } from './torrent'
 
 type Bindings = {
   TMDB_TOKEN: string
@@ -545,6 +546,41 @@ app.get('/api/logo/:kind/:id', async (c) => {
       {
         error: 'proxy_failed',
         message: error instanceof Error ? error.message : 'Unknown proxy error',
+      },
+      502
+    )
+  }
+})
+
+// Built-in torrent indexers (YTS / EZTV / Pirate Bay) — proxied from the Worker.
+app.get('/api/torrent/search', async (c) => {
+  const q = c.req.query('q')
+  if (!q?.trim()) {
+    return c.json({ error: 'bad_request', message: 'q is required' }, 400)
+  }
+
+  const kind = c.req.query('kind') === 'tv' ? 'tv' : 'movie'
+  const yearRaw = c.req.query('year')
+  const year = yearRaw ? parseInt(yearRaw, 10) : null
+  const imdbId = c.req.query('imdbId') ?? null
+  const enableYTS = c.req.query('enableYTS') !== '0'
+
+  try {
+    const payload = await searchTorrentIndexers({
+      query: q,
+      year: Number.isFinite(year) ? year : null,
+      imdbId,
+      kind,
+      enableYTS,
+    })
+    return c.json(payload, {
+      headers: { 'Cache-Control': 'private, max-age=120' },
+    })
+  } catch (error) {
+    return c.json(
+      {
+        error: 'torrent_search_failed',
+        message: error instanceof Error ? error.message : 'Torrent search failed',
       },
       502
     )
