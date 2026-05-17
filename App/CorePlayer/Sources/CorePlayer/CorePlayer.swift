@@ -51,6 +51,8 @@ public final class PlayerState {
     public var subtitleURL: URL? = nil
     public var activeSubtitleTrack: Int = 0
     public var currentSubtitleText: String = ""
+    public var currentSubtitleCueID: UUID?
+    public var subtitleAppearance: SubtitleAppearance = .cinematic
     
     public var hdrType: PlayerHDRType? = nil
     public var errorMessage: String? = nil
@@ -125,6 +127,7 @@ public final class PlayerState {
         movieId: Int = 0,
         subtitleURL: URL? = nil,
         hdrType: PlayerHDRType? = nil,
+        subtitleAppearance: SubtitleAppearance = .cinematic,
         episodeTitle: String? = nil,
         episodes: [PlayerEpisode] = [],
         currentEpisodeIndex: Int? = nil
@@ -135,6 +138,7 @@ public final class PlayerState {
         self.movieId = movieId
         self.subtitleURL = subtitleURL
         self.hdrType = hdrType
+        self.subtitleAppearance = subtitleAppearance
         self.errorMessage = nil
         if !episodes.isEmpty {
             self.episodes = episodes
@@ -157,7 +161,17 @@ public final class PlayerState {
         lastReportedPosition = -1
         lastSubtitleSyncTime = -1
 
-        let asset = AVURLAsset(url: url)
+        let asset = AVURLAsset(
+            url: url,
+            options: [
+                "AVURLAssetHTTPHeaderFieldsKey": [
+                    "User-Agent": "MovieBox/1.0 (Macintosh; AVFoundation)",
+                ],
+                AVURLAssetAllowsExpensiveNetworkAccessKey: true,
+                AVURLAssetAllowsCellularAccessKey: true,
+                AVURLAssetAllowsConstrainedNetworkAccessKey: true,
+            ] as [String: Any]
+        )
         if let existing = thumbnailService {
             Task { await existing.clearCache() }
         }
@@ -282,6 +296,7 @@ public final class PlayerState {
         guard activeSubtitleTrack >= 0, let stream = subtitleStream else {
             if !currentSubtitleText.isEmpty {
                 currentSubtitleText = ""
+                currentSubtitleCueID = nil
             }
             return
         }
@@ -296,10 +311,12 @@ public final class PlayerState {
             guard !Task.isCancelled else { return }
             if let cue = await stream.cue(at: time) {
                 if !Task.isCancelled {
+                    currentSubtitleCueID = cue.id
                     currentSubtitleText = cue.text
                 }
             } else if !Task.isCancelled {
                 currentSubtitleText = ""
+                currentSubtitleCueID = nil
             }
         }
     }
@@ -386,6 +403,7 @@ public final class PlayerState {
         subtitleURL = nil
         activeSubtitleTrack = -1
         currentSubtitleText = ""
+        currentSubtitleCueID = nil
         lastSubtitleSyncTime = -1
     }
 
@@ -854,21 +872,12 @@ public struct PlayerView: View {
     }
 
     private var subtitleOverlay: some View {
-        VStack {
-            Spacer()
-
-            if !state.currentSubtitleText.isEmpty && state.activeSubtitleTrack >= 0 {
-                Text(state.currentSubtitleText)
-                    .font(.system(size: 22, weight: .medium))
-                    .foregroundStyle(.white)
-                    .shadow(color: .black.opacity(0.8), radius: 4, x: 0, y: 2)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 60)
-                    .padding(.bottom, 120) // Raised slightly to sit elegantly above the new floating HUD
-                    .transition(.opacity)
-                    .animation(.easeInOut(duration: 0.2), value: state.currentSubtitleText)
-            }
-        }
+        SubtitleOverlayView(
+            text: state.currentSubtitleText,
+            cueID: state.currentSubtitleCueID,
+            appearance: state.subtitleAppearance,
+            isVisible: state.activeSubtitleTrack >= 0
+        )
     }
 
     private var topHUD: some View {

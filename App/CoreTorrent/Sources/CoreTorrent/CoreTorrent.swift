@@ -195,6 +195,21 @@ public enum ReleaseParser {
         return .p1080
     }
 
+    /// Prefer explicit indexer/API quality labels, then parse the release title.
+    public static func resolveQuality(indexerLabel: String?, title: String) -> VideoQuality {
+        let parts = [indexerLabel, title].compactMap { $0 }.filter { !$0.isEmpty }
+        var best: VideoQuality = .p720
+        for part in parts {
+            let q = parseQuality(from: part)
+            if q > best { best = q }
+        }
+        if best != .p720 { return best }
+        for part in parts {
+            if normalized(part).contains("1080") { return .p1080 }
+        }
+        return .p1080
+    }
+
     public static func parseAudio(from title: String) -> AudioFormat? {
         let t = normalized(title)
         if t.contains("atmos") { return .dolbyAtmos }
@@ -278,16 +293,16 @@ public enum ReleaseParser {
 }
 
 public actor TorrentSearchAggregator {
-    private let torrentioClient: TorrentioClient
     private let backendSearcher: BackendTorrentSearcher?
+    private let torrentioFallback: TorrentioClient
     public private(set) var lastDiagnostics = TorrentSearchDiagnostics()
 
     public init(
-        torrentioClient: TorrentioClient = TorrentioClient(),
         backendBaseURL: URL? = nil,
-        backendAppToken: String? = nil
+        backendAppToken: String? = nil,
+        torrentioFallback: TorrentioClient = TorrentioClient()
     ) {
-        self.torrentioClient = torrentioClient
+        self.torrentioFallback = torrentioFallback
         if let backendBaseURL, let backendAppToken, !backendAppToken.isEmpty {
             self.backendSearcher = BackendTorrentSearcher(baseURL: backendBaseURL, appToken: backendAppToken)
         } else {
@@ -300,58 +315,53 @@ public actor TorrentSearchAggregator {
         year: Int? = nil,
         imdbId: String? = nil,
         kind: TorrentioClient.MediaKind = .movie,
-        enableYTS: Bool = true
+        enabledIndexerIDs: Set<String> = TorrentIndexerPreferences.defaultIDs
     ) -> AsyncStream<[TorrentResult]> {
         AsyncStream { continuation in
             Task {
-                var diagnostics = TorrentSearchDiagnostics()
                 let query = TorrentSearchQuery.make(title: movieTitle, year: year)
-                diagnostics.queryUsed = query
-
-                var allResults: [TorrentResult] = []
-
-                if let imdb = imdbId, !imdb.isEmpty {
-                    diagnostics.torrentioAttempted = true
-                    do {
-                        let torrentioResults = try await torrentioClient.search(imdbId: imdb, kind: kind)
-                        allResults.append(contentsOf: torrentioResults)
-                        diagnostics.torrentioCount = torrentioResults.count
-                    } catch {
-                        diagnostics.torrentioError = error.localizedDescription
-                        NSLog("Torrentio search failed: \(error)")
-                    }
-                }
 
                 if let backendSearcher {
                     do {
-                        let backend = try await backendSearcher.search(
+                        let response = try await backendSearcher.search(
                             query: query,
                             year: year,
                             imdbId: imdbId,
                             kind: kind,
-                            enableYTS: enableYTS
+                            enabledIndexerIDs: enabledIndexerIDs
                         )
-                        diagnostics.nativeCounts = backend.counts
-                        diagnostics.nativeErrors = backend.errors
-                        diagnostics.ytsCount = backend.counts["yts", default: 0]
-                        diagnostics.ytsAttempted = enableYTS && kind == .movie
-
-                        let existingHashes = Set(allResults.compactMap { $0.infoHash?.lowercased() })
-                        let filtered = backend.results.filter { row in
-                            guard let hash = row.infoHash?.lowercased() else { return true }
-                            return !existingHashes.contains(hash)
-                        }
-                        allResults.append(contentsOf: filtered)
+                        lastDiagnostics = response.diagnostics
+                        continuation.yield(Self.sorted(response.results))
                     } catch {
+                        var diagnostics = TorrentSearchDiagnostics()
+                        diagnostics.queryUsed = query
                         diagnostics.nativeErrors["backend"] = error.localizedDescription
+                        lastDiagnostics = diagnostics
                         NSLog("Backend torrent search failed: \(error)")
+                        continuation.yield([])
                     }
-                } else {
-                    diagnostics.nativeErrors["backend"] = "Configure backend URL and app token in Settings."
+                    continuation.finish()
+                    return
+                }
+
+                var diagnostics = TorrentSearchDiagnostics()
+                diagnostics.queryUsed = query
+                diagnostics.nativeErrors["backend"] =
+                    "Configure backend URL and app token in Settings for full search (YTS, 1337x, EZTV, …)."
+
+                var results: [TorrentResult] = []
+                if let imdb = imdbId, !imdb.isEmpty {
+                    diagnostics.torrentioAttempted = true
+                    do {
+                        results = try await torrentioFallback.search(imdbId: imdb, kind: kind)
+                        diagnostics.torrentioCount = results.count
+                    } catch {
+                        diagnostics.torrentioError = error.localizedDescription
+                    }
                 }
 
                 lastDiagnostics = diagnostics
-                continuation.yield(Self.sorted(allResults))
+                continuation.yield(Self.sorted(results))
                 continuation.finish()
             }
         }

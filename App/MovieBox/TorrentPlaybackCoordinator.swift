@@ -22,7 +22,11 @@ final class TorrentPlaybackCoordinator {
         self.torrents = torrents
         playerState.updatePlaybackSources(Self.sourceOptions(from: torrents), selectedID: selected.id.uuidString)
         playerState.onSelectPlaybackSource = { [weak self] option in
-            await self?.switchToSource(id: option.id, playerState: playerState)
+            await self?.switchToSource(
+                id: option.id,
+                playerState: playerState,
+                subtitleAppearance: playerState.subtitleAppearance
+            )
         }
     }
 
@@ -43,7 +47,8 @@ final class TorrentPlaybackCoordinator {
         session: StreamSession,
         playerState: PlayerState,
         movieId: Int,
-        subtitleURL: URL?
+        subtitleURL: URL?,
+        subtitleAppearance: SubtitleAppearance = .cinematic
     ) throws {
         configureSources(on: playerState, torrents: allTorrents, selected: torrent)
 
@@ -59,11 +64,12 @@ final class TorrentPlaybackCoordinator {
             title: torrent.title,
             movieId: movieId,
             subtitleURL: subtitleURL,
-            hdrType: playerHDRType(from: torrent.hdrType)
+            hdrType: playerHDRType(from: torrent.hdrType),
+            subtitleAppearance: subtitleAppearance
         )
     }
 
-    func switchToSource(id: String, playerState: PlayerState) async {
+    func switchToSource(id: String, playerState: PlayerState, subtitleAppearance: SubtitleAppearance = .cinematic) async {
         guard let torrent = torrents.first(where: { $0.id.uuidString == id }) else { return }
         guard torrent.id.uuidString != playerState.selectedPlaybackSourceID else { return }
 
@@ -85,7 +91,8 @@ final class TorrentPlaybackCoordinator {
                 title: torrent.title,
                 movieId: movieId,
                 subtitleURL: subtitleURL,
-                hdrType: playerHDRType(from: torrent.hdrType)
+                hdrType: playerHDRType(from: torrent.hdrType),
+                subtitleAppearance: subtitleAppearance
             )
             if savedTime > 1 {
                 playerState.seek(to: savedTime)

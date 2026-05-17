@@ -1,5 +1,7 @@
 import CoreMetadata
+import CorePlayer
 import CoreStorage
+import CoreTorrent
 import Foundation
 
 extension AppSettings {
@@ -19,5 +21,17 @@ extension AppSettings {
             return nil
         }
         return (url, appToken)
+    }
+
+    var subtitleAppearance: SubtitleAppearance {
+        SubtitleAppearance.from(settingsValue: subtitleStyle)
+    }
+
+    var enabledTorrentIndexerSet: Set<String> {
+        let parsed = TorrentIndexerPreferences.parseCSV(enabledTorrentIndexers)
+        if !enabledTorrentIndexers.isEmpty { return parsed }
+        var ids = parsed
+        if !enableYTS { ids.remove("yts") }
+        return ids
     }
 }

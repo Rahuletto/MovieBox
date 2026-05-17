@@ -103,6 +103,8 @@ public final class AppSettings {
     public var preferredAudioLang: String
     public var preferredSubtitleLang: String
     public var enableYTS: Bool
+    /// Comma-separated indexer ids from backend `/api/config` (e.g. `torrentio,yts,1337x`).
+    public var enabledTorrentIndexers: String = "torrentio,yts,eztv,piratebay,1337x"
     public var enableSeeding: Bool
     public var maxActiveDownloads: Int
     public var maxActiveUploads: Int
@@ -140,6 +142,7 @@ public final class AppSettings {
         preferredAudioLang: String = "en",
         preferredSubtitleLang: String = "en",
         enableYTS: Bool = true,
+        enabledTorrentIndexers: String = "torrentio,yts,eztv,piratebay,1337x",
         enableSeeding: Bool = true,
         maxActiveDownloads: Int = 2,
         maxActiveUploads: Int = 5,
@@ -149,7 +152,7 @@ public final class AppSettings {
         autoRemoveCompleted: Bool = false,
         preferHDR: Bool = true,
         subtitlesEnabled: Bool = true,
-        subtitleStyle: String = "system",
+        subtitleStyle: String = "cinematic",
         audioFormatPriority: String = "best",
         resumePlayback: Bool = true,
         fullScreenOnPlayback: Bool = false,
@@ -176,6 +179,7 @@ public final class AppSettings {
         self.preferredAudioLang = preferredAudioLang
         self.preferredSubtitleLang = preferredSubtitleLang
         self.enableYTS = enableYTS
+        self.enabledTorrentIndexers = enabledTorrentIndexers
         self.enableSeeding = enableSeeding
         self.maxActiveDownloads = maxActiveDownloads
         self.maxActiveUploads = maxActiveUploads
@@ -220,4 +224,46 @@ public enum MovieBoxSchema {
         DownloadRecord.self,
         AppSettings.self
     ]
+}
+
+// MARK: - Model container
+
+public enum MovieBoxModelContainer {
+    private static let storeName = "MovieBox"
+
+    /// Opens the shared SwiftData store, recreating it once if the on-disk schema is incompatible.
+    public static func make(inMemoryOnly: Bool = false) throws -> ModelContainer {
+        let schema = Schema(MovieBoxSchema.models)
+        let storeURL = persistentStoreURL()
+        let config = ModelConfiguration(
+            storeName,
+            schema: schema,
+            url: storeURL,
+            allowsSave: !inMemoryOnly
+        )
+
+        do {
+            return try ModelContainer(for: schema, configurations: config)
+        } catch {
+            guard !inMemoryOnly else { throw error }
+            NSLog("MovieBox SwiftData: store incompatible (\(error)). Recreating \(storeURL.path)")
+            try removeStoreFiles(at: storeURL)
+            return try ModelContainer(for: schema, configurations: config)
+        }
+    }
+
+    private static func persistentStoreURL() -> URL {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let folder = support.appendingPathComponent("MovieBox", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        return folder.appendingPathComponent("\(storeName).store", isDirectory: false)
+    }
+
+    private static func removeStoreFiles(at url: URL) throws {
+        let fm = FileManager.default
+        let paths = [url.path, url.path + "-shm", url.path + "-wal"]
+        for path in paths where fm.fileExists(atPath: path) {
+            try fm.removeItem(atPath: path)
+        }
+    }
 }

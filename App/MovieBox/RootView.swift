@@ -10,6 +10,7 @@ import SwiftUI
 import Combine
 import AVKit
 import WebKit
+import UniformTypeIdentifiers
 
 struct ScrollOffsetPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
@@ -492,203 +493,214 @@ struct CatalogView: View {
 
 struct DownloadsView: View {
     @Environment(AppRouter.self) private var router
+    @Query private var settings: [AppSettings]
     @Query(sort: \DownloadRecord.createdAt, order: .reverse) private var downloads: [DownloadRecord]
     @StateObject private var downloadManager = DownloadManager()
     @Environment(PlayerState.self) private var playerState
 
     @State private var magnetInput: String = ""
+    @State private var showsMagnetSheet = false
+    @State private var showsTorrentFileImporter = false
+    @State private var selectedDemo: StreamTestCatalog.Item?
     @State private var errorMessage: String? = nil
     @State private var isStreaming = false
     @State private var activeStreamSession: StreamSession? = nil
     @State private var streamingOrchestrator = StreamingOrchestrator()
 
     var body: some View {
+        downloadsScrollContent
+            .padding(.top, topBarReservedHeight)
+            .navigationTitle("Downloads")
+            .toolbar { downloadsToolbarContent }
+            .sheet(isPresented: $showsMagnetSheet) { magnetSheetContent }
+            .fileImporter(
+                isPresented: $showsTorrentFileImporter,
+                allowedContentTypes: [UTType(filenameExtension: "torrent") ?? .data],
+                allowsMultipleSelection: false,
+                onCompletion: handleTorrentFileImport
+            )
+            .onAppear {
+                syncMetadataBackend()
+                applyPendingMagnetImport()
+            }
+            .onChange(of: router.pendingMagnetImport) { _, _ in
+                applyPendingMagnetImport()
+            }
+            .onChange(of: settings.first?.proxyBaseURL) { _, _ in syncMetadataBackend() }
+            .onChange(of: settings.first?.appToken) { _, _ in syncMetadataBackend() }
+            .sheet(item: $selectedDemo) { demo in
+                DemoDetailSheet(item: demo) {
+                    playTestItem(demo)
+                }
+            }
+    }
+
+    private var downloadsScrollContent: some View {
         ScrollView {
             VStack(spacing: 20) {
-                // Sleek Floating Glass Magnet Input Pod
-                VStack(spacing: 12) {
-                    HStack(spacing: 12) {
-                        Image(systemName: "link.badge.plus")
-                            .font(.title3)
-                            .foregroundStyle(.white.opacity(0.8))
-                        
-                        TextField("Paste Magnet Link or info_hash...", text: $magnetInput)
-                            .textFieldStyle(.plain)
-                            .font(.system(size: 13))
-                            .foregroundStyle(.white)
-                        
-                        if !magnetInput.isEmpty {
-                            Button {
-                                magnetInput = ""
-                                errorMessage = nil
-                            } label: {
-                                Image(systemName: "xmark.circle.fill")
-                                    .foregroundStyle(.white.opacity(0.5))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
-                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.1), lineWidth: 1))
-                    
-                    if magnetInput.isEmpty {
-                        HStack(spacing: 8) {
-                            Text("Test HDR / Dolby Vision:")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.4))
-                            
-                            Button {
-                                magnetInput = "https://developer.apple.com/streaming/examples/advanced-hdr-single-stream/master.m3u8"
-                                handleMagnetAction(isDownload: false)
-                            } label: {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "visionpro")
-                                    Text("Dolby Vision")
-                                }
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(.cyan)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(.cyan.opacity(0.12), in: Capsule())
-                            }
-                            .buttonStyle(.plain)
-                            
-                            Button {
-                                magnetInput = "https://demo.unified-streaming.com/k8s/features/stable/video/tears-of-steel-hdr.mp4/.m3u8"
-                                handleMagnetAction(isDownload: false)
-                            } label: {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "sun.max.fill")
-                                    Text("HDR10")
-                                }
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(.yellow)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(.yellow.opacity(0.12), in: Capsule())
-                            }
-                            .buttonStyle(.plain)
+                demosSection
+                downloadsErrorBanner
+                downloadsListSection
+            }
+        }
+    }
 
-                            Button {
-                                playSubtitleTestStream()
-                            } label: {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "captions.bubble.fill")
-                                    Text("Subtitles")
-                                }
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(.green)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(.green.opacity(0.12), in: Capsule())
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .padding(.top, 4)
-                    }
-                    
-                    if !magnetInput.isEmpty {
-                        HStack(spacing: 12) {
-                            Button {
-                                handleMagnetAction(isDownload: false)
-                            } label: {
-                                HStack {
-                                    if isStreaming {
-                                        ProgressView()
-                                            .controlSize(.small)
-                                            .tint(.black)
-                                    } else {
-                                        Image(systemName: "play.fill")
-                                    }
-                                    Text(isStreaming ? "Preparing..." : "Stream Now")
-                                }
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.black)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 8)
-                                .background(.white, in: Capsule())
-                                .shadow(color: .white.opacity(0.15), radius: 6)
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(isStreaming)
-                            
-                            Button {
-                                handleMagnetAction(isDownload: true)
-                            } label: {
-                                HStack {
-                                    Image(systemName: "arrow.down.circle.fill")
-                                    Text("Download")
-                                }
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 8)
-                                .background(.white.opacity(0.12), in: Capsule())
-                                .overlay(Capsule().stroke(.white.opacity(0.15), lineWidth: 1))
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(isStreaming)
-                            
-                            Spacer()
-                        }
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                    }
-                }
-                .padding(16)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
-                .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.12), lineWidth: 1))
-                .shadow(color: .black.opacity(0.2), radius: 10, y: 6)
-                .padding(.horizontal, 28)
-                .padding(.top, 10)
+    private var demosSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Demos")
+                .font(MovieBoxTypography.title)
+            Text("Reference streams to verify playback, subtitles, and HDR on a wide-gamut display.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
-                if let errorMessage {
-                    Text(errorMessage)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.red)
-                        .padding(.horizontal, 28)
-                        .transition(.opacity)
-                }
+            demoGroup(title: "SDR", items: StreamTestCatalog.sdrDemos)
+            demoGroup(title: "HDR", items: StreamTestCatalog.hdrDemos)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .adaptiveGlass(cornerRadius: 16)
+        .padding(.horizontal, 28)
+        .padding(.top, 10)
+    }
 
-                if downloads.isEmpty && downloadManager.tasks.isEmpty {
-                    ContentUnavailableView(
-                        "No Downloads",
-                        systemImage: "arrow.down.circle",
-                        description: Text("Download movies from details or paste a magnet link above.")
-                    )
-                    .frame(maxWidth: .infinity, minHeight: 260)
-                } else {
-                    LazyVStack(spacing: 12) {
-                        ForEach(downloadManager.tasks) { task in
-                            DownloadTaskRow(task: task, downloadManager: downloadManager)
-                        }
+    private func demoGroup(title: String, items: [StreamTestCatalog.Item]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
 
-                        ForEach(downloads, id: \.tmdbId) { download in
-                            DownloadRecordRow(download: download)
-                        }
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 168, maximum: 220), spacing: 14)],
+                spacing: 14
+            ) {
+                ForEach(items) { item in
+                    DemoStreamCard(item: item) {
+                        selectedDemo = item
                     }
-                    .padding(.horizontal, 28)
-                    .padding(.vertical, 10)
                 }
             }
         }
-        .padding(.top, topBarReservedHeight)
-        .navigationTitle("Downloads")
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
+    }
+
+    @ViewBuilder
+    private var downloadsErrorBanner: some View {
+        if let errorMessage {
+            Text(errorMessage)
+                .font(.caption)
+                .foregroundStyle(.red)
+                .padding(.horizontal, 28)
+        }
+    }
+
+    @ViewBuilder
+    private var downloadsListSection: some View {
+        if downloads.isEmpty && downloadManager.tasks.isEmpty {
+            ContentUnavailableView(
+                "No Downloads",
+                systemImage: "arrow.down.circle",
+                description: Text("Download movies from details, or use the magnet button in the toolbar to open a torrent.")
+            )
+            .frame(maxWidth: .infinity, minHeight: 260)
+        } else {
+            LazyVStack(spacing: 12) {
+                ForEach(downloadManager.tasks) { task in
+                    DownloadTaskRow(
+                        task: task,
+                        downloadManager: downloadManager,
+                        subtitleAppearance: subtitleAppearance
+                    )
+                }
+
+                ForEach(downloads, id: \.tmdbId) { download in
+                    DownloadRecordRow(download: download)
+                }
+            }
+            .padding(.horizontal, 28)
+            .padding(.vertical, 10)
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var downloadsToolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
+            HStack(spacing: 12) {
                 if downloadManager.totalDownloadSpeed > 0 {
                     Text(formatSpeed(downloadManager.totalDownloadSpeed))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                Button {
+                    errorMessage = nil
+                    showsMagnetSheet = true
+                } label: {
+                    Image(systemName: "link.circle.fill")
+                        .font(.title3)
+                }
+                .buttonStyle(.plain)
+                .help("Open magnet link or .torrent file")
             }
         }
-        .onAppear {
-            applyPendingMagnetImport()
+    }
+
+    private var magnetSheetContent: some View {
+        MagnetImportSheet(
+            magnetInput: $magnetInput,
+            isStreaming: isStreaming,
+            errorMessage: $errorMessage,
+            onStream: { handleMagnetAction(isDownload: false) },
+            onDownload: { handleMagnetAction(isDownload: true) },
+            onOpenTorrentFile: { showsTorrentFileImporter = true }
+        )
+    }
+
+    private func handleTorrentFileImport(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            importTorrentFile(url)
+        case .failure(let error):
+            errorMessage = error.localizedDescription
         }
-        .onChange(of: router.pendingMagnetImport) { _, _ in
-            applyPendingMagnetImport()
+    }
+
+    private func syncMetadataBackend() {
+        let config = settings.first?.backendTorrentConfig
+        TorrentMetadataFetcher.configureBackend(
+            baseURL: config?.baseURL,
+            appToken: config?.appToken
+        )
+    }
+
+    private var subtitleAppearance: SubtitleAppearance {
+        SubtitleAppearance.from(settingsValue: settings.first?.subtitleStyle ?? "cinematic")
+    }
+
+    private func playStream(url: URL, title: String, subtitleURL: URL? = nil, hdrType: PlayerHDRType? = nil) {
+        errorMessage = nil
+        playerState.load(
+            url: url,
+            title: title,
+            movieId: 0,
+            subtitleURL: subtitleURL,
+            hdrType: hdrType,
+            subtitleAppearance: subtitleAppearance
+        )
+    }
+
+    private func playTestItem(_ item: StreamTestCatalog.Item) {
+        if item.isSubtitleDemo {
+            guard StreamTestCatalog.bundledSubtitle != nil else {
+                errorMessage = "Bundled subtitle sample is missing from the app bundle."
+                return
+            }
+            playStream(
+                url: item.url,
+                title: item.title,
+                subtitleURL: StreamTestCatalog.bundledSubtitle,
+                hdrType: item.hdrType
+            )
+        } else {
+            playStream(url: item.url, title: item.title, hdrType: item.hdrType)
         }
     }
 
@@ -696,22 +708,21 @@ struct DownloadsView: View {
         guard let pending = router.consumePendingMagnetImport() else { return }
         magnetInput = MagnetImportHandler.normalizeUserInput(pending)
         errorMessage = nil
+        showsMagnetSheet = true
     }
 
-    private func playSubtitleTestStream() {
-        guard let videoURL = URL(string: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"),
-              let subtitleURL = URL(string: "https://raw.githubusercontent.com/andreylysenko/big-buck-bunny-multi-subs/master/subtitles/eng.srt") else {
-            errorMessage = "Could not load subtitle test URLs."
-            return
-        }
+    private func importTorrentFile(_ url: URL) {
+        let accessed = url.startAccessingSecurityScopedResource()
+        defer { if accessed { url.stopAccessingSecurityScopedResource() } }
 
-        errorMessage = nil
-        playerState.load(
-            url: videoURL,
-            title: "Subtitle Test — Big Buck Bunny",
-            movieId: 0,
-            subtitleURL: subtitleURL
-        )
+        do {
+            magnetInput = try MagnetImportHandler.magnetURI(fromTorrentFileAt: url)
+            errorMessage = nil
+            showsMagnetSheet = true
+        } catch {
+            errorMessage = error.localizedDescription
+            showsMagnetSheet = true
+        }
     }
 
     private func handleMagnetAction(isDownload: Bool) {
@@ -719,20 +730,13 @@ struct DownloadsView: View {
         
         // Intercept direct HTTP/HTTPS stream URLs for rapid HDR/Dolby Vision testing
         if cleanLink.hasPrefix("http://") || cleanLink.hasPrefix("https://") {
-            if let url = URL(string: cleanLink) {
-                errorMessage = nil
-                let isDolby = cleanLink.contains("advanced-hdr")
-                playerState.load(
-                    url: url,
-                    title: isDolby ? "Dolby Vision Advanced HDR Test Stream" : "HDR10 Test Stream",
-                    movieId: 0,
-                    subtitleURL: nil,
-                    hdrType: isDolby ? .dolbyVision : .hdr10
-                )
-                magnetInput = ""
-            } else {
+            guard let url = URL(string: cleanLink) else {
                 errorMessage = "Invalid stream URL format."
+                return
             }
+            playStream(url: url, title: "Direct stream")
+            magnetInput = ""
+            showsMagnetSheet = false
             return
         }
         
@@ -759,6 +763,7 @@ struct DownloadsView: View {
                 hdrType: nil
             )
             magnetInput = ""
+            showsMagnetSheet = false
         } else {
             guard let torrent = TorrentResult.fromMagnetURI(parsedLink, fallbackTitle: displayName) else {
                 errorMessage = "Could not parse magnet link."
@@ -792,9 +797,11 @@ struct DownloadsView: View {
                             session: session,
                             playerState: playerState,
                             movieId: 0,
-                            subtitleURL: nil
+                            subtitleURL: nil,
+                            subtitleAppearance: subtitleAppearance
                         )
                         magnetInput = ""
+                        showsMagnetSheet = false
                     } catch {
                         errorMessage = error.localizedDescription
                     }
@@ -813,10 +820,97 @@ struct DownloadsView: View {
     }
 }
 
+private struct MagnetImportSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Binding var magnetInput: String
+    let isStreaming: Bool
+    @Binding var errorMessage: String?
+    let onStream: () -> Void
+    let onDownload: () -> Void
+    let onOpenTorrentFile: () -> Void
+
+    private var hasInput: Bool {
+        !magnetInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack {
+                Label("Open torrent", systemImage: "link.circle.fill")
+                    .font(.title2.weight(.semibold))
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+
+            Text("Paste a magnet link, info hash, stream URL, or choose a .torrent file.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            TextField("magnet:?xt=… or 40-char info hash", text: $magnetInput, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(3...6)
+
+            Button {
+                onOpenTorrentFile()
+            } label: {
+                Label("Choose .torrent file…", systemImage: "doc.badge.arrow.down")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.bordered)
+
+            if let errorMessage, !errorMessage.isEmpty {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            HStack(spacing: 10) {
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+
+                Spacer()
+
+                if hasInput {
+                    Button {
+                        magnetInput = ""
+                        errorMessage = nil
+                    } label: {
+                        Text("Clear")
+                    }
+
+                    Button {
+                        onDownload()
+                    } label: {
+                        Label("Download", systemImage: "arrow.down.circle")
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button {
+                        onStream()
+                    } label: {
+                        Label(isStreaming ? "Preparing…" : "Stream", systemImage: "play.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isStreaming)
+                }
+            }
+        }
+        .padding(24)
+        .frame(width: 440)
+    }
+}
+
 private struct DownloadTaskRow: View {
     @Environment(PlayerState.self) private var playerState
     let task: DownloadManager.DownloadTask
     let downloadManager: DownloadManager
+    let subtitleAppearance: SubtitleAppearance
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -869,7 +963,8 @@ private struct DownloadTaskRow: View {
                             playerState.load(
                                 url: URL(fileURLWithPath: path),
                                 title: task.title,
-                                movieId: task.tmdbId
+                                movieId: task.tmdbId,
+                                subtitleAppearance: subtitleAppearance
                             )
                         }
                     }

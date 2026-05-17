@@ -55,12 +55,14 @@ public final class DownloadManager: ObservableObject {
         try? FileManager.default.createDirectory(at: self.downloadDirectory, withIntermediateDirectories: true)
     }
 
-    public func startDownload(tmdbId: Int, title: String, magnetURI: String, quality: String, hdrType: String? = nil) {
+    @discardableResult
+    public func startDownload(tmdbId: Int, title: String, magnetURI: String, quality: String, hdrType: String? = nil) -> UUID {
         let task = DownloadTask(tmdbId: tmdbId, title: title, magnetURI: magnetURI, quality: quality, hdrType: hdrType)
         tasks.append(task)
         Task {
             await executeDownload(task: task)
         }
+        return task.id
     }
 
     public func pauseDownload(taskId: UUID) {
@@ -105,7 +107,7 @@ public final class DownloadManager: ObservableObject {
 
         let peerId = "-MB0001-" + (0..<12).map { _ in "abcdefghijklmnopqrstuvwxyz0123456789".randomElement()! }
         let magnet = MagnetURI(from: task.magnetURI)
-        guard let magnet else {
+        guard let infoHash = magnet?.infoHash else {
             tasks[taskIndex].state = .failed
             return
         }
@@ -113,8 +115,8 @@ public final class DownloadManager: ObservableObject {
         let metadata: TorrentMetadata
         do {
             metadata = try await TorrentMetadataFetcher.fetch(
-                infoHash: magnet.infoHash,
-                magnetTrackers: magnet.trackers
+                infoHash: infoHash,
+                magnetTrackers: magnet?.trackers ?? []
             )
         } catch {
             tasks[taskIndex].state = .failed

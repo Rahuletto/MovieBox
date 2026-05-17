@@ -39,8 +39,7 @@ enum MagnetImportHandler {
         throw ImportError.unsupportedURL
     }
 
-    @MainActor
-    static func importTorrentFile(at url: URL, router: AppRouter) throws {
+    static func magnetURI(fromTorrentFileAt url: URL) throws -> String {
         let data: Data
         do {
             data = try Data(contentsOf: url)
@@ -55,7 +54,12 @@ enum MagnetImportHandler {
             throw ImportError.invalidTorrentFile
         }
 
-        router.importMagnet(metadata.magnetURI)
+        return metadata.magnetURI
+    }
+
+    @MainActor
+    static func importTorrentFile(at url: URL, router: AppRouter) throws {
+        router.importMagnet(try magnetURI(fromTorrentFileAt: url))
     }
 
     static func extractMagnet(from text: String) -> String? {

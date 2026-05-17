@@ -23,14 +23,15 @@ public final class StreamingOrchestrator {
         peerId = Self.generatePeerId()
 
         let magnet = MagnetURI(from: torrent.magnetURI)
-        guard let magnet else {
+        let infoHash = torrent.infoHash ?? magnet?.infoHash
+        guard let infoHash, !infoHash.isEmpty else {
             throw StreamingOrchestratorError.invalidMagnetURI
         }
 
         do {
             metadata = try await TorrentMetadataFetcher.fetch(
-                infoHash: magnet.infoHash,
-                magnetTrackers: magnet.trackers
+                infoHash: infoHash,
+                magnetTrackers: magnet?.trackers ?? []
             )
         } catch {
             throw StreamingOrchestratorError.metadataUnavailable(error.localizedDescription)

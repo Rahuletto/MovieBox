@@ -58,10 +58,12 @@ struct MovieDetailView: View {
                 detail: detail,
                 isLoading: isLoading,
                 torrents: torrents,
+                torrentSearchDiagnostics: torrentSearchDiagnostics,
                 subtitles: subtitles,
                 selectedSubtitle: $selectedSubtitle,
                 isLoadingSubtitles: isLoadingSubtitles,
                 subtitleFileURL: subtitleFileURL,
+                subtitleAppearance: settings.first?.subtitleAppearance ?? .cinematic,
                 currentRating: currentRating,
                 scrollOffset: $scrollOffset,
                 orchestrator: orchestrator,
@@ -96,6 +98,12 @@ struct MovieDetailView: View {
             // Navigation header with back button (on top)
             NavigationHeader(title: nil, onBack: onBack)
         }
+        .onAppear { syncMetadataBackend() }
+        .onChange(of: settings.first?.proxyBaseURL) { _, _ in syncMetadataBackend() }
+        .onChange(of: settings.first?.appToken) { _, _ in syncMetadataBackend() }
+        .onAppear { syncMetadataBackend() }
+        .onChange(of: settings.first?.proxyBaseURL) { _, _ in syncMetadataBackend() }
+        .onChange(of: settings.first?.appToken) { _, _ in syncMetadataBackend() }
         .task(id: movieId) {
             await load()
         }
@@ -114,7 +122,16 @@ struct MovieDetailView: View {
 
     // MARK: - Methods
     
+    private func syncMetadataBackend() {
+        let config = settings.first?.backendTorrentConfig
+        TorrentMetadataFetcher.configureBackend(
+            baseURL: config?.baseURL,
+            appToken: config?.appToken
+        )
+    }
+
     private func load() async {
+        syncMetadataBackend()
         guard let mode = settings.first?.metadataMode else {
             errorMessage = "Open Settings and configure metadata access first."
             return
@@ -152,7 +169,7 @@ struct MovieDetailView: View {
                     year: year,
                     imdbId: imdb,
                     kind: torrentKind,
-                    enableYTS: appSettings?.enableYTS ?? true
+                    enabledIndexerIDs: appSettings?.enabledTorrentIndexerSet ?? TorrentIndexerPreferences.defaultIDs
                 ) {
                     latest = batch
                 }
@@ -273,22 +290,8 @@ struct MovieDetailView: View {
     private func torrentFailureMessage(imdbId: String?) -> String {
         let diagnostics = torrentSearchDiagnostics ?? TorrentSearchDiagnostics()
         let missingImdb = imdbId == nil || imdbId?.isEmpty == true
-
-        if missingImdb {
-            if kind == .tv {
-                return "No torrents found. Torrentio needs an IMDb ID for this show — check that metadata is configured in Settings."
-            }
-            return "No torrents found. Torrentio needs an IMDb ID for this title — check that metadata is configured in Settings."
-        }
-
-        if diagnostics.torrentioAttempted, diagnostics.torrentioCount == 0, let err = diagnostics.torrentioError {
-            return "No torrents found. Torrentio returned nothing (\(err))."
-        }
-
-        if kind == .tv {
-            return "No torrents found for this show yet. Check your connection or try again in a moment."
-        }
-        return "No torrents found for this movie yet. Check your connection or try again in a moment."
+        let title = detail?.movie.title ?? "this title"
+        return diagnostics.playFailureMessage(title: title, isTV: kind == .tv, missingImdb: missingImdb)
     }
 
     private func playTrailer(_ url: URL?) {
@@ -322,6 +325,7 @@ struct MovieDetailView: View {
                         title: detail?.movie.title ?? "",
                         movieId: movieId,
                         subtitleURL: nil,
+                        subtitleAppearance: settings.first?.subtitleAppearance ?? .cinematic,
                         episodeTitle: "Trailer"
                     )
                 }
@@ -340,9 +344,12 @@ struct MovieDetailView: View {
             return
         }
 
-        guard let bestTorrent = TorrentCatalog.best(from: torrents) else {
-            errorMessage = "No playable torrent release could be selected."
-            return
+        let seeded = torrents.filter { $0.seeders > 0 }
+        let candidates = seeded.isEmpty ? torrents : seeded
+        let ordered = candidates.sorted { lhs, rhs in
+            if lhs.quality != rhs.quality { return lhs.quality > rhs.quality }
+            if lhs.seeders != rhs.seeders { return lhs.seeders > rhs.seeders }
+            return lhs.sizeBytes > rhs.sizeBytes
         }
 
         isPreparingStream = true
@@ -354,37 +361,47 @@ struct MovieDetailView: View {
                 await downloadSubtitleAsync(preferred)
             }
 
-            let session = coordinator.beginStream(torrent: bestTorrent)
-            activeStreamSession = session
+            var lastError: String?
+            for torrent in ordered.prefix(8) {
+                await coordinator.cancel()
+                let session = coordinator.beginStream(torrent: torrent)
+                activeStreamSession = session
 
-            while !Task.isCancelled {
-                if case .ready = session.state {
-                    break
-                }
-                if case .failed(let err) = session.state {
-                    await MainActor.run {
-                        isPreparingStream = false
-                        errorMessage = "Failed to stream \"\(bestTorrent.title)\": \(err)"
+                var failed = false
+                while !Task.isCancelled {
+                    if case .ready = session.state { break }
+                    if case .failed(let err) = session.state {
+                        lastError = err
+                        failed = true
+                        break
                     }
-                    return
+                    try? await Task.sleep(for: .milliseconds(250))
                 }
-                try? await Task.sleep(for: .milliseconds(250))
+
+                if failed { continue }
+
+                await MainActor.run {
+                    isPreparingStream = false
+                    do {
+                        try coordinator.finishPlayback(
+                            torrent: torrent,
+                            allTorrents: torrents,
+                            session: session,
+                            playerState: playerState,
+                            movieId: movieId,
+                            subtitleURL: subtitleFileURL,
+                            subtitleAppearance: settings.first?.subtitleAppearance ?? .cinematic
+                        )
+                    } catch {
+                        errorMessage = error.localizedDescription
+                    }
+                }
+                return
             }
 
             await MainActor.run {
                 isPreparingStream = false
-                do {
-                    try coordinator.finishPlayback(
-                        torrent: bestTorrent,
-                        allTorrents: torrents,
-                        session: session,
-                        playerState: playerState,
-                        movieId: movieId,
-                        subtitleURL: subtitleFileURL
-                    )
-                } catch {
-                    errorMessage = error.localizedDescription
-                }
+                errorMessage = lastError ?? "Could not prepare any release for streaming. Try another version."
             }
         }
     }
@@ -510,10 +527,12 @@ private struct MainContentView: View {
     let detail: MovieDetail?
     let isLoading: Bool
     let torrents: [TorrentResult]
+    let torrentSearchDiagnostics: TorrentSearchDiagnostics?
     let subtitles: [SubtitleInfo]
     @Binding var selectedSubtitle: SubtitleInfo?
     let isLoadingSubtitles: Bool
     let subtitleFileURL: URL?
+    let subtitleAppearance: SubtitleAppearance
     let currentRating: Float?
     @Binding var scrollOffset: CGFloat
     let orchestrator: StreamingOrchestrator
@@ -557,8 +576,11 @@ private struct MainContentView: View {
                         TorrentSection(
                             movie: detail.movie,
                             torrents: torrents,
+                            searchDiagnostics: torrentSearchDiagnostics,
+                            isTV: kind == .tv,
                             orchestrator: orchestrator,
-                            subtitleURL: subtitleFileURL
+                            subtitleURL: subtitleFileURL,
+                            subtitleAppearance: subtitleAppearance
                         )
                         .frame(maxWidth: .infinity)
 

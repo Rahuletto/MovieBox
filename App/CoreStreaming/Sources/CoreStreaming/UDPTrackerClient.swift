@@ -125,39 +125,28 @@ public actor UDPTrackerClient {
         }
 
         let connection = NWConnection(host: nwHost, port: nwPort, using: .udp)
+        let queue = DispatchQueue(label: "com.moviebox.udp-tracker", qos: .userInitiated)
 
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
-            connection.stateUpdateHandler = { state in
-                if case .ready = state {
-                    connection.send(content: data, completion: .contentProcessed { error in
-                        if let error {
-                            continuation.resume(throwing: error)
-                            return
-                        }
-                    })
+            let gate = UDPContinuationGate(continuation: continuation, connection: connection)
 
-                    connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { responseData, _, _, error in
-                        if let error {
-                            continuation.resume(throwing: error)
-                            return
-                        }
-                        guard let responseData else {
-                            continuation.resume(throwing: UDPTrackerError.noResponse)
-                            return
-                        }
-                        continuation.resume(returning: responseData)
-                    }
-                }
-                if case .failed(let error) = state {
-                    continuation.resume(throwing: error)
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    gate.sendOnce(data: data)
+                case .failed(let error):
+                    gate.finish(throwing: error)
+                case .cancelled:
+                    gate.finish(throwing: UDPTrackerError.noResponse)
+                default:
+                    break
                 }
             }
 
-            connection.start(queue: .main)
+            connection.start(queue: queue)
 
-            DispatchQueue.global().asyncAfter(deadline: .now() + 15) {
-                connection.cancel()
-                continuation.resume(throwing: UDPTrackerError.timeout)
+            queue.asyncAfter(deadline: .now() + 15) {
+                gate.finish(throwing: UDPTrackerError.timeout)
             }
         }
     }
@@ -239,6 +228,76 @@ extension Int64 {
             UInt8((value >> 8) & 0xFF),
             UInt8(value & 0xFF)
         ]
+    }
+}
+
+/// Ensures a checked continuation is resumed at most once across NWConnection callbacks.
+private final class UDPContinuationGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Data, Error>?
+    private var connection: NWConnection?
+    private var didSend = false
+
+    init(continuation: CheckedContinuation<Data, Error>, connection: NWConnection) {
+        self.continuation = continuation
+        self.connection = connection
+    }
+
+    func sendOnce(data: Data) {
+        lock.lock()
+        guard !didSend, let connection, continuation != nil else {
+            lock.unlock()
+            return
+        }
+        didSend = true
+        lock.unlock()
+
+        connection.send(content: data, completion: .contentProcessed { [weak self] error in
+            if let error {
+                self?.finish(throwing: error)
+            }
+        })
+
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] responseData, _, _, error in
+            if let error {
+                self?.finish(throwing: error)
+                return
+            }
+            if let responseData, !responseData.isEmpty {
+                self?.finish(returning: responseData)
+            }
+            // Nil/empty is normal until a datagram arrives; timeout handles no reply.
+        }
+    }
+
+    func finish(returning value: Data) {
+        lock.lock()
+        guard let continuation else {
+            lock.unlock()
+            return
+        }
+        self.continuation = nil
+        let connection = self.connection
+        self.connection = nil
+        lock.unlock()
+
+        connection?.cancel()
+        continuation.resume(returning: value)
+    }
+
+    func finish(throwing error: Error) {
+        lock.lock()
+        guard let continuation else {
+            lock.unlock()
+            return
+        }
+        self.continuation = nil
+        let connection = self.connection
+        self.connection = nil
+        lock.unlock()
+
+        connection?.cancel()
+        continuation.resume(throwing: error)
     }
 }
 

@@ -16,7 +16,7 @@ struct MovieBoxApp: App {
 
     init() {
         do {
-            sharedModelContainer = try ModelContainer(for: MovieBoxSchema.models)
+            sharedModelContainer = try MovieBoxModelContainer.make()
         } catch {
             fatalError("Failed to create ModelContainer: \(error)")
         }

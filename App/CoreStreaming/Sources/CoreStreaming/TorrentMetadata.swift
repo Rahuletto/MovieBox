@@ -134,6 +134,21 @@ public struct TorrentFile: Sendable {
 // MARK: - Torrent File Parser
 
 public enum TorrentFileParser {
+    /// Parses a bencoded `info` dictionary (from `ut_metadata` or similar).
+    public static func parse(
+        infoBencoded: Data,
+        expectedInfoHash: String,
+        trackers: [String]
+    ) throws -> TorrentMetadata {
+        guard infoBencoded.sha1Hex == expectedInfoHash.lowercased() else {
+            throw TorrentMetadataFetcher.FetchError.infoHashMismatch
+        }
+        guard let infoDict = try BencodeParser.parse(infoBencoded).dictionary else {
+            throw TorrentParserError.invalidFormat
+        }
+        return try metadata(from: infoDict, infoHash: expectedInfoHash.lowercased(), trackers: trackers)
+    }
+
     public static func parse(data: Data) throws -> TorrentMetadata {
         let bencode = try BencodeParser.parse(data)
         guard let dict = bencode.dictionary else {
@@ -147,11 +162,36 @@ public enum TorrentFileParser {
         let infoData = try extractInfoData(from: data)
         let infoHash = infoData.sha1Hex
 
+        var mergedTrackers: [String] = []
+        if case .string(let trackerData) = dict["announce"] {
+            if let tracker = String(data: trackerData, encoding: .utf8) {
+                mergedTrackers.append(tracker)
+            }
+        }
+        if let announceList = dict["announce-list"]?.list {
+            for tier in announceList {
+                if let tierList = tier.list {
+                    for tracker in tierList {
+                        if case .string(let trackerData) = tracker,
+                           let trackerString = String(data: trackerData, encoding: .utf8) {
+                            mergedTrackers.append(trackerString)
+                        }
+                    }
+                }
+            }
+        }
+
+        return try metadata(from: infoDict, infoHash: infoHash, trackers: mergedTrackers)
+    }
+
+    private static func metadata(
+        from infoDict: [String: BencodeValue],
+        infoHash: String,
+        trackers: [String]
+    ) throws -> TorrentMetadata {
         let name: String
         if let nameValue = infoDict["name"]?.string {
             name = nameValue
-        } else if let nameBytes = infoDict["name"]?.string {
-            name = nameBytes
         } else {
             name = "Unknown"
         }
@@ -179,25 +219,6 @@ public enum TorrentFileParser {
         }
 
         let totalSize = files.reduce(0) { $0 + $1.length }
-
-        var trackers: [String] = []
-        if case .string(let trackerData) = dict["announce"] {
-            if let tracker = String(data: trackerData, encoding: .utf8) {
-                trackers.append(tracker)
-            }
-        }
-        if let announceList = dict["announce-list"]?.list {
-            for tier in announceList {
-                if let tierList = tier.list {
-                    for tracker in tierList {
-                        if case .string(let trackerData) = tracker,
-                           let trackerString = String(data: trackerData, encoding: .utf8) {
-                            trackers.append(trackerString)
-                        }
-                    }
-                }
-            }
-        }
 
         return TorrentMetadata(
             infoHash: infoHash,

@@ -40,4 +40,35 @@ public struct TorrentSearchDiagnostics: Sendable {
     public var totalCount: Int {
         torrentioCount + nativeTotalCount
     }
+
+    /// User-facing copy for the torrent list when no results are shown.
+    public func emptyListingMessage(title: String, isTV: Bool) -> String {
+        if let backendError = nativeErrors["backend"], !backendError.isEmpty {
+            return "Torrent search could not reach your MovieBox backend (\(backendError)). Open Settings → Metadata and confirm the proxy URL, app token, and that `wrangler dev` is running."
+        }
+
+        let sources = isTV
+            ? "Torrentio, EZTV, 1337x, and Pirate Bay"
+            : "Torrentio, YTS, 1337x, and Pirate Bay"
+
+        if torrentioAttempted, torrentioCount == 0, let err = torrentioError, !err.isEmpty {
+            return "No releases for \"\(title)\" yet. \(sources) were searched via your backend; Torrentio reported: \(err)."
+        }
+
+        return "No releases for \"\(title)\" turned up from \(sources) (searched through your backend). Check that the backend is running, then try again in a moment."
+    }
+
+    /// User-facing copy when Play is tapped but the torrent list is empty.
+    public func playFailureMessage(title: String, isTV: Bool, missingImdb: Bool) -> String {
+        if let backendError = nativeErrors["backend"], !backendError.isEmpty {
+            return "Cannot play — backend torrent search is not configured or unreachable. \(backendError)"
+        }
+
+        if missingImdb {
+            let kindLabel = isTV ? "this series" : "this film"
+            return "Cannot play — no torrents found for \(kindLabel). Your metadata backend must supply an IMDb id so Torrentio can search."
+        }
+
+        return emptyListingMessage(title: title, isTV: isTV)
+    }
 }

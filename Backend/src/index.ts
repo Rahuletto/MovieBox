@@ -3,7 +3,13 @@ import { cors } from 'hono/cors'
 import { timing } from 'hono/timing'
 import { logger } from 'hono/logger'
 import { secureHeaders } from 'hono/secure-headers'
-import { searchTorrentIndexers } from './torrent'
+import {
+  searchAllTorrents,
+  fetchTorrentFileBytes,
+  TORRENT_API_VERSION,
+  INDEXER_CATALOG,
+  DEFAULT_ENABLED_INDEXER_IDS,
+} from './torrent'
 
 type Bindings = {
   TMDB_TOKEN: string
@@ -552,7 +558,7 @@ app.get('/api/logo/:kind/:id', async (c) => {
   }
 })
 
-// Built-in torrent indexers (YTS / EZTV / Pirate Bay) — proxied from the Worker.
+// All torrent sources (Torrentio, YTS/ytsweb, EZTV, TPB, 1337x) — change indexers here, not in the app.
 app.get('/api/torrent/search', async (c) => {
   const q = c.req.query('q')
   if (!q?.trim()) {
@@ -563,15 +569,15 @@ app.get('/api/torrent/search', async (c) => {
   const yearRaw = c.req.query('year')
   const year = yearRaw ? parseInt(yearRaw, 10) : null
   const imdbId = c.req.query('imdbId') ?? null
-  const enableYTS = c.req.query('enableYTS') !== '0'
+  const enabled = c.req.query('enabled') ?? c.req.query('indexers') ?? null
 
   try {
-    const payload = await searchTorrentIndexers({
+    const payload = await searchAllTorrents({
       query: q,
       year: Number.isFinite(year) ? year : null,
       imdbId,
       kind,
-      enableYTS,
+      enabledIndexerIDs: enabled,
     })
     return c.json(payload, {
       headers: { 'Cache-Control': 'private, max-age=120' },
@@ -585,6 +591,38 @@ app.get('/api/torrent/search', async (c) => {
       502
     )
   }
+})
+
+// Resolve .torrent file bytes for streaming (tries all public caches from the Worker).
+app.get('/api/torrent/metadata', async (c) => {
+  const hash = c.req.query('hash') ?? c.req.query('infoHash')
+  if (!hash?.trim()) {
+    return c.json({ error: 'bad_request', message: 'hash is required' }, 400)
+  }
+
+  const data = await fetchTorrentFileBytes(hash)
+  if (!data) {
+    return c.json(
+      { error: 'metadata_unavailable', message: 'No .torrent file found for this info hash.' },
+      404
+    )
+  }
+
+  return new Response(data, {
+    headers: {
+      'Content-Type': 'application/x-bittorrent',
+      'Cache-Control': 'private, max-age=3600',
+    },
+  })
+})
+
+app.get('/api/config', (c) => {
+  return c.json({
+    torrentApiVersion: TORRENT_API_VERSION,
+    indexers: INDEXER_CATALOG,
+    defaultEnabledIndexers: DEFAULT_ENABLED_INDEXER_IDS,
+    service: 'moviebox-backend',
+  })
 })
 
 // Unified title bundle: detail + credits + similar + external_ids + videos + logo

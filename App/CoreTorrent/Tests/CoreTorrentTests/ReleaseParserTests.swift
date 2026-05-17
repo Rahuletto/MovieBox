@@ -11,6 +11,11 @@ import Testing
     #expect(ReleaseParser.parseSource(from: title) == .bluray)
 }
 
+@Test func resolveQualityPrefersIndexerLabel() {
+    #expect(ReleaseParser.resolveQuality(indexerLabel: "2160p", title: "Movie.2026.1080p.WEB-DL") == .p2160)
+    #expect(ReleaseParser.resolveQuality(indexerLabel: "720p", title: "Movie.2026.1080p.WEB-DL") == .p1080)
+}
+
 @Test func parsesWebDLSDRDefaults() {
     let title = "Movie.2026.1080p.WEB-DL.H264.EAC3-GROUP"
 

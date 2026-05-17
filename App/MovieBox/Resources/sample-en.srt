@@ -1,0 +1,39 @@
+1
+00:00:02,000 --> 00:00:05,500
+Welcome to MovieBox subtitle styling.
+
+2
+00:00:06,000 --> 00:00:10,000
+This demo uses 1080p video with a bundled SRT file.
+
+3
+00:00:12,000 --> 00:00:16,000
+Cinematic style: rounded pill with 50% black background.
+
+4
+00:00:18,000 --> 00:00:22,000
+Each line fades in when the cue changes.
+
+5
+00:00:24,000 --> 00:00:28,500
+Change the look in Settings → Playback → Subtitle Style.
+
+6
+00:00:30,000 --> 00:00:34,000
+Try “Cinematic”, “Large white”, or “Yellow on black”.
+
+7
+00:00:36,000 --> 00:00:40,000
+This is not a Dolby Vision or HDR10 test stream.
+
+8
+00:00:42,000 --> 00:00:46,000
+For HDR, use a real HDR file or torrent release.
+
+9
+00:00:48,000 --> 00:00:52,000
+Subtitles should stay readable on bright and dark scenes.
+
+10
+00:00:55,000 --> 00:01:00,000
+If you can read this clearly, styling is working.

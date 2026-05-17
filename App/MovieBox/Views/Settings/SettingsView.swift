@@ -1,5 +1,7 @@
 import AppKit
+import CorePlayer
 import CoreStorage
+import CoreTorrent
 import SwiftData
 import SwiftUI
 
@@ -137,9 +139,46 @@ private struct MetadataSettingsSection: View {
 
 private struct TorrentSettingsSection: View {
     @Binding var draft: SettingsDraft
+    @State private var catalog: [TorrentIndexerCatalogEntry] = []
+    @State private var catalogError: String?
+    @State private var isLoadingCatalog = false
 
     var body: some View {
         Form {
+            Section {
+                if isLoadingCatalog {
+                    ProgressView("Loading indexers from backend…")
+                } else if let catalogError {
+                    Text(catalogError)
+                        .foregroundStyle(.secondary)
+                    Text("Configure Metadata → Backend Proxy, then reopen Settings.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                } else if catalog.isEmpty {
+                    Text("No indexers returned. Deploy the latest backend Worker.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    HStack {
+                        Button("Enable all") { draft.enabledTorrentIndexers = TorrentIndexerPreferences.serialize(TorrentIndexerPreferences.defaultIDs) }
+                        Button("Disable all") { draft.enabledTorrentIndexers = "" }
+                    }
+                    ForEach(catalog) { entry in
+                        Toggle(isOn: indexerBinding(entry.id)) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(entry.name)
+                                Text(entry.description)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            } header: {
+                Text("Search Providers")
+            } footer: {
+                Text("Providers are defined on your backend. Toggling here controls which indexers run for each search.")
+            }
+
             Section("Torrent Behavior") {
                 Toggle("Seed after download completes", isOn: $draft.enableSeeding)
                 Stepper("Max Active Downloads: \(draft.maxActiveDownloads)", value: $draft.maxActiveDownloads, in: 1...5)
@@ -147,6 +186,53 @@ private struct TorrentSettingsSection: View {
             }
         }
         .formStyle(.grouped)
+        .task { await loadCatalog() }
+        .onChange(of: draft.proxyBaseURL) { _, _ in Task { await loadCatalog() } }
+        .onChange(of: draft.appToken) { _, _ in Task { await loadCatalog() } }
+    }
+
+    private func indexerBinding(_ id: String) -> Binding<Bool> {
+        Binding(
+            get: { TorrentIndexerPreferences.parseCSV(draft.enabledTorrentIndexers).contains(id) },
+            set: { enabled in
+                var set = TorrentIndexerPreferences.parseCSV(draft.enabledTorrentIndexers)
+                if enabled { set.insert(id) } else { set.remove(id) }
+                draft.enabledTorrentIndexers = TorrentIndexerPreferences.serialize(set)
+                draft.enableYTS = set.contains("yts")
+            }
+        )
+    }
+
+    private func loadCatalog() async {
+        guard let url = URL(string: draft.proxyBaseURL), !draft.proxyBaseURL.isEmpty, !draft.appToken.isEmpty else {
+            catalog = fallbackCatalog
+            catalogError = nil
+            return
+        }
+        isLoadingCatalog = true
+        catalogError = nil
+        defer { isLoadingCatalog = false }
+        do {
+            let client = BackendTorrentConfigClient(baseURL: url, appToken: draft.appToken)
+            catalog = try await client.fetchCatalog()
+            if draft.enabledTorrentIndexers.isEmpty {
+                draft.enabledTorrentIndexers = TorrentIndexerPreferences.serialize(TorrentIndexerPreferences.defaultIDs)
+            }
+        } catch {
+            catalog = fallbackCatalog
+            catalogError = error.localizedDescription
+        }
+    }
+
+    private var fallbackCatalog: [TorrentIndexerCatalogEntry] {
+        TorrentIndexerPreferences.defaultIDs.map { id in
+            TorrentIndexerCatalogEntry(
+                id: id,
+                name: id.capitalized,
+                description: "Enable backend proxy to load live catalog.",
+                kinds: ["movie", "tv"]
+            )
+        }
     }
 }
 
@@ -236,9 +322,9 @@ private struct PlaybackSettingsSection: View {
                 TextField("Preferred Language", text: $draft.preferredSubtitleLang, prompt: Text("en"))
                 Toggle("Enable subtitles by default", isOn: $draft.subtitlesEnabled)
                 Picker("Subtitle Style", selection: $draft.subtitleStyle) {
-                    Text("System Default").tag("system")
-                    Text("Large White").tag("large-white")
-                    Text("Yellow on Black").tag("yellow-black")
+                    ForEach(SubtitleAppearance.allCases, id: \.rawValue) { style in
+                        Text(style.displayName).tag(style.rawValue)
+                    }
                 }
             }
 
@@ -294,6 +380,7 @@ private struct SettingsDraft: Equatable {
     var preferredAudioLang = "en"
     var preferredSubtitleLang = "en"
     var enableYTS = true
+    var enabledTorrentIndexers = "torrentio,yts,eztv,piratebay,1337x"
     var enableSeeding = true
     var maxActiveDownloads = 2
     var maxActiveUploads = 5
@@ -303,7 +390,7 @@ private struct SettingsDraft: Equatable {
     var autoRemoveCompleted = false
     var preferHDR = true
     var subtitlesEnabled = true
-    var subtitleStyle = "system"
+    var subtitleStyle = "cinematic"
     var audioFormatPriority = "best"
     var resumePlayback = true
     var fullScreenOnPlayback = false
@@ -332,6 +419,13 @@ private struct SettingsDraft: Equatable {
         preferredAudioLang = settings.preferredAudioLang
         preferredSubtitleLang = settings.preferredSubtitleLang
         enableYTS = settings.enableYTS
+        if settings.enabledTorrentIndexers.isEmpty {
+            var ids = TorrentIndexerPreferences.defaultIDs
+            if !settings.enableYTS { ids.remove("yts") }
+            enabledTorrentIndexers = TorrentIndexerPreferences.serialize(ids)
+        } else {
+            enabledTorrentIndexers = settings.enabledTorrentIndexers
+        }
         enableSeeding = settings.enableSeeding
         maxActiveDownloads = settings.maxActiveDownloads
         maxActiveUploads = settings.maxActiveUploads
@@ -369,7 +463,8 @@ private struct SettingsDraft: Equatable {
         settings.preferredQuality = preferredQuality
         settings.preferredAudioLang = preferredAudioLang
         settings.preferredSubtitleLang = preferredSubtitleLang
-        settings.enableYTS = enableYTS
+        settings.enableYTS = TorrentIndexerPreferences.parseCSV(enabledTorrentIndexers).contains("yts")
+        settings.enabledTorrentIndexers = enabledTorrentIndexers
         settings.enableSeeding = enableSeeding
         settings.maxActiveDownloads = maxActiveDownloads
         settings.maxActiveUploads = maxActiveUploads
