@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "moviebox-backend",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-17",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "APP_ENV": "production",
+    "CORS_ORIGIN": "*",
+    "RATE_LIMIT_WINDOW_MS": "60000",
+    "RATE_LIMIT_MAX_REQUESTS": "100"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "MOVIEBOX_CACHE",
+      "id": "moviebox-cache"
+    }
+  ]
+}
