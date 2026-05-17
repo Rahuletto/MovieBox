@@ -12,7 +12,6 @@ function torrentFileURLs(hash: string): string[] {
     `https://itorrents.org/torrent/${upper}.torrent`,
     `https://itorrents.org/torrent/${hash}.torrent`,
     `http://torrage.info/torrent.php?h=${hash}`,
-    `https://btcache.me/torrent/${hash}`,
     `https://torra.to/api/v1/torrents/${hash}`,
   ]
 }
