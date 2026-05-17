@@ -44,21 +44,23 @@ public final class StreamSession: ObservableObject {
     public func start(torrent: TorrentResult) async {
         state = .preparing
         do {
-            streamURL = try await orchestrator.startStream(torrent: torrent) { [weak self] progress, speed, peers in
-                Task { @MainActor in
-                    guard let self else { return }
-                    self.downloadSpeed = speed
-                    self.peerCount = peers
-                    self.bufferedPieces = await self.orchestrator.contiguousPiecesFromStart()
+            streamURL = try await TaskTimeout.withTimeout(seconds: 50) { [self] in
+                try await self.orchestrator.startStream(torrent: torrent) { [weak self] progress, speed, peers in
+                    Task { @MainActor in
+                        guard let self else { return }
+                        self.downloadSpeed = speed
+                        self.peerCount = peers
+                        self.bufferedPieces = await self.orchestrator.contiguousPiecesFromStart()
 
-                    let meetsThreshold = self.bufferedPieces >= Self.bufferThresholdPieces
-                    if !self.isReady && meetsThreshold {
-                        self.isReady = true
-                        if let url = self.streamURL {
-                            self.state = .ready(streamURL: url)
+                        let meetsThreshold = self.bufferedPieces >= Self.bufferThresholdPieces
+                        if !self.isReady && meetsThreshold {
+                            self.isReady = true
+                            if let url = self.streamURL {
+                                self.state = .ready(streamURL: url)
+                            }
+                        } else if !self.isReady {
+                            self.state = .buffering(progress: progress)
                         }
-                    } else if !self.isReady {
-                        self.state = .buffering(progress: progress)
                     }
                 }
             }
@@ -71,8 +73,27 @@ public final class StreamSession: ObservableObject {
                 }
             }
             startMonitoring()
+            startBufferingWatchdog()
+        } catch is TaskTimeoutError {
+            await orchestrator.stop()
+            state = .failed(error: "Could not load torrent metadata in time. Try another release.")
         } catch {
+            await orchestrator.stop()
             state = .failed(error: error.localizedDescription)
+        }
+    }
+
+    private func startBufferingWatchdog() {
+        Task {
+            try? await Task.sleep(for: .seconds(75))
+            guard !Task.isCancelled, !isReady else { return }
+            switch state {
+            case .preparing, .buffering:
+                await orchestrator.stop()
+                state = .failed(error: "Buffering timed out. Try a better-seeded release.")
+            default:
+                break
+            }
         }
     }
 
@@ -81,6 +102,11 @@ public final class StreamSession: ObservableObject {
         monitorTask?.cancel()
         monitorTask = nil
         await orchestrator.stop()
+    }
+
+    func failWithTimeout() async {
+        await orchestrator.stop()
+        state = .failed(error: "Streaming timed out. Try another release or check your connection.")
     }
 
     private func startMonitoring() {

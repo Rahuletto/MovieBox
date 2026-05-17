@@ -183,11 +183,7 @@ struct TorrentSection: View {
         streamSession = session
 
         Task {
-            while !Task.isCancelled {
-                if case .ready = session.state { break }
-                if case .failed = session.state { break }
-                try? await Task.sleep(for: .milliseconds(300))
-            }
+            await session.waitUntilSettled(timeout: 120)
 
             await MainActor.run {
                 busyTorrentID = nil

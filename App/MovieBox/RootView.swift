@@ -704,16 +704,22 @@ struct DownloadsView: View {
             activeStreamSession = session
 
             Task {
-                while !Task.isCancelled {
-                    if case .ready = session.state { break }
-                    if case .failed(let err) = session.state {
-                        await MainActor.run {
-                            isStreaming = false
-                            errorMessage = "Streaming failed: \(err)"
-                        }
-                        return
+                await session.waitUntilSettled(timeout: 120)
+
+                if case .failed(let err) = session.state {
+                    await MainActor.run {
+                        isStreaming = false
+                        errorMessage = "Streaming failed: \(err)"
                     }
-                    try? await Task.sleep(for: .milliseconds(250))
+                    return
+                }
+
+                guard case .ready = session.state else {
+                    await MainActor.run {
+                        isStreaming = false
+                        errorMessage = "Streaming timed out. Try another release."
+                    }
+                    return
                 }
 
                 await MainActor.run {

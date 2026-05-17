@@ -47,6 +47,16 @@ public enum TorrentMetadataFetcher {
     ]
 
     public static func fetch(infoHash: String, magnetTrackers: [String] = []) async throws -> TorrentMetadata {
+        do {
+            return try await TaskTimeout.withTimeout(seconds: 55) {
+                try await fetchResolved(infoHash: infoHash, magnetTrackers: magnetTrackers)
+            }
+        } catch is TaskTimeoutError {
+            throw FetchError.torrentFileUnavailable
+        }
+    }
+
+    private static func fetchResolved(infoHash: String, magnetTrackers: [String]) async throws -> TorrentMetadata {
         let normalized = infoHash.lowercased()
         guard normalized.count == 40,
               normalized.range(of: "^[a-f0-9]+$", options: .regularExpression) != nil else {
@@ -62,34 +72,70 @@ public enum TorrentMetadataFetcher {
         }
 
         if let backend {
-            if let data = try? await fetchTorrentBytesFromBackend(hash: normalized, config: backend) {
-                if let metadata = try? parseTorrentData(data, expectedHash: normalized, trackers: trackers) {
-                    return metadata
-                }
-            }
-        }
-
-        for url in torrentFileURLs(for: normalized) {
             do {
-                return try await downloadAndParse(url: url, expectedHash: normalized, trackers: trackers)
+                let data = try await fetchTorrentBytesFromBackend(hash: normalized, config: backend)
+                return try parseTorrentData(data, expectedHash: normalized, trackers: trackers)
             } catch let error as FetchError {
                 if case .infoHashMismatch = error { throw error }
             } catch {
-                continue
+                // Backend mirror fetch failed — fall through to client mirrors / DHT.
             }
         }
 
+        if let metadata = try? await fetchFirstMirror(
+            hash: normalized,
+            trackers: trackers
+        ) {
+            return metadata
+        }
+
         let peerId = "-MB0001-" + (0..<12).map { _ in "abcdefghijklmnopqrstuvwxyz0123456789".randomElement()! }
+        let trackerList = trackers
         do {
-            return try await UTMetadataFetcher.fetch(
-                infoHash: normalized,
-                trackers: trackers,
-                peerId: String(peerId)
-            )
+            return try await TaskTimeout.withTimeout(seconds: 30) {
+                try await UTMetadataFetcher.fetch(
+                    infoHash: normalized,
+                    trackers: trackerList,
+                    peerId: String(peerId)
+                )
+            }
         } catch let error as FetchError {
             throw error
+        } catch is TaskTimeoutError {
+            throw FetchError.torrentFileUnavailable
         } catch {
             throw FetchError.torrentFileUnavailable
+        }
+    }
+
+    /// Tries public `.torrent` mirrors in parallel (skips broken TLS hosts like btcache.me).
+    private static func fetchFirstMirror(hash: String, trackers: [String]) async throws -> TorrentMetadata {
+        let urls = torrentFileURLs(for: hash)
+        let trackerList = trackers
+        return try await withThrowingTaskGroup(of: TorrentMetadata.self) { group in
+            for url in urls {
+                group.addTask {
+                    try await downloadAndParse(url: url, expectedHash: hash, trackers: trackerList)
+                }
+            }
+
+            var lastError: Error = FetchError.torrentFileUnavailable
+            while let result = await group.nextResult() {
+                switch result {
+                case .success(let metadata):
+                    group.cancelAll()
+                    return metadata
+                case .failure(let error as FetchError):
+                    if case .infoHashMismatch = error {
+                        group.cancelAll()
+                        throw error
+                    }
+                    lastError = error
+                case .failure(let error):
+                    lastError = error
+                }
+            }
+            throw lastError
         }
     }
 
@@ -99,7 +145,7 @@ public enum TorrentMetadataFetcher {
             "https://itorrents.org/torrent/\(upper).torrent",
             "https://itorrents.org/torrent/\(hash).torrent",
             "http://torrage.info/torrent.php?h=\(hash)",
-            "https://btcache.me/torrent/\(hash)",
+            "https://torra.to/api/v1/torrents/\(hash)",
         ]
         return candidates.compactMap { URL(string: $0) }
     }
@@ -127,7 +173,7 @@ public enum TorrentMetadataFetcher {
 
     private static func downloadAndParse(url: URL, expectedHash: String, trackers: [String]) async throws -> TorrentMetadata {
         var request = URLRequest(url: url)
-        request.timeoutInterval = 20
+        request.timeoutInterval = 12
         request.setValue("MovieBox/1.0", forHTTPHeaderField: "User-Agent")
         request.setValue("application/x-bittorrent,*/*", forHTTPHeaderField: "Accept")
 

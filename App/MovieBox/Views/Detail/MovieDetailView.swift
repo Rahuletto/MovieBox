@@ -369,18 +369,17 @@ struct MovieDetailView: View {
                 let session = coordinator.beginStream(torrent: torrent)
                 activeStreamSession = session
 
-                var failed = false
-                while !Task.isCancelled {
-                    if case .ready = session.state { break }
-                    if case .failed(let err) = session.state {
-                        lastError = err
-                        failed = true
-                        break
-                    }
-                    try? await Task.sleep(for: .milliseconds(250))
+                await session.waitUntilSettled(timeout: 120)
+
+                if case .failed(let err) = session.state {
+                    lastError = err
+                    continue
                 }
 
-                if failed { continue }
+                guard case .ready = session.state else {
+                    lastError = "Stream did not become ready."
+                    continue
+                }
 
                 await MainActor.run {
                     isPreparingStream = false
