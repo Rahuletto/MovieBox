@@ -108,10 +108,10 @@ public struct MoviePosterCard: View {
                     .frame(width: 150, height: 225)
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .overlay(alignment: .bottomLeading) {
-                        LinearGradient(colors: [.clear, Color.primary.opacity(0.15)], startPoint: .top, endPoint: .bottom)
+                        LinearGradient(colors: [.clear, Color.black.opacity(0.25)], startPoint: .top, endPoint: .bottom)
                             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                     }
-                    .shadow(color: Color.primary.opacity(0.1), radius: 10, x: 0, y: 4)
+                    .shadow(color: Color.black.opacity(0.28), radius: 12, x: 0, y: 5)
 
                 Text(title)
                     .font(MovieBoxTypography.caption)

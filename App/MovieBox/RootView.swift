@@ -181,20 +181,17 @@ struct HomeView: View {
     @State private var isLoading = false
 
     var body: some View {
-        Group {
-            if let errorMessage {
-                if let mode = metadataMode {
-                    RetryCard(message: errorMessage) {
-                        Task { await load(mode: mode) }
-                    }
-                } else {
-                    RetryCard(message: errorMessage) {
-                        if let mode = metadataMode {
-                            Task { await load(mode: mode) }
-                        }
-                    }
-                }
-            } else if metadataMode == nil {
+        ZStack {
+            // Ambient subtle background gradient for an elite glow
+            RadialGradient(
+                colors: [Color.red.opacity(0.12), Color.clear],
+                center: .topLeading,
+                startRadius: 20,
+                endRadius: 480
+            )
+            .ignoresSafeArea()
+
+            if metadataMode == nil {
                 ContentUnavailableView(
                     "Metadata Not Configured",
                     systemImage: "key",
@@ -252,6 +249,41 @@ struct HomeView: View {
                     .padding(.top, topBarReservedHeight)
                     .padding(.bottom, 28)
                 }
+                .blur(radius: errorMessage != nil ? 18 : 0)
+                .opacity(rows.isEmpty ? 0 : 1)
+            }
+            
+            // Full screen loading (if rows is empty)
+            if isLoading && rows.isEmpty && metadataMode != nil {
+                ProgressView("Loading movies...")
+                    .controlSize(.large)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            // Fixed centered Error card floating on a blurred panel
+            if let errorMessage {
+                ZStack {
+                    Rectangle()
+                        .fill(.ultraThinMaterial)
+                        .ignoresSafeArea()
+                    
+                    if let mode = metadataMode {
+                        RetryCard(message: errorMessage) {
+                            Task { await load(mode: mode) }
+                        }
+                        .frame(maxWidth: 420)
+                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                    } else {
+                        RetryCard(message: errorMessage) {
+                            if let mode = metadataMode {
+                                Task { await load(mode: mode) }
+                            }
+                        }
+                        .frame(maxWidth: 420)
+                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .ignoresSafeArea(edges: .top)
@@ -440,55 +472,83 @@ struct MovieDetailView: View {
     }
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 28) {
-                if let detail {
-                    DetailHeader(
-                        detail: detail,
-                        addToMyList: { addToMyList(detail.movie) },
-                        onRate: { rateMovie($0) },
-                        onPlayTrailer: { playTrailer(detail.trailerURL) },
-                        currentRating: currentRating
-                    )
+        ZStack {
+            Color(nsColor: .windowBackgroundColor)
+                .ignoresSafeArea()
 
-                    if !detail.cast.isEmpty {
-                        CastSection(cast: detail.cast)
+            // Main content back panel
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 28) {
+                    if let detail {
+                        DetailHeader(
+                            detail: detail,
+                            addToMyList: { addToMyList(detail.movie) },
+                            onRate: { rateMovie($0) },
+                            onPlayTrailer: { playTrailer(detail.trailerURL) },
+                            currentRating: currentRating
+                        )
+
+                        if !detail.cast.isEmpty {
+                            CastSection(cast: detail.cast)
+                        }
+
+                        TorrentSection(
+                            movie: detail.movie,
+                            torrents: torrents,
+                            orchestrator: orchestrator,
+                            subtitleURL: subtitleFileURL
+                        )
+
+                        SubtitleSection(
+                            movie: detail.movie,
+                            subtitles: subtitles,
+                            selectedSubtitle: $selectedSubtitle,
+                            isLoading: isLoadingSubtitles,
+                            onSearch: { searchSubtitles(for: detail.movie) },
+                            onSelect: { downloadSubtitle($0) }
+                        )
+
+                        if !detail.similar.isEmpty {
+                            SimilarMoviesSection(movies: detail.similar)
+                        }
+                    } else if isLoading {
+                        ProgressView("Loading movie...")
+                            .controlSize(.large)
+                            .frame(maxWidth: .infinity, minHeight: 360)
+                    } else if errorMessage == nil {
+                        ContentUnavailableView("Movie Not Loaded", systemImage: "film")
                     }
+                }
+                .padding(.horizontal, 28)
+                .padding(.bottom, 28)
+                .padding(.top, topBarReservedHeight)
+            }
+            .blur(radius: errorMessage != nil ? 18 : 0)
+            .opacity(detail != nil ? 1 : 0)
+            
+            // Loading full-screen (if detail is nil)
+            if isLoading && detail == nil {
+                ProgressView("Loading movie...")
+                    .controlSize(.large)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
 
-                    TorrentSection(
-                        movie: detail.movie,
-                        torrents: torrents,
-                        orchestrator: orchestrator,
-                        subtitleURL: subtitleFileURL
-                    )
-
-                    SubtitleSection(
-                        movie: detail.movie,
-                        subtitles: subtitles,
-                        selectedSubtitle: $selectedSubtitle,
-                        isLoading: isLoadingSubtitles,
-                        onSearch: { searchSubtitles(for: detail.movie) },
-                        onSelect: { downloadSubtitle($0) }
-                    )
-
-                    if !detail.similar.isEmpty {
-                        SimilarMoviesSection(movies: detail.similar)
-                    }
-                } else if isLoading {
-                    ProgressView("Loading movie...")
-                        .controlSize(.large)
-                        .frame(maxWidth: .infinity, minHeight: 360)
-                } else if let errorMessage {
+            // Fixed centered Error card floating on a blurred panel
+            if let errorMessage {
+                ZStack {
+                    // Soft blur overlay
+                    Rectangle()
+                        .fill(.ultraThinMaterial)
+                        .ignoresSafeArea()
+                    
                     RetryCard(message: errorMessage) {
                         Task { await load() }
                     }
-                } else {
-                    ContentUnavailableView("Movie Not Loaded", systemImage: "film")
+                    .frame(maxWidth: 420)
+                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .padding(.horizontal, 28)
-            .padding(.bottom, 28)
-            .padding(.top, topBarReservedHeight)
         }
         .task(id: "\(movieId)-\(router.detailKind.rawValue)-\(settingsKey)") {
             await load()
@@ -1069,56 +1129,76 @@ struct CatalogView: View {
     private var title: String { kind == .movie ? "Movies" : "TV Shows" }
 
     var body: some View {
-        Group {
-            if let errorMessage {
-                RetryCard(message: errorMessage) {
-                    Task { await load() }
-                }
-            } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 36) {
-                        Text(title)
-                            .font(MovieBoxTypography.display)
-                            .padding(.horizontal, 28)
-                            .padding(.top, 4)
+        ZStack {
+            // Main content scroll view
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 36) {
+                    Text(title)
+                        .font(MovieBoxTypography.display)
+                        .padding(.horizontal, 28)
+                        .padding(.top, 4)
 
-                        if isLoading && rows.isEmpty {
-                            ProgressView()
-                                .controlSize(.large)
-                                .frame(maxWidth: .infinity, minHeight: 260)
-                        } else if rows.values.allSatisfy(\.isEmpty) {
-                            ContentUnavailableView(
-                                "Nothing here yet",
-                                systemImage: kind == .movie ? "film" : "tv",
-                                description: Text("Configure metadata access in Settings.")
-                            )
+                    if isLoading && rows.isEmpty {
+                        ProgressView()
+                            .controlSize(.large)
                             .frame(maxWidth: .infinity, minHeight: 260)
-                        } else {
-                            if let hero = rows[.trending]?.first {
-                                HeroSection(movie: hero) {
-                                    router.showDetail(id: hero.id, kind: kind)
-                                }
+                    } else if rows.values.allSatisfy(\.isEmpty) {
+                        ContentUnavailableView(
+                            "Nothing here yet",
+                            systemImage: kind == .movie ? "film" : "tv",
+                            description: Text("Configure metadata access in Settings.")
+                        )
+                        .frame(maxWidth: .infinity, minHeight: 260)
+                    } else {
+                        if let hero = rows[.trending]?.first {
+                            HeroSection(movie: hero) {
+                                router.showDetail(id: hero.id, kind: kind)
                             }
+                        }
 
-                            ForEach(MetadataCategory.allCases) { category in
-                                if let items = rows[category], !items.isEmpty {
-                                    HorizontalMovieRow(title: category.displayTitle(for: kind), items: items) { movie in
-                                        MoviePosterCard(
-                                            title: movie.title,
-                                            subtitle: movie.releaseDate,
-                                            posterURL: MetadataClient().imageURL(path: movie.posterPath)
-                                        ) {
-                                            router.showDetail(id: movie.id, kind: kind)
-                                        }
+                        ForEach(MetadataCategory.allCases) { category in
+                            if let items = rows[category], !items.isEmpty {
+                                HorizontalMovieRow(title: category.displayTitle(for: kind), items: items) { movie in
+                                    MoviePosterCard(
+                                        title: movie.title,
+                                        subtitle: movie.releaseDate,
+                                        posterURL: MetadataClient().imageURL(path: movie.posterPath)
+                                    ) {
+                                        router.showDetail(id: movie.id, kind: kind)
                                     }
                                 }
                             }
                         }
                     }
-                    .padding(.top, topBarReservedHeight)
-                    .padding(.bottom, 28)
                 }
-                .ignoresSafeArea(edges: .top)
+                .padding(.top, topBarReservedHeight)
+                .padding(.bottom, 28)
+            }
+            .ignoresSafeArea(edges: .top)
+            .blur(radius: errorMessage != nil ? 18 : 0)
+            .opacity(rows.isEmpty ? 0 : 1)
+            
+            // Large loading (if rows is empty)
+            if isLoading && rows.isEmpty {
+                ProgressView()
+                    .controlSize(.large)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            // Fixed centered Error card floating on a blurred panel
+            if let errorMessage {
+                ZStack {
+                    Rectangle()
+                        .fill(.ultraThinMaterial)
+                        .ignoresSafeArea()
+                    
+                    RetryCard(message: errorMessage) {
+                        Task { await load() }
+                    }
+                    .frame(maxWidth: 420)
+                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .task(id: "\(settings.first?.cacheKey ?? "missing")|\(kind.rawValue)") {

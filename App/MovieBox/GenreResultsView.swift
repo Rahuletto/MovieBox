@@ -27,23 +27,16 @@ struct GenreResultsView: View {
     @State private var errorMessage: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            if isLoading {
-                ProgressView()
-                    .controlSize(.large)
-                    .frame(maxWidth: .infinity, minHeight: 220)
-            } else if let errorMessage {
-                RetryCard(message: errorMessage) {
-                    Task { await load() }
-                }
-            } else {
+        ZStack {
+            // Main grid content
+            VStack(alignment: .leading, spacing: 18) {
                 if !movies.isEmpty {
                     sectionGrid(title: "Movies", items: movies, kind: .movie)
                 }
                 if !shows.isEmpty {
                     sectionGrid(title: "TV Shows", items: shows, kind: .tv)
                 }
-                if movies.isEmpty && shows.isEmpty {
+                if movies.isEmpty && shows.isEmpty && !isLoading && errorMessage == nil {
                     ContentUnavailableView(
                         "No Results",
                         systemImage: "film.stack",
@@ -51,6 +44,30 @@ struct GenreResultsView: View {
                     )
                     .frame(maxWidth: .infinity, minHeight: 240)
                 }
+            }
+            .blur(radius: errorMessage != nil ? 18 : 0)
+            .opacity(movies.isEmpty && shows.isEmpty ? 0 : 1)
+
+            if isLoading {
+                ProgressView()
+                    .controlSize(.large)
+                    .frame(maxWidth: .infinity, minHeight: 220)
+            }
+
+            // Fixed centered error card inside the genre panel
+            if let errorMessage {
+                ZStack {
+                    Rectangle()
+                        .fill(.ultraThinMaterial)
+                        .ignoresSafeArea()
+                    
+                    RetryCard(message: errorMessage) {
+                        Task { await load() }
+                    }
+                    .frame(maxWidth: 420)
+                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .padding(24)

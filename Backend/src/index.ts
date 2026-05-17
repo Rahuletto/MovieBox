@@ -134,8 +134,9 @@ app.all('/api/tmdb/*', async (c) => {
       })
     }
 
+    const isLocal = c.req.url.includes('127.0.0.1') || c.req.url.includes('localhost')
     const fetchOptions: any = { headers }
-    if (c.env.APP_ENV !== 'development') {
+    if (!isLocal) {
       fetchOptions.cf = {
         cacheEverything: true,
         cacheTtl: cacheTTLForTMDBPath(upstreamPath),
@@ -201,8 +202,9 @@ app.get('/api/omdb', async (c) => {
       return c.json(JSON.parse(cached), { headers: { 'X-Cache': 'HIT' } })
     }
 
+    const isLocal = c.req.url.includes('127.0.0.1') || c.req.url.includes('localhost')
     const fetchOptions: any = {}
-    if (c.env.APP_ENV !== 'development') {
+    if (!isLocal) {
       fetchOptions.cf = { cacheEverything: true, cacheTtl: 60 * 60 * 24 }
     }
     const response = await fetch(url.toString(), fetchOptions)

@@ -12,7 +12,7 @@ struct SearchView: View {
     @State private var isSearching = false
     @State private var errorMessage: String?
 
-    private let columns = [GridItem(.adaptive(minimum: 180, maximum: 240), spacing: 16)]
+    private let columns = [GridItem(.adaptive(minimum: 150, maximum: 170), spacing: 16)]
 
     var body: some View {
         ZStack {
@@ -28,6 +28,7 @@ struct SearchView: View {
             .allowsHitTesting(router.selectedGenre == nil && router.searchQuery.isEmpty)
             .animation(.spring(response: 0.42, dampingFraction: 0.82), value: router.selectedGenre)
             .animation(.spring(response: 0.42, dampingFraction: 0.82), value: router.searchQuery)
+            .blur(radius: errorMessage != nil ? 18 : 0)
 
             // 2. Genre Results ScrollView
             if let genre = router.selectedGenre, router.searchQuery.isEmpty {
@@ -39,6 +40,7 @@ struct SearchView: View {
                 }
                 .ignoresSafeArea(edges: .top)
                 .transition(.opacity)
+                .blur(radius: errorMessage != nil ? 18 : 0)
             }
 
             // 3. Search Results ScrollView
@@ -51,6 +53,23 @@ struct SearchView: View {
                 }
                 .ignoresSafeArea(edges: .top)
                 .transition(.opacity)
+                .blur(radius: errorMessage != nil ? 18 : 0)
+            }
+
+            // 4. Centered Fixed Error Card with ultraThinMaterial blur overlay
+            if let errorMessage {
+                ZStack {
+                    Rectangle()
+                        .fill(.ultraThinMaterial)
+                        .ignoresSafeArea()
+                    
+                    RetryCard(message: errorMessage) {
+                        Task { await search() }
+                    }
+                    .frame(maxWidth: 420)
+                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .onChange(of: router.searchQuery) { _, newValue in
@@ -84,10 +103,8 @@ struct SearchView: View {
             ProgressView()
                 .controlSize(.large)
                 .frame(maxWidth: .infinity, minHeight: 220)
-        } else if let errorMessage {
-            RetryCard(message: errorMessage) {
-                Task { await search() }
-            }
+        } else if errorMessage != nil {
+            Color.clear.frame(height: 1)
         } else if results.isEmpty {
             ContentUnavailableView.search(text: router.searchQuery)
                 .frame(maxWidth: .infinity, minHeight: 220)
