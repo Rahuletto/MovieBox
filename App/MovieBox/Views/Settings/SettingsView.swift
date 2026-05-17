@@ -7,49 +7,32 @@ struct SettingsView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var settingsRows: [AppSettings]
     @State private var draft = SettingsDraft()
-    @State private var selection: SettingsSection = .general
 
     var body: some View {
-        NavigationSplitView {
-            List(SettingsSection.allCases, selection: $selection) { section in
-                Label(section.title, systemImage: section.systemImage)
-                    .tag(section)
+        TabView {
+            Tab("General", systemImage: "gear") {
+                GeneralSettingsSection(draft: $draft)
             }
-            .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 160, ideal: 180, max: 200)
-        } detail: {
-            Form {
-                switch selection {
-                case .general:
-                    GeneralSettingsSection(draft: $draft, save: save)
-
-                case .metadata:
-                    MetadataSettingsSection(draft: $draft, save: save)
-
-                case .torrent:
-                    TorrentSettingsSection(draft: $draft, save: save)
-
-                case .downloads:
-                    DownloadSettingsSection(draft: $draft, save: save)
-
-                case .playback:
-                    PlaybackSettingsSection(draft: $draft, save: save)
-
-                case .appearance:
-                    AppearanceSettingsSection()
-
-                case .advanced:
-                    AdvancedSettingsSection(draft: $draft, save: save)
-                }
+            Tab("Metadata", systemImage: "key") {
+                MetadataSettingsSection(draft: $draft)
             }
-            .formStyle(.grouped)
-            .navigationTitle(selection.title)
-            .frame(minWidth: 520)
+            Tab("Torrents", systemImage: "point.3.connected.trianglepath.dotted") {
+                TorrentSettingsSection(draft: $draft)
+            }
+            Tab("Downloads", systemImage: "arrow.down.circle") {
+                DownloadSettingsSection(draft: $draft)
+            }
+            Tab("Playback", systemImage: "play.rectangle") {
+                PlaybackSettingsSection(draft: $draft)
+            }
+            Tab("Advanced", systemImage: "wrench.and.screwdriver") {
+                AdvancedSettingsSection(draft: $draft)
+            }
         }
-        .navigationSplitViewStyle(.balanced)
-        .onAppear {
-            loadSettings()
-        }
+        .scenePadding()
+        .frame(width: 550)
+        .onAppear { loadSettings() }
+        .onChange(of: draft) { save() }
     }
 
     private func loadSettings() {
@@ -72,41 +55,36 @@ struct SettingsView: View {
 
 private struct GeneralSettingsSection: View {
     @Binding var draft: SettingsDraft
-    let save: () -> Void
 
     var body: some View {
-        Section("Language") {
-            Picker("Interface Language", selection: Binding(
-                get: { draft.interfaceLanguage },
-                set: { draft.interfaceLanguage = $0; save() }
-            )) {
-                Text("System Default").tag("")
-                Text("English").tag("en")
-                Text("Spanish").tag("es")
-                Text("French").tag("fr")
-                Text("German").tag("de")
-                Text("Japanese").tag("ja")
+        Form {
+            Section("Language") {
+                Picker("Interface Language", selection: $draft.interfaceLanguage) {
+                    Text("System Default").tag("")
+                    Text("English").tag("en")
+                    Text("Spanish").tag("es")
+                    Text("French").tag("fr")
+                    Text("German").tag("de")
+                    Text("Japanese").tag("ja")
+                }
             }
-        }
 
-        Section("Region") {
-            Picker("Content Region", selection: Binding(
-                get: { draft.contentRegion },
-                set: { draft.contentRegion = $0; save() }
-            )) {
-                Text("United States").tag("US")
-                Text("United Kingdom").tag("GB")
-                Text("Canada").tag("CA")
-                Text("Australia").tag("AU")
-                Text("India").tag("IN")
-                Text("Germany").tag("DE")
-                Text("France").tag("FR")
-                Text("Japan").tag("JP")
+            Section("Region") {
+                Picker("Content Region", selection: $draft.contentRegion) {
+                    Text("United States").tag("US")
+                    Text("United Kingdom").tag("GB")
+                    Text("Canada").tag("CA")
+                    Text("Australia").tag("AU")
+                    Text("India").tag("IN")
+                    Text("Germany").tag("DE")
+                    Text("France").tag("FR")
+                    Text("Japan").tag("JP")
+                }
+                Text("Affects trending and popular content rankings.")
+                    .foregroundStyle(.secondary)
             }
-            Text("Affects trending and popular content rankings.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
+        .formStyle(.grouped)
     }
 }
 
@@ -114,72 +92,38 @@ private struct GeneralSettingsSection: View {
 
 private struct MetadataSettingsSection: View {
     @Binding var draft: SettingsDraft
-    let save: () -> Void
 
     var body: some View {
-        Section("Backend Proxy") {
-            LabeledContent("Proxy Base URL") {
-                TextField("https://your-backend.workers.dev", text: Binding(
-                    get: { draft.proxyBaseURL },
-                    set: { draft.proxyBaseURL = $0; save() }
-                ))
-                .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: 300)
+        Form {
+            Section("Backend Proxy") {
+                TextField("Proxy Base URL", text: $draft.proxyBaseURL, prompt: Text("https://your-backend.workers.dev"))
+                SecureField("App Token", text: $draft.appToken, prompt: Text("Enter token"))
+                Text("When configured, all metadata requests route through your Hono backend.")
+                    .foregroundStyle(.secondary)
             }
-            LabeledContent("App Token") {
-                SecureField("Enter token", text: Binding(
-                    get: { draft.appToken },
-                    set: { draft.appToken = $0; save() }
-                ))
-                .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: 300)
-            }
-            Text("When configured, all metadata requests route through your Hono backend.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
 
-        Section("Direct API Keys") {
-            LabeledContent("TMDB Bearer Token") {
-                SecureField("Enter token", text: Binding(
-                    get: { draft.tmdbBearerToken },
-                    set: { draft.tmdbBearerToken = $0; save() }
-                ))
-                .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: 300)
+            Section("Direct API Keys") {
+                SecureField("TMDB Bearer Token", text: $draft.tmdbBearerToken, prompt: Text("Enter token"))
+                SecureField("OMDb API Key", text: $draft.omdbAPIKey, prompt: Text("Enter key"))
+                Text("Used when no backend proxy is configured. TMDB is required for core functionality.\n\nNote: You can request a free API key from OMDb (free tier allows 1,000 daily requests) and paste it here.")
+                    .foregroundStyle(.secondary)
             }
-            LabeledContent("OMDb API Key") {
-                SecureField("Enter key", text: Binding(
-                    get: { draft.omdbAPIKey },
-                    set: { draft.omdbAPIKey = $0; save() }
-                ))
-                .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: 300)
-            }
-            Text("Used when no backend proxy is configured. TMDB is required for core functionality.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
 
-        Section("Image Quality") {
-            Picker("Poster Size", selection: Binding(
-                get: { draft.posterSize },
-                set: { draft.posterSize = $0; save() }
-            )) {
-                Text("Small (185px)").tag("w185")
-                Text("Medium (342px)").tag("w342")
-                Text("Large (500px)").tag("w500")
-                Text("Original").tag("original")
-            }
-            Picker("Backdrop Size", selection: Binding(
-                get: { draft.backdropSize },
-                set: { draft.backdropSize = $0; save() }
-            )) {
-                Text("Medium (780px)").tag("w780")
-                Text("Large (1280px)").tag("w1280")
-                Text("Original").tag("original")
+            Section("Image Quality") {
+                Picker("Poster Size", selection: $draft.posterSize) {
+                    Text("Small (185px)").tag("w185")
+                    Text("Medium (342px)").tag("w342")
+                    Text("Large (500px)").tag("w500")
+                    Text("Original").tag("original")
+                }
+                Picker("Backdrop Size", selection: $draft.backdropSize) {
+                    Text("Medium (780px)").tag("w780")
+                    Text("Large (1280px)").tag("w1280")
+                    Text("Original").tag("original")
+                }
             }
         }
+        .formStyle(.grouped)
     }
 }
 
@@ -187,70 +131,24 @@ private struct MetadataSettingsSection: View {
 
 private struct TorrentSettingsSection: View {
     @Binding var draft: SettingsDraft
-    let save: () -> Void
 
     var body: some View {
-        Section("YTS") {
-            Toggle("Enable YTS Search", isOn: Binding(
-                get: { draft.enableYTS },
-                set: { draft.enableYTS = $0; save() }
-            ))
-            Text("YTS provides public domain and open-license movie torrents.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
+        Form {
+            Section("Jackett") {
+                SecureField("API Key", text: $draft.jackettAPIKey, prompt: Text("Enter key"))
+                TextField("Host", text: $draft.jackettHost, prompt: Text("localhost"))
+                TextField("Port", value: $draft.jackettPort, format: .number)
+                Text("Both YTS and Jackett are searched automatically. Configure Jackett credentials to include additional indexers.")
+                    .foregroundStyle(.secondary)
+            }
 
-        Section("Jackett") {
-            Toggle("Enable Jackett", isOn: Binding(
-                get: { draft.enableJackett },
-                set: { draft.enableJackett = $0; save() }
-            ))
-            LabeledContent("API Key") {
-                SecureField("Enter key", text: Binding(
-                    get: { draft.jackettAPIKey },
-                    set: { draft.jackettAPIKey = $0; save() }
-                ))
-                .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: 300)
-                .disabled(!draft.enableJackett)
+            Section("Torrent Behavior") {
+                Toggle("Seed after download completes", isOn: $draft.enableSeeding)
+                Stepper("Max Active Downloads: \(draft.maxActiveDownloads)", value: $draft.maxActiveDownloads, in: 1...5)
+                Stepper("Max Active Uploads: \(draft.maxActiveUploads)", value: $draft.maxActiveUploads, in: 1...10)
             }
-            LabeledContent("Host") {
-                TextField("localhost", text: Binding(
-                    get: { draft.jackettHost },
-                    set: { draft.jackettHost = $0; save() }
-                ))
-                .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: 300)
-                .disabled(!draft.enableJackett)
-            }
-            LabeledContent("Port") {
-                TextField("9117", value: Binding(
-                    get: { draft.jackettPort },
-                    set: { draft.jackettPort = $0; save() }
-                ), format: .number)
-                .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: 100)
-                .disabled(!draft.enableJackett)
-            }
-            Text("Jackett aggregates results from multiple torrent indexers.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
-
-        Section("Torrent Behavior") {
-            Toggle("Seed after download completes", isOn: Binding(
-                get: { draft.enableSeeding },
-                set: { draft.enableSeeding = $0; save() }
-            ))
-            Stepper("Max Active Downloads: \(draft.maxActiveDownloads)", value: Binding(
-                get: { draft.maxActiveDownloads },
-                set: { draft.maxActiveDownloads = $0; save() }
-            ), in: 1...5)
-            Stepper("Max Active Uploads: \(draft.maxActiveUploads)", value: Binding(
-                get: { draft.maxActiveUploads },
-                set: { draft.maxActiveUploads = $0; save() }
-            ), in: 1...10)
-        }
+        .formStyle(.grouped)
     }
 }
 
@@ -258,64 +156,51 @@ private struct TorrentSettingsSection: View {
 
 private struct DownloadSettingsSection: View {
     @Binding var draft: SettingsDraft
-    let save: () -> Void
 
     var body: some View {
-        Section("Location") {
-            LabeledContent("Download Folder") {
-                HStack {
-                    TextField("", text: Binding(
-                        get: { draft.defaultDownloadPath },
-                        set: { draft.defaultDownloadPath = $0; save() }
-                    ))
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 300)
-                    Button("Choose...") {
-                        let panel = NSOpenPanel()
-                        panel.canChooseDirectories = true
-                        panel.canChooseFiles = false
-                        panel.allowsMultipleSelection = false
-                        if panel.runModal() == .OK, let url = panel.url {
-                            draft.defaultDownloadPath = url.path
-                            save()
-                        }
+        Form {
+            Section("Location") {
+                LabeledContent("Download Folder") {
+                    HStack {
+                        TextField("", text: $draft.defaultDownloadPath)
+                            .frame(maxWidth: 240)
+                        Button("Choose…", action: chooseFolder)
                     }
                 }
             }
-        }
 
-        Section("Speed Limits") {
-            Picker("Download Speed", selection: Binding(
-                get: { draft.downloadSpeedLimit },
-                set: { draft.downloadSpeedLimit = $0; save() }
-            )) {
-                Text("Unlimited").tag("0")
-                Text("1 MB/s").tag("1024")
-                Text("5 MB/s").tag("5120")
-                Text("10 MB/s").tag("10240")
-                Text("25 MB/s").tag("25600")
+            Section("Speed Limits") {
+                Picker("Download Speed", selection: $draft.downloadSpeedLimit) {
+                    Text("Unlimited").tag("0")
+                    Text("1 MB/s").tag("1024")
+                    Text("5 MB/s").tag("5120")
+                    Text("10 MB/s").tag("10240")
+                    Text("25 MB/s").tag("25600")
+                }
+                Picker("Upload Speed", selection: $draft.uploadSpeedLimit) {
+                    Text("Unlimited").tag("0")
+                    Text("128 KB/s").tag("128")
+                    Text("256 KB/s").tag("256")
+                    Text("512 KB/s").tag("512")
+                    Text("1 MB/s").tag("1024")
+                }
             }
-            Picker("Upload Speed", selection: Binding(
-                get: { draft.uploadSpeedLimit },
-                set: { draft.uploadSpeedLimit = $0; save() }
-            )) {
-                Text("Unlimited").tag("0")
-                Text("128 KB/s").tag("128")
-                Text("256 KB/s").tag("256")
-                Text("512 KB/s").tag("512")
-                Text("1 MB/s").tag("1024")
+
+            Section("Cleanup") {
+                Toggle("Delete torrent file after download", isOn: $draft.deleteTorrentAfterDownload)
+                Toggle("Remove completed downloads after 7 days", isOn: $draft.autoRemoveCompleted)
             }
         }
+        .formStyle(.grouped)
+    }
 
-        Section("Cleanup") {
-            Toggle("Delete torrent file after download", isOn: Binding(
-                get: { draft.deleteTorrentAfterDownload },
-                set: { draft.deleteTorrentAfterDownload = $0; save() }
-            ))
-            Toggle("Remove completed downloads after 7 days", isOn: Binding(
-                get: { draft.autoRemoveCompleted },
-                set: { draft.autoRemoveCompleted = $0; save() }
-            ))
+    private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url {
+            draft.defaultDownloadPath = url.path
         }
     }
 }
@@ -324,205 +209,84 @@ private struct DownloadSettingsSection: View {
 
 private struct PlaybackSettingsSection: View {
     @Binding var draft: SettingsDraft
-    let save: () -> Void
 
     var body: some View {
-        Section("Quality") {
-            Picker("Preferred Quality", selection: Binding(
-                get: { draft.preferredQuality },
-                set: { draft.preferredQuality = $0; save() }
-            )) {
-                Text("Best Available").tag("best")
-                Text("4K (2160p)").tag("4k")
-                Text("1080p").tag("1080p")
-                Text("720p").tag("720p")
+        Form {
+            Section("Quality") {
+                Picker("Preferred Quality", selection: $draft.preferredQuality) {
+                    Text("Best Available").tag("best")
+                    Text("4K (2160p)").tag("4k")
+                    Text("1080p").tag("1080p")
+                    Text("720p").tag("720p")
+                }
+                Toggle("Prefer HDR when available", isOn: $draft.preferHDR)
             }
-            Toggle("Prefer HDR when available", isOn: Binding(
-                get: { draft.preferHDR },
-                set: { draft.preferHDR = $0; save() }
-            ))
-        }
 
-        Section("Audio") {
-            LabeledContent("Preferred Language") {
-                TextField("en", text: Binding(
-                    get: { draft.preferredAudioLang },
-                    set: { draft.preferredAudioLang = $0; save() }
-                ))
-                .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: 80)
+            Section("Audio") {
+                TextField("Preferred Language", text: $draft.preferredAudioLang, prompt: Text("en"))
+                Picker("Audio Format Priority", selection: $draft.audioFormatPriority) {
+                    Text("Best Available").tag("best")
+                    Text("Dolby Atmos").tag("atmos")
+                    Text("DTS-HD").tag("dtshd")
+                    Text("TrueHD").tag("truehd")
+                    Text("EAC3").tag("eac3")
+                    Text("AAC").tag("aac")
+                }
             }
-            Picker("Audio Format Priority", selection: Binding(
-                get: { draft.audioFormatPriority },
-                set: { draft.audioFormatPriority = $0; save() }
-            )) {
-                Text("Best Available").tag("best")
-                Text("Dolby Atmos").tag("atmos")
-                Text("DTS-HD").tag("dtshd")
-                Text("TrueHD").tag("truehd")
-                Text("EAC3").tag("eac3")
-                Text("AAC").tag("aac")
-            }
-        }
 
-        Section("Subtitles") {
-            LabeledContent("Preferred Language") {
-                TextField("en", text: Binding(
-                    get: { draft.preferredSubtitleLang },
-                    set: { draft.preferredSubtitleLang = $0; save() }
-                ))
-                .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: 80)
+            Section("Subtitles") {
+                TextField("Preferred Language", text: $draft.preferredSubtitleLang, prompt: Text("en"))
+                Toggle("Enable subtitles by default", isOn: $draft.subtitlesEnabled)
+                Picker("Subtitle Style", selection: $draft.subtitleStyle) {
+                    Text("System Default").tag("system")
+                    Text("Large White").tag("large-white")
+                    Text("Yellow on Black").tag("yellow-black")
+                }
             }
-            Toggle("Enable subtitles by default", isOn: Binding(
-                get: { draft.subtitlesEnabled },
-                set: { draft.subtitlesEnabled = $0; save() }
-            ))
-            Picker("Subtitle Style", selection: Binding(
-                get: { draft.subtitleStyle },
-                set: { draft.subtitleStyle = $0; save() }
-            )) {
-                Text("System Default").tag("system")
-                Text("Large White").tag("large-white")
-                Text("Yellow on Black").tag("yellow-black")
-            }
-        }
 
-        Section("Player Behavior") {
-            Toggle("Resume playback from last position", isOn: Binding(
-                get: { draft.resumePlayback },
-                set: { draft.resumePlayback = $0; save() }
-            ))
-            Toggle("Enter full screen on playback", isOn: Binding(
-                get: { draft.fullScreenOnPlayback },
-                set: { draft.fullScreenOnPlayback = $0; save() }
-            ))
-            Stepper("Skip intro duration: \(draft.skipIntroDuration)s", value: Binding(
-                get: { draft.skipIntroDuration },
-                set: { draft.skipIntroDuration = $0; save() }
-            ), in: 0...30)
+            Section("Player Behavior") {
+                Toggle("Resume playback from last position", isOn: $draft.resumePlayback)
+                Toggle("Enter full screen on playback", isOn: $draft.fullScreenOnPlayback)
+                Stepper("Skip intro duration: \(draft.skipIntroDuration)s", value: $draft.skipIntroDuration, in: 0...30)
+            }
         }
+        .formStyle(.grouped)
     }
 }
 
-// MARK: - Appearance
 
-private struct AppearanceSettingsSection: View {
-    var body: some View {
-        Section("Theme") {
-            Picker("Appearance", selection: .constant("system")) {
-                Text("System").tag("system")
-                Text("Light").tag("light")
-                Text("Dark").tag("dark")
-            }
-            .pickerStyle(.segmented)
-            Text("MovieBox adapts to your system appearance automatically.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-
-        Section("Content Display") {
-            Picker("Poster Aspect Ratio", selection: .constant("poster")) {
-                Text("Poster (2:3)").tag("poster")
-                Text("Square (1:1)").tag("square")
-                Text("Landscape (16:9)").tag("landscape")
-            }
-        }
-    }
-}
 
 // MARK: - Advanced
 
 private struct AdvancedSettingsSection: View {
     @Binding var draft: SettingsDraft
-    let save: () -> Void
 
     var body: some View {
-        Section("Network") {
-            LabeledContent("HTTP Proxy URL") {
-                TextField("http://proxy:port", text: Binding(
-                    get: { draft.httpProxyURL },
-                    set: { draft.httpProxyURL = $0; save() }
-                ))
-                .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: 300)
+        Form {
+            Section("Network") {
+                TextField("HTTP Proxy URL", text: $draft.httpProxyURL, prompt: Text("http://proxy:port"))
+                Toggle("Use HTTP proxy for all requests", isOn: $draft.useHTTPProxy)
+                    .disabled(draft.httpProxyURL.isEmpty)
+                Stepper("Request Timeout: \(draft.requestTimeout)s", value: $draft.requestTimeout, in: 5...60)
             }
-            Toggle("Use HTTP proxy for all requests", isOn: Binding(
-                get: { draft.useHTTPProxy },
-                set: { draft.useHTTPProxy = $0; save() }
-            ))
-            .disabled(draft.httpProxyURL.isEmpty)
-            Stepper("Request Timeout: \(draft.requestTimeout)s", value: Binding(
-                get: { draft.requestTimeout },
-                set: { draft.requestTimeout = $0; save() }
-            ), in: 5...60)
+
+            Section("Cache") {
+                Stepper("Image Cache Size: \(draft.imageCacheSize) MB", value: $draft.imageCacheSize, in: 50...500, step: 50)
+                Stepper("Metadata Cache TTL: \(draft.metadataCacheTTL) min", value: $draft.metadataCacheTTL, in: 5...1440, step: 5)
+            }
+
+            Section("Logging") {
+                Toggle("Enable debug logging", isOn: $draft.debugLogging)
+                Toggle("Log torrent activity", isOn: $draft.logTorrentActivity)
+            }
         }
-
-        Section("Cache") {
-            Stepper("Image Cache Size: \(draft.imageCacheSize) MB", value: Binding(
-                get: { draft.imageCacheSize },
-                set: { draft.imageCacheSize = $0; save() }
-            ), in: 50...500, step: 50)
-            Stepper("Metadata Cache TTL: \(draft.metadataCacheTTL) min", value: Binding(
-                get: { draft.metadataCacheTTL },
-                set: { draft.metadataCacheTTL = $0; save() }
-            ), in: 5...1440, step: 5)
-        }
-
-        Section("Logging") {
-            Toggle("Enable debug logging", isOn: Binding(
-                get: { draft.debugLogging },
-                set: { draft.debugLogging = $0; save() }
-            ))
-            Toggle("Log torrent activity", isOn: Binding(
-                get: { draft.logTorrentActivity },
-                set: { draft.logTorrentActivity = $0; save() }
-            ))
-        }
-    }
-}
-
-// MARK: - Sections
-
-private enum SettingsSection: String, CaseIterable, Identifiable {
-    case general
-    case metadata
-    case torrent
-    case downloads
-    case playback
-    case appearance
-    case advanced
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .general: "General"
-        case .metadata: "Metadata"
-        case .torrent: "Torrents"
-        case .downloads: "Downloads"
-        case .playback: "Playback"
-        case .appearance: "Appearance"
-        case .advanced: "Advanced"
-        }
-    }
-
-    var systemImage: String {
-        switch self {
-        case .general: "gear"
-        case .metadata: "key"
-        case .torrent: "point.3.connected.trianglepath.dotted"
-        case .downloads: "arrow.down.circle"
-        case .playback: "play.rectangle"
-        case .appearance: "paintpalette"
-        case .advanced: "wrench.and.screwdriver"
-        }
+        .formStyle(.grouped)
     }
 }
 
 // MARK: - Draft
 
-private struct SettingsDraft {
+private struct SettingsDraft: Equatable {
     var proxyBaseURL = ""
     var appToken = ""
     var tmdbBearerToken = ""

@@ -24,7 +24,9 @@ struct MovieDetailView: View {
     @State private var isLoadingSubtitles = false
     @State private var subtitleFileURL: URL?
     @State private var showTrailer = false
-    @State private var trailerPlayer: AVPlayer?
+    @State private var trailerURL: URL?
+    @State private var activeStreamSession: StreamSession?
+    @State private var isPreparingStream = false
     @State private var scrollOffset: CGFloat = 0
     
     private let movieId: Int
@@ -66,6 +68,7 @@ struct MovieDetailView: View {
                     kind: kind,
                     onAddToList: { addToMyList(detail!.movie) },
                     onRate: rateMovie,
+                    onPlayNow: playBestTorrent,
                     onPlayTrailer: { playTrailer(detail?.trailerURL) },
                     onSearchSubtitles: { searchSubtitles(for: detail!.movie) },
                     onDownloadSubtitle: downloadSubtitle
@@ -77,6 +80,16 @@ struct MovieDetailView: View {
                 ErrorOverlay(message: errorMessage, onRetry: { Task { await load() } })
             }
 
+            // Preparing Stream Glass Overlay
+            if isPreparingStream, let session = activeStreamSession {
+                GlassStreamOverlay(session: session) {
+                    session.cancel()
+                    isPreparingStream = false
+                }
+                .transition(.opacity)
+                .zIndex(20)
+            }
+
             // (Loading state is rendered inline inside MainContentView — no duplicate overlay here.)
 
             // Navigation header with back button (on top)
@@ -86,8 +99,8 @@ struct MovieDetailView: View {
             await load()
         }
         .sheet(isPresented: $showTrailer) {
-            if let player = trailerPlayer {
-                TrailerPlayerView(player: player, onDismiss: { showTrailer = false })
+            if let url = trailerURL {
+                TrailerPlayerView(videoURL: url, onDismiss: { showTrailer = false })
                     .frame(minWidth: 800, minHeight: 500)
             }
         }
@@ -142,8 +155,14 @@ struct MovieDetailView: View {
             // Torrent search + subtitle search run in parallel — neither depends on
             // the other, and we no longer block one behind the other sequentially.
             async let torrentsTask: [TorrentResult] = {
+                let aggregator: TorrentSearchAggregator
+                if let s = settings.first, !s.jackettAPIKey.isEmpty {
+                    aggregator = TorrentSearchAggregator(jackettAPIKey: s.jackettAPIKey, jackettHost: s.jackettHost, jackettPort: s.jackettPort)
+                } else {
+                    aggregator = TorrentSearchAggregator()
+                }
                 var latest: [TorrentResult] = []
-                for await batch in await TorrentSearchAggregator().search(movieTitle: title) {
+                for await batch in await aggregator.search(movieTitle: title) {
                     latest = batch
                 }
                 return latest
@@ -255,8 +274,33 @@ struct MovieDetailView: View {
 
     private func playTrailer(_ url: URL?) {
         guard let url else { return }
-        trailerPlayer = AVPlayer(url: url)
+        trailerURL = url
         showTrailer = true
+    }
+
+    private func playBestTorrent() {
+        guard let bestTorrent = torrents.first else {
+            errorMessage = "No available torrents found for this title."
+            return
+        }
+
+        isPreparingStream = true
+        let session = StreamSession(orchestrator: orchestrator)
+        activeStreamSession = session
+
+        Task {
+            await session.start(torrent: bestTorrent)
+
+            await MainActor.run {
+                if case .ready(let url) = session.state {
+                    isPreparingStream = false
+                    playerState.load(url: url, title: bestTorrent.title, movieId: movieId, subtitleURL: subtitleFileURL)
+                } else if case .failed(let err) = session.state {
+                    isPreparingStream = false
+                    errorMessage = "Failed to stream best torrent: \(err)"
+                }
+            }
+        }
     }
 }
 
@@ -344,6 +388,7 @@ private struct DetailHeroOverlay: View {
     let kind: MediaKind
     let addToMyList: () -> Void
     let onRate: (Float) -> Void
+    let onPlayNow: () -> Void
     let onPlayTrailer: () -> Void
     let currentRating: Float?
 
@@ -360,6 +405,7 @@ private struct DetailHeroOverlay: View {
                     kind: kind,
                     addToMyList: addToMyList,
                     onRate: onRate,
+                    onPlayNow: onPlayNow,
                     onPlayTrailer: onPlayTrailer,
                     currentRating: currentRating
                 )
@@ -388,6 +434,7 @@ private struct MainContentView: View {
     let kind: MediaKind
     let onAddToList: () -> Void
     let onRate: (Float) -> Void
+    let onPlayNow: () -> Void
     let onPlayTrailer: () -> Void
     let onSearchSubtitles: () -> Void
     let onDownloadSubtitle: (SubtitleInfo) -> Void
@@ -404,6 +451,7 @@ private struct MainContentView: View {
                         kind: kind,
                         addToMyList: onAddToList,
                         onRate: onRate,
+                        onPlayNow: onPlayNow,
                         onPlayTrailer: onPlayTrailer,
                         currentRating: currentRating
                     )
@@ -561,5 +609,90 @@ private struct EdgeInsets {
     static var defaultHorizontalPadding: CGFloat {
         // Responsive: use smaller padding on compact, larger on regular
         return 28
+    }
+}
+
+private struct GlassStreamOverlay: View {
+    @ObservedObject var session: StreamSession
+    let onCancel: () -> Void
+
+    var body: some View {
+        ZStack {
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .ignoresSafeArea()
+
+            VStack(spacing: 24) {
+                VStack(spacing: 20) {
+                    ProgressView()
+                        .controlSize(.large)
+                        .tint(.white)
+
+                    Text("Preparing Stream")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+
+                    switch session.state {
+                    case .preparing:
+                        Text("Connecting to seeders...")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    case .buffering(let progress):
+                        VStack(spacing: 8) {
+                            ProgressView(value: progress)
+                                .progressViewStyle(.linear)
+                                .tint(.white)
+                                .frame(width: 200)
+                            
+                            HStack {
+                                Text("\(Int(progress * 100))%")
+                                Spacer()
+                                if session.downloadSpeed > 0 {
+                                    Text(formatSpeed(session.downloadSpeed))
+                                }
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                        }
+                    case .ready:
+                        Text("Ready to play!")
+                            .font(.subheadline)
+                            .foregroundStyle(.green)
+                    case .failed(let error):
+                        Text("Failed: \(error)")
+                            .font(.subheadline)
+                            .foregroundStyle(.red)
+                    case .cancelled:
+                        Text("Cancelled")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    case .idle:
+                        EmptyView()
+                    }
+
+                    Button("Cancel", action: onCancel)
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                }
+                .padding(32)
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .stroke(.white.opacity(0.15), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.3), radius: 20, x: 0, y: 10)
+            }
+        }
+    }
+
+    private func formatSpeed(_ bytesPerSecond: Double) -> String {
+        if bytesPerSecond >= 1_000_000 {
+            return String(format: "%.1f MB/s", bytesPerSecond / 1_000_000)
+        } else if bytesPerSecond >= 1000 {
+            return String(format: "%.1f KB/s", bytesPerSecond / 1000)
+        }
+        return String(format: "%.0f B/s", bytesPerSecond)
     }
 }

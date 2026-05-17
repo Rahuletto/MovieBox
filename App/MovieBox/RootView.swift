@@ -9,6 +9,7 @@ import SwiftData
 import SwiftUI
 import Combine
 import AVKit
+import WebKit
 
 struct ScrollOffsetPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
@@ -200,6 +201,7 @@ struct DetailHeroHeader: View {
       let kind: MediaKind
       let addToMyList: () -> Void
       let onRate: (Float) -> Void
+      let onPlayNow: () -> Void
       let onPlayTrailer: () -> Void
       let currentRating: Float?
       
@@ -235,11 +237,11 @@ struct DetailHeroHeader: View {
               }
               
               Spacer()
-                .frame(height: 24)
+                .frame(height: 6)
               
               HStack(spacing: 12) {
                   Button {
-                      onPlayTrailer()
+                      onPlayNow()
                   } label: {
                       Label("Play Now", systemImage: "play.fill")
                           .font(.headline)
@@ -253,6 +255,15 @@ struct DetailHeroHeader: View {
                   GlassButton(action: addToMyList) {
                       Label(isInList ? "Added to List" : "Add To My List", systemImage: isInList ? "checkmark" : "plus")
                   }
+              }
+
+              if detail.trailerURL != nil {
+                  Button(action: onPlayTrailer) {
+                      Label("Play Trailer", systemImage: "play.circle")
+                          .font(.subheadline)
+                          .foregroundStyle(.secondary)
+                  }
+                  .buttonStyle(.plain)
               }
               
           }
@@ -852,9 +863,42 @@ struct RetryCard: View {
     }
 }
 
+struct TrailerWebView: NSViewRepresentable {
+    let url: URL
+
+    func makeNSView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.allowsAirPlayForMediaPlayback = true
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.wantsLayer = true
+        webView.layer?.cornerRadius = 16
+        webView.layer?.masksToBounds = true
+        // Set transparent background for a premium dark feel
+        webView.setValue(false, forKey: "drawsBackground")
+        return webView
+    }
+
+    func updateNSView(_ nsView: WKWebView, context: Context) {
+        let request = URLRequest(url: url)
+        nsView.load(request)
+    }
+}
+
 struct TrailerPlayerView: View {
-    let player: AVPlayer
+    let videoURL: URL
     let onDismiss: () -> Void
+
+    private var embedURL: URL? {
+        if videoURL.absoluteString.contains("youtube.com/embed/") {
+            return videoURL
+        }
+        if let components = URLComponents(url: videoURL, resolvingAgainstBaseURL: false),
+           let queryItems = components.queryItems,
+           let key = queryItems.first(where: { $0.name == "v" })?.value {
+            return URL(string: "https://www.youtube.com/embed/\(key)?autoplay=1&rel=0&modestbranding=1")
+        }
+        return videoURL
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -863,10 +907,7 @@ struct TrailerPlayerView: View {
                     .font(.headline)
                     .foregroundStyle(.white)
                 Spacer()
-                Button {
-                    player.pause()
-                    onDismiss()
-                } label: {
+                Button(action: onDismiss) {
                     Image(systemName: "xmark.circle.fill")
                         .font(.title2)
                 }
@@ -877,61 +918,14 @@ struct TrailerPlayerView: View {
             .padding(.vertical, 12)
             .background(.black)
 
-            VideoPlayer(player: player)
-                .background(.black)
-
-            HStack {
-                Button {
-                    player.seek(to: CMTime(seconds: max(0, player.currentTime().seconds - 10), preferredTimescale: 600))
-                } label: {
-                    Image(systemName: "gobackward.10")
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.white.opacity(0.85))
-
-                Button {
-                    if player.timeControlStatus == .playing {
-                        player.pause()
-                    } else {
-                        player.play()
-                    }
-                } label: {
-                    Image(systemName: player.timeControlStatus == .playing ? "pause.fill" : "play.fill")
-                        .font(.title)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.white.opacity(0.85))
-
-                Button {
-                    player.seek(to: CMTime(seconds: player.currentTime().seconds + 10, preferredTimescale: 600))
-                } label: {
-                    Image(systemName: "goforward.10")
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.white.opacity(0.85))
-
-                Spacer()
-
-                Text(timeDisplay)
-                    .font(.caption)
-                    .monospacedDigit()
-                    .foregroundStyle(.white.opacity(0.85))
+            if let embedURL {
+                TrailerWebView(url: embedURL)
+                    .background(.black)
+            } else {
+                ContentUnavailableView("Unable to load trailer", systemImage: "play.slash")
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            .background(.black)
         }
         .background(.black)
-    }
-
-    private var timeDisplay: String {
-        let current = player.currentTime().seconds
-        let duration = player.currentItem?.duration.seconds ?? 0
-        guard current.isFinite, current >= 0, duration.isFinite else { return "0:00" }
-        let totalSeconds = Int(current)
-        let minutes = totalSeconds / 60
-        let secs = totalSeconds % 60
-        return String(format: "%d:%02d / %d:%02d", minutes, secs, Int(duration) / 60, Int(duration) % 60)
     }
 }
 

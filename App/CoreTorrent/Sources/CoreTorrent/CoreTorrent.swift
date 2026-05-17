@@ -186,16 +186,14 @@ public enum ReleaseParser {
 public actor TorrentSearchAggregator {
     private let ytsClient: YTSClient
     private var jackettClient: JackettClient?
-    private var jackettEnabled: Bool
 
     public init(ytsClient: YTSClient = YTSClient()) {
         self.ytsClient = ytsClient
-        self.jackettEnabled = false
     }
 
-    public func configureJackett(apiKey: String, host: String, port: Int) {
-        jackettClient = JackettClient(apiKey: apiKey, host: host, port: port)
-        jackettEnabled = true
+    public init(ytsClient: YTSClient = YTSClient(), jackettAPIKey: String, jackettHost: String, jackettPort: Int) {
+        self.ytsClient = ytsClient
+        self.jackettClient = JackettClient(apiKey: jackettAPIKey, host: jackettHost, port: jackettPort)
     }
 
     public func search(movieTitle: String) -> AsyncStream<[TorrentResult]> {
@@ -203,6 +201,7 @@ public actor TorrentSearchAggregator {
             Task {
                 var allResults: [TorrentResult] = []
 
+                // Always search YTS
                 do {
                     let ytsResults = try await ytsClient.search(query: movieTitle)
                     allResults.append(contentsOf: ytsResults)
@@ -210,7 +209,8 @@ public actor TorrentSearchAggregator {
                     NSLog("YTS search failed: \(error)")
                 }
 
-                if jackettEnabled, let jackett = jackettClient {
+                // Always search Jackett when configured
+                if let jackett = jackettClient {
                     do {
                         let jackettResults = try await jackett.search(query: movieTitle)
                         allResults.append(contentsOf: jackettResults.map { $0.toTorrentResult() })
