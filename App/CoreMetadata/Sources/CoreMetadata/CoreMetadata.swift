@@ -202,6 +202,18 @@ public actor MetadataClient {
         return response.logos.first?.filePath
     }
 
+    public func movieImages(id: Int, kind: MediaKind = .movie) async throws -> (logo: String?, backdrop: String?) {
+        let base = kind == .movie ? "/movie" : "/tv"
+        let response: ImagesResponse = try await request(
+            path: "\(base)/\(id)/images",
+            queryItems: [URLQueryItem(name: "include_image_language", value: "en,null")]
+        )
+        return (
+            logo: response.logos.first?.filePath,
+            backdrop: response.backdrops.first?.filePath
+        )
+    }
+
     public nonisolated func imageURL(path: String?, width: Int = 342) -> URL? {
         guard let path else { return nil }
         return URL(string: "https://image.tmdb.org/t/p/w\(width)\(path)")

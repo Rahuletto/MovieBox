@@ -33,20 +33,24 @@ struct PillTabBar: View {
             if let genre = router.selectedGenre {
                 HStack(spacing: 0) {
                     HStack(spacing: 12) {
-                        Button {
-                            router.selectedGenre = nil
-                        } label: {
-                            Image(systemName: "chevron.left")
-                                .font(.system(size: 13, weight: .bold))
-                                .foregroundStyle(.primary)
-                                .frame(width: 32, height: 32)
-                                .contentShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .adaptiveGlass(cornerRadius: 32)
-                        .shadow(color: .black.opacity(0.12), radius: 8, x: 0, y: 3)
-                        .onTapGesture {}
-                        .gesture(DragGesture(minimumDistance: 0).onChanged { _ in }.onEnded { _ in })
+                             Button {
+                                 if case .movieDetail = router.selectedRoute {
+                                     router.show(router.activeTab)
+                                 } else {
+                                     router.selectedGenre = nil
+                                 }
+                             } label: {
+                                 Image(systemName: "chevron.left")
+                                     .font(.system(size: 13, weight: .bold))
+                                     .foregroundStyle(.primary)
+                                     .frame(width: 32, height: 32)
+                                     .contentShape(Circle())
+                             }
+                             .buttonStyle(.plain)
+                             .adaptiveGlass(cornerRadius: 32)
+                             .shadow(color: .black.opacity(0.12), radius: 8, x: 0, y: 3)
+                             .onTapGesture {}
+                             .gesture(DragGesture(minimumDistance: 0).onChanged { _ in }.onEnded { _ in })
 
                         Text(genre.name)
                             .font(.system(size: 18, weight: .bold))
