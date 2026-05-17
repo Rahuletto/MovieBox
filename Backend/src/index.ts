@@ -114,6 +114,7 @@ app.all('/api/tmdb/*', async (c) => {
     const upstreamURL = new URL(c.req.url)
     upstreamURL.protocol = 'https:'
     upstreamURL.hostname = 'api.themoviedb.org'
+    upstreamURL.port = ''
     upstreamURL.pathname = `/3${upstreamPath}`
 
     const headers: Record<string, string> = {
@@ -133,13 +134,14 @@ app.all('/api/tmdb/*', async (c) => {
       })
     }
 
-    const response = await fetch(upstreamURL.toString(), {
-      headers,
-      cf: {
+    const fetchOptions: any = { headers }
+    if (c.env.APP_ENV !== 'development') {
+      fetchOptions.cf = {
         cacheEverything: true,
         cacheTtl: cacheTTLForTMDBPath(upstreamPath),
-      },
-    })
+      }
+    }
+    const response = await fetch(upstreamURL.toString(), fetchOptions)
 
     if (!response.ok) {
       const errorBody = await response.text()
@@ -199,9 +201,11 @@ app.get('/api/omdb', async (c) => {
       return c.json(JSON.parse(cached), { headers: { 'X-Cache': 'HIT' } })
     }
 
-    const response = await fetch(url.toString(), {
-      cf: { cacheEverything: true, cacheTtl: 60 * 60 * 24 },
-    })
+    const fetchOptions: any = {}
+    if (c.env.APP_ENV !== 'development') {
+      fetchOptions.cf = { cacheEverything: true, cacheTtl: 60 * 60 * 24 }
+    }
+    const response = await fetch(url.toString(), fetchOptions)
 
     const data = await response.json()
     await c.env.MOVIEBOX_CACHE.put(cacheKey, JSON.stringify(data), { expirationTtl: 60 * 60 * 24 })
