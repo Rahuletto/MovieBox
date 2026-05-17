@@ -5,11 +5,12 @@ import SwiftUI
 ///   1. let the window content extend behind the titlebar (full-size content)
 ///   2. push the standard traffic-light buttons inward instead of letting
 ///      them hug the rounded corner of the window
-///   3. set a softer, rounder window corner radius like Apple media apps
+///   3. trigger the beautiful, premium large native macOS corner radius automatically
+///      by attaching a transparent NSToolbar (concentric frame styling)
 ///
 /// Apply once at the root of the scene:
 ///     RootView()
-///         .background(WindowConfigurator(trafficLightInset: CGPoint(x: 20, y: 16)))
+///         .background(WindowConfigurator(trafficLightInset: CGPoint(x: 24, y: 20)))
 struct WindowConfigurator: NSViewRepresentable {
     let trafficLightInset: CGPoint
 
@@ -53,20 +54,32 @@ struct WindowConfigurator: NSViewRepresentable {
             }
             self.window = window
 
-            // Let our SwiftUI content sit underneath the titlebar so the chrome
-            // looks continuous with the rest of the window.
+            // 1. Core Window Setup
             window.styleMask.insert(.fullSizeContentView)
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
+            window.titlebarSeparatorStyle = .none
 
-            // Softer, rounder window corners — matches Apple's media apps
-            // (Games, TV, Music) that use ~14pt radius instead of the system default ~10pt.
-            window.backgroundColor = .windowBackgroundColor
-            if let contentView = window.contentView?.superview {
+            // 2. Attach a transparent dummy toolbar.
+            // This tricks the macOS Window Server into applying the gorgeous, premium, large round native corner radius
+            // automatically to the window frame (concentric design language), with perfect native border and shadow,
+            // while keeping all standard system buttons completely unclipped!
+            if window.toolbar == nil {
+                let dummyToolbar = NSToolbar(identifier: "MovieBox.WindowChromeToolbar")
+                dummyToolbar.showsBaselineSeparator = false
+                window.toolbar = dummyToolbar
+            }
+
+            // 3. Clear any manual clipping/layer overrides from previous sessions to prevent double-border or clipping issues
+            if let contentView = window.contentView {
                 contentView.wantsLayer = true
-                contentView.layer?.cornerRadius = 14
-                contentView.layer?.cornerCurve = .continuous
-                contentView.layer?.masksToBounds = true
+                contentView.layer?.mask = nil
+                contentView.layer?.cornerRadius = 0
+            }
+            if let themeFrame = window.contentView?.superview {
+                themeFrame.wantsLayer = true
+                themeFrame.layer?.cornerRadius = 0
+                themeFrame.layer?.masksToBounds = false
             }
 
             repositionButtons()
@@ -93,7 +106,7 @@ struct WindowConfigurator: NSViewRepresentable {
         private func repositionButtons() {
             guard let window else { return }
             let order: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
-            let spacing: CGFloat = 6
+            let spacing: CGFloat = 8
             var cursorX = trafficLightInset.x
 
             for type in order {
@@ -104,7 +117,6 @@ struct WindowConfigurator: NSViewRepresentable {
 
                 var frame = button.frame
                 frame.origin.x = cursorX
-                // Center the buttons vertically with a gentle inset from the top
                 frame.origin.y = titlebar.bounds.height - trafficLightInset.y - frame.height
                 button.setFrameOrigin(frame.origin)
                 cursorX += frame.width + spacing
