@@ -7,6 +7,7 @@ import CoreMLEngine
 import DesignSystem
 import SwiftData
 import SwiftUI
+import Combine
 import AVKit
 
 @MainActor
@@ -147,6 +148,24 @@ struct RootView: View {
                     .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .center)))
                     .id("movie-detail-\(id)")
             }
+
+            // Top shadow gradient for traffic lights
+            if case .movieDetail = router.selectedRoute {
+                // No shadow over detail views
+            } else {
+                VStack {
+                    LinearGradient(
+                        colors: [.black.opacity(0.8), .black.opacity(0.4), .clear],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: 120)
+                    .ignoresSafeArea(edges: .top)
+                    .allowsHitTesting(false)
+                    
+                    Spacer()
+                }
+            }
         }
     }
 
@@ -202,9 +221,9 @@ struct HomeView: View {
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 42) {
-                        if let hero = rows[.trending]?.first {
-                            HeroSection(movie: hero) {
-                                router.showDetail(id: hero.id, kind: .movie)
+                        if let trending = rows[.trending], !trending.isEmpty {
+                            HeroCarousel(movies: Array(trending.prefix(5))) { movie in
+                                router.showDetail(id: movie.id, kind: .movie)
                             }
                         }
 
@@ -399,46 +418,210 @@ private struct ContinueWatchingRow: View {
     }
 }
 
-private struct HeroSection: View {
-    let movie: Movie
-    let action: () -> Void
-
+private struct AsyncLogoView: View {
+    let movieId: Int
+    let title: String
+    
+    @State private var logoURL: URL?
+    @State private var loadFailed = false
+    @Query private var settings: [AppSettings]
+    
     var body: some View {
-        Button(action: action) {
-            HStack(alignment: .center, spacing: 24) {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor))
-                    .frame(width: 168, height: 252)
-                    .overlay {
-                        Image(systemName: "film.stack")
-                            .font(.system(size: 44))
-                            .foregroundStyle(.secondary)
+        Group {
+            if let url = logoURL {
+                AsyncImage(url: url) { phase in
+                    if let image = phase.image {
+                        image
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxHeight: 140, alignment: .bottomLeading)
+                            .shadow(color: .black.opacity(0.6), radius: 10, x: 0, y: 5)
+                    } else if phase.error != nil {
+                        fallbackTitle
+                    } else {
+                        ProgressView().frame(height: 140)
                     }
-
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        GlassBadge("Trending")
-                        GlassBadge(String(format: "%.1f TMDB", movie.voteAverage), color: MovieBoxColors.accent)
-                    }
-                    Text(movie.title)
-                        .font(.title)
-                        .foregroundStyle(.primary)
-                    Text(movie.overview)
-                        .font(MovieBoxTypography.body)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(4)
-                        .frame(maxWidth: 720, alignment: .leading)
-                    Label("Open Detail", systemImage: "chevron.right.circle")
-                        .font(.headline)
-                        .foregroundStyle(.tint)
                 }
-                Spacer()
+            } else if loadFailed {
+                fallbackTitle
+            } else {
+                ProgressView().frame(height: 140)
             }
-            .padding(24)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-            .padding(.horizontal, 28)
         }
-        .buttonStyle(.plain)
+        .task(id: movieId) {
+            guard let mode = resolveMetadataMode(from: settings) else { return }
+            do {
+                let client = MetadataClient(mode: mode)
+                if let path = try await client.movieLogoPath(id: movieId) {
+                    logoURL = client.imageURL(path: path, width: 500)
+                } else {
+                    loadFailed = true
+                }
+            } catch {
+                loadFailed = true
+            }
+        }
+    }
+    
+    private var fallbackTitle: some View {
+        Text(title)
+            .font(.system(size: 64, weight: .heavy))
+            .foregroundStyle(.white)
+            .shadow(color: .black.opacity(0.6), radius: 10, x: 0, y: 5)
+            .frame(maxHeight: 140, alignment: .bottomLeading)
+    }
+}
+
+private struct HeroCarousel: View {
+    let movies: [Movie]
+    let action: (Movie) -> Void
+    
+    @State private var currentIndex: Int = 0
+    @State private var progress: CGFloat = 0
+    
+    let timer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
+    
+    var body: some View {
+        guard !movies.isEmpty else { return AnyView(EmptyView()) }
+        let currentMovie = movies[currentIndex]
+        
+        return AnyView(
+            ZStack(alignment: .bottom) {
+                // Background Backdrop
+                ZStack {
+                    if let backdropPath = currentMovie.backdropPath {
+                        AsyncImage(url: MetadataClient().imageURL(path: backdropPath)) { phase in
+                            if let image = phase.image {
+                                image
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fill)
+                                    .transition(.opacity.animation(.easeInOut(duration: 0.5)))
+                            } else {
+                                Color.black
+                            }
+                        }
+                    } else {
+                        Color.black
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 520)
+                .clipped()
+                .id("hero-bg-\(currentIndex)")
+                
+                // Dark Gradient overlays
+                LinearGradient(colors: [.clear, .black.opacity(0.8)], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 520)
+                LinearGradient(colors: [.black.opacity(0.6), .clear], startPoint: .leading, endPoint: .trailing)
+                    .frame(height: 520)
+                
+                // Content
+                HStack {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Spacer()
+                        
+                        // Logo or Native Title fallback
+                        AsyncLogoView(movieId: currentMovie.id, title: currentMovie.title)
+                        
+                        HStack {
+                            GlassBadge("Trending", color: .red)
+                            GlassBadge(String(format: "%.1f TMDB", currentMovie.voteAverage), color: MovieBoxColors.accent)
+                        }
+                        
+                        Text(currentMovie.overview)
+                            .font(MovieBoxTypography.body)
+                            .foregroundStyle(.white.opacity(0.9))
+                            .lineLimit(3)
+                            .frame(maxWidth: 600, alignment: .leading)
+                            .shadow(color: .black.opacity(0.8), radius: 4, x: 0, y: 2)
+                        
+                        Button {
+                            action(currentMovie)
+                        } label: {
+                            Label("Play Now", systemImage: "play.fill")
+                                .font(.headline)
+                                .padding(.horizontal, 20)
+                                .padding(.vertical, 10)
+                                .background(.white, in: Capsule())
+                                .foregroundStyle(.black)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, 8)
+                    }
+                    Spacer()
+                }
+                .padding(40)
+                
+                // Navigation Arrows
+                HStack {
+                    Button {
+                        withAnimation(.easeInOut) {
+                            currentIndex = (currentIndex - 1 + movies.count) % movies.count
+                            progress = 0
+                        }
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 32, weight: .light))
+                            .foregroundStyle(.white)
+                            .padding()
+                    }
+                    .buttonStyle(.plain)
+                    
+                    Spacer()
+                    
+                    Button {
+                        withAnimation(.easeInOut) {
+                            currentIndex = (currentIndex + 1) % movies.count
+                            progress = 0
+                        }
+                    } label: {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 32, weight: .light))
+                            .foregroundStyle(.white)
+                            .padding()
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 20)
+                .frame(maxHeight: .infinity)
+                
+                // Pagination Indicator
+                HStack(spacing: 8) {
+                    ForEach(0..<movies.count, id: \.self) { index in
+                        if index == currentIndex {
+                            ZStack(alignment: .leading) {
+                                Capsule()
+                                    .fill(.white.opacity(0.3))
+                                    .frame(width: 40, height: 4)
+                                
+                                Capsule()
+                                    .fill(.white)
+                                    .frame(width: max(0, 40 * progress), height: 4)
+                            }
+                        } else {
+                            Circle()
+                                .fill(.white.opacity(0.3))
+                                .frame(width: 6, height: 6)
+                        }
+                    }
+                }
+                .padding(.bottom, 24)
+            }
+            .frame(height: 520)
+            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .padding(.horizontal, 28)
+            .padding(.top, 24)
+            .onReceive(timer) { _ in
+                if progress < 1.0 {
+                    progress += 0.05 / 5.0 // 5 seconds per slide
+                } else {
+                    withAnimation(.easeInOut(duration: 0.5)) {
+                        currentIndex = (currentIndex + 1) % movies.count
+                        progress = 0
+                    }
+                }
+            }
+        )
     }
 }
 
@@ -475,6 +658,14 @@ struct MovieDetailView: View {
         ZStack {
             Color(nsColor: .windowBackgroundColor)
                 .ignoresSafeArea()
+            
+            RadialGradient(
+                colors: [Color.blue.opacity(0.12), Color.clear],
+                center: .topLeading,
+                startRadius: 20,
+                endRadius: 500
+            )
+            .ignoresSafeArea()
 
             // Main content back panel
             ScrollView {
@@ -549,6 +740,29 @@ struct MovieDetailView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+
+            // Back button near traffic lights
+            VStack {
+                HStack {
+                    Button {
+                        router.show(router.activeTab)
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(.primary)
+                            .frame(width: 32, height: 32)
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .adaptiveGlass(cornerRadius: 32)
+                    .shadow(color: .black.opacity(0.12), radius: 8, x: 0, y: 3)
+                    
+                    Spacer()
+                }
+                Spacer()
+            }
+            .padding(.top, 16)
+            .padding(.leading, 96)
         }
         .task(id: "\(movieId)-\(router.detailKind.rawValue)-\(settingsKey)") {
             await load()
@@ -1054,7 +1268,7 @@ private struct SubtitleCard: View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Image(systemName: isSelected ? "checkmark.circle.fill" : "caption.bubble")
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "text.bubble")
                         .foregroundStyle(isSelected ? .green : .secondary)
                     Text(subtitle.language.capitalized)
                         .font(.caption)
@@ -1105,7 +1319,6 @@ private struct SimilarMoviesSection: View {
                         ) {
                             router.showDetail(id: movie.id, kind: router.detailKind)
                         }
-                        .frame(width: 130)
                     }
                 }
                 .padding(.horizontal, 4)
@@ -1150,9 +1363,9 @@ struct CatalogView: View {
                         )
                         .frame(maxWidth: .infinity, minHeight: 260)
                     } else {
-                        if let hero = rows[.trending]?.first {
-                            HeroSection(movie: hero) {
-                                router.showDetail(id: hero.id, kind: kind)
+                        if let trending = rows[.trending], !trending.isEmpty {
+                            HeroCarousel(movies: Array(trending.prefix(5))) { movie in
+                                router.showDetail(id: movie.id, kind: kind)
                             }
                         }
 

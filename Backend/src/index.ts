@@ -170,6 +170,7 @@ app.all('/api/tmdb/*', async (c) => {
       },
     })
   } catch (error) {
+    console.error('TMDB Proxy failed:', error)
     return c.json(
       {
         error: 'proxy_failed',

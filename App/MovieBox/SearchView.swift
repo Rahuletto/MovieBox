@@ -16,6 +16,17 @@ struct SearchView: View {
 
     var body: some View {
         ZStack {
+            if let genre = router.selectedGenre {
+                RadialGradient(
+                    colors: genre.colors.map { $0.opacity(0.35) } + [.clear],
+                    center: .topLeading,
+                    startRadius: 20,
+                    endRadius: 700
+                )
+                .ignoresSafeArea()
+                .transition(.opacity)
+            }
+            
             // 1. Categories Grid ScrollView (Permanently mounted to preserve scroll state)
             ScrollView {
                 categoriesGrid
