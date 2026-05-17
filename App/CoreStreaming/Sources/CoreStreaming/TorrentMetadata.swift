@@ -298,6 +298,22 @@ public enum TorrentFileParser {
     }
 }
 
+extension TorrentMetadata {
+    /// Builds a magnet URI suitable for `MagnetURI` and the Downloads import UI.
+    public var magnetURI: String {
+        var components = ["magnet:?xt=urn:btih:\(infoHash)"]
+        if let encodedName = name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+            components.append("dn=\(encodedName)")
+        }
+        for tracker in trackers.prefix(8) {
+            if let encoded = tracker.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+                components.append("tr=\(encoded)")
+            }
+        }
+        return components.joined(separator: "&")
+    }
+}
+
 public enum TorrentParserError: Error, LocalizedError {
     case invalidFormat
     case missingInfo

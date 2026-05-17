@@ -403,7 +403,7 @@ struct CatalogView: View {
                         .frame(maxWidth: .infinity, minHeight: 260)
                     } else {
                         if let trending = rows[.trending], !trending.isEmpty {
-                            HeroCarousel(movies: Array(trending.prefix(5))) { movie in
+                            HeroCarousel(movies: Array(trending.prefix(5)), kind: kind) { movie in
                                 router.showDetail(id: movie.id, kind: kind)
                             }
                             .frame(maxWidth: .infinity)
@@ -498,6 +498,7 @@ struct CatalogView: View {
 // MARK: - Downloads
 
 struct DownloadsView: View {
+    @Environment(AppRouter.self) private var router
     @Query(sort: \DownloadRecord.createdAt, order: .reverse) private var downloads: [DownloadRecord]
     @StateObject private var downloadManager = DownloadManager()
     @Environment(PlayerState.self) private var playerState
@@ -675,10 +676,22 @@ struct DownloadsView: View {
                 }
             }
         }
+        .onAppear {
+            applyPendingMagnetImport()
+        }
+        .onChange(of: router.pendingMagnetImport) { _, _ in
+            applyPendingMagnetImport()
+        }
+    }
+
+    private func applyPendingMagnetImport() {
+        guard let pending = router.consumePendingMagnetImport() else { return }
+        magnetInput = MagnetImportHandler.normalizeUserInput(pending)
+        errorMessage = nil
     }
 
     private func handleMagnetAction(isDownload: Bool) {
-        let cleanLink = magnetInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanLink = MagnetImportHandler.normalizeUserInput(magnetInput)
         
         // Intercept direct HTTP/HTTPS stream URLs for rapid HDR/Dolby Vision testing
         if cleanLink.hasPrefix("http://") || cleanLink.hasPrefix("https://") {

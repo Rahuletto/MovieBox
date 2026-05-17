@@ -42,7 +42,7 @@ struct HomeView: View {
                     ZStack(alignment: .top) {
                         LazyVStack(alignment: .leading, spacing: 42) {
                                  if let trending = rows[.trending], !trending.isEmpty {
-                                      HeroCarousel(movies: Array(trending.prefix(5))) { movie in
+                                      HeroCarousel(movies: Array(trending.prefix(5)), kind: .movie) { movie in
                                           router.showDetail(id: movie.id, kind: .movie)
                                       }
                                       .frame(maxWidth: .infinity)

@@ -87,6 +87,7 @@ public struct TorrentResult: Identifiable, Sendable, Codable, Hashable {
     public let uploadDate: Date
     public let trackerSource: TrackerSource
     public let infoHash: String?
+    public let language: String
 
     public init(
         id: UUID = UUID(),
@@ -103,7 +104,8 @@ public struct TorrentResult: Identifiable, Sendable, Codable, Hashable {
         leechers: Int,
         uploadDate: Date = Date(),
         trackerSource: TrackerSource,
-        infoHash: String? = nil
+        infoHash: String? = nil,
+        language: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -120,6 +122,46 @@ public struct TorrentResult: Identifiable, Sendable, Codable, Hashable {
         self.uploadDate = uploadDate
         self.trackerSource = trackerSource
         self.infoHash = infoHash
+        self.language = language ?? ReleaseParser.parseLanguage(from: title)
+    }
+}
+
+extension TorrentResult {
+    /// Builds a torrent row from a magnet link using filename/metadata parsing.
+    public static func fromMagnetURI(_ magnetURI: String, fallbackTitle: String) -> TorrentResult? {
+        guard magnetURI.lowercased().hasPrefix("magnet:?") else { return nil }
+
+        var infoHash: String?
+        var displayName = fallbackTitle
+
+        let query = String(magnetURI.dropFirst(8))
+        for pair in query.components(separatedBy: "&") {
+            let parts = pair.components(separatedBy: "=")
+            guard parts.count == 2 else { continue }
+            let key = parts[0]
+            let value = parts[1].removingPercentEncoding ?? parts[1]
+            if key == "xt", value.lowercased().hasPrefix("urn:btih:") {
+                infoHash = String(value.dropFirst(9)).lowercased()
+            } else if key == "dn", !value.isEmpty {
+                displayName = value
+            }
+        }
+
+        let title = displayName
+        return TorrentResult(
+            title: title,
+            magnetURI: magnetURI,
+            quality: ReleaseParser.parseQuality(from: title),
+            hdrType: ReleaseParser.parseHDR(from: title),
+            codec: ReleaseParser.parseCodec(from: title),
+            audioFormat: ReleaseParser.parseAudio(from: title),
+            source: ReleaseParser.parseSource(from: title),
+            sizeBytes: 0,
+            seeders: 0,
+            leechers: 0,
+            trackerSource: .torrentio,
+            infoHash: infoHash
+        )
     }
 }
 
@@ -171,6 +213,56 @@ public enum ReleaseParser {
         if t.contains("webrip") || t.contains("web rip") { return .webrip }
         if t.contains("hdcam") || t.contains("camrip") { return .hdcam }
         return .unknown
+    }
+
+    public static func parseLanguage(from title: String) -> String {
+        let t = normalized(title)
+
+        if t.contains("multi") || t.contains("dual audio") || t.contains("dual-audio") {
+            return "Multi"
+        }
+
+        let rules: [(String, String)] = [
+            ("english", "English"), (" eng ", "English"), ("[eng]", "English"),
+            ("french", "French"), ("fre", "French"), ("fra", "French"), ("[fre]", "French"),
+            ("spanish", "Spanish"), ("spa", "Spanish"), ("[spa]", "Spanish"),
+            ("german", "German"), ("ger", "German"), ("deu", "German"), ("[ger]", "German"),
+            ("italian", "Italian"), ("ita", "Italian"), ("[ita]", "Italian"),
+            ("portuguese", "Portuguese"), ("por", "Portuguese"), ("[por]", "Portuguese"),
+            ("russian", "Russian"), ("rus", "Russian"), ("[rus]", "Russian"),
+            ("japanese", "Japanese"), ("jpn", "Japanese"), ("[jpn]", "Japanese"),
+            ("korean", "Korean"), ("kor", "Korean"), ("[kor]", "Korean"),
+            ("hindi", "Hindi"), ("hin", "Hindi"),
+            ("arabic", "Arabic"), ("ara", "Arabic"),
+            ("polish", "Polish"), ("pol", "Polish"),
+            ("dutch", "Dutch"), ("nld", "Dutch"),
+            ("swedish", "Swedish"), ("swe", "Swedish"),
+            ("danish", "Danish"), ("dan", "Danish"),
+            ("norwegian", "Norwegian"), ("nor", "Norwegian"),
+            ("finnish", "Finnish"), ("fin", "Finnish"),
+            ("turkish", "Turkish"), ("tur", "Turkish"),
+            ("greek", "Greek"), ("ell", "Greek"),
+            ("czech", "Czech"), ("ces", "Czech"),
+            ("hungarian", "Hungarian"), ("hun", "Hungarian"),
+            ("romanian", "Romanian"), ("ron", "Romanian"),
+            ("thai", "Thai"), ("tha", "Thai"),
+            ("vietnamese", "Vietnamese"), ("vie", "Vietnamese"),
+            ("chinese", "Chinese"), ("chi", "Chinese"), ("zho", "Chinese"),
+        ]
+
+        for (needle, label) in rules {
+            if t.contains(needle) {
+                return label
+            }
+        }
+
+        if let regex = try? NSRegularExpression(pattern: #"\[([a-z]{2,3})\]"#, options: .caseInsensitive),
+           let match = regex.firstMatch(in: t, range: NSRange(t.startIndex..., in: t)),
+           let codeRange = Range(match.range(at: 1), in: t) {
+            return String(t[codeRange]).uppercased()
+        }
+
+        return "Unknown"
     }
 
     private static func normalized(_ value: String) -> String {

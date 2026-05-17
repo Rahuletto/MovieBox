@@ -30,32 +30,6 @@ public struct PlayerEpisode: Identifiable, Sendable, Equatable {
     }
 }
 
-actor ThumbnailService {
-    private let generator: AVAssetImageGenerator
-
-    init(asset: AVAsset) {
-        let gen = AVAssetImageGenerator(asset: asset)
-        gen.appliesPreferredTrackTransform = true
-        gen.maximumSize = CGSize(width: 320, height: 180)
-        self.generator = gen
-    }
-
-    func generateImage(at time: CMTime) async throws -> CGImage {
-        return try await withCheckedThrowingContinuation { continuation in
-            let timeValue = NSValue(time: time)
-            generator.generateCGImagesAsynchronously(forTimes: [timeValue]) { _, image, _, _, error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                } else if let image = image {
-                    continuation.resume(returning: image)
-                } else {
-                    continuation.resume(throwing: NSError(domain: "ThumbnailError", code: 0, userInfo: nil))
-                }
-            }
-        }
-    }
-}
-
 @MainActor
 @Observable
 public final class PlayerState {
@@ -93,15 +67,26 @@ public final class PlayerState {
     private var pipDelegate: PlayerPiPDelegate?
 
     private var timeObserver: Any?
-    private var periodObserver: Any?
+    private var itemStatusObserver: NSKeyValueObservation?
     private var presentationSizeObserver: NSKeyValueObservation?
+    private var playbackEndObserver: NSObjectProtocol?
     private var thumbnailService: ThumbnailService?
     private var subtitleStream: SubtitleStream?
     private var subtitleLoadTask: Task<Void, Never>?
+    private var subtitleUpdateTask: Task<Void, Never>?
     private var cancellables: [AnyCancellable] = []
-    
-    private var hasResizedForCurrentVideo: Bool = false
+    private var observedPlayerItem: AVPlayerItem?
+
+    private var lastPositionReportTime: Date = .distantPast
+    private var lastReportedPosition: Double = -1
+    private var lastSubtitleSyncTime: Double = -1
+
     private var previousWindowFrame: NSRect? = nil
+
+    private static let positionReportInterval: TimeInterval = 5
+    private static let positionReportMinimumDelta: Double = 8
+    private static let timeObserverInterval: TimeInterval = 0.25
+    private static let subtitleSyncInterval: TimeInterval = 0.2
 
     public init(player: AVPlayer = AVPlayer(), title: String = "", movieId: Int = 0, isPresented: Bool = false) {
         self.player = player
@@ -130,13 +115,7 @@ public final class PlayerState {
         episodes: [PlayerEpisode] = [],
         currentEpisodeIndex: Int? = nil
     ) {
-        print("[DEBUG] PlayerState.load() called")
-        print("[DEBUG] - Title: \(title)")
-        print("[DEBUG] - URL: \(url.absoluteString)")
-        print("[DEBUG] - Movie ID: \(movieId)")
-        print("[DEBUG] - Subtitle URL: \(subtitleURL?.absoluteString ?? "None")")
-        print("[DEBUG] - HDR Type: \(hdrType?.rawValue ?? "None")")
-        print("[DEBUG] - Episode Title: \(episodeTitle ?? "None")")
+        stopPlaybackResources()
 
         self.title = title
         self.movieId = movieId
@@ -159,22 +138,37 @@ public final class PlayerState {
             self.episodeTitle = parsed.episodeName
         }
         
+        lastPositionReportTime = .distantPast
+        lastReportedPosition = -1
+        lastSubtitleSyncTime = -1
+
         let asset = AVURLAsset(url: url)
-        self.thumbnailService = ThumbnailService(asset: asset)
-        
+        if let existing = thumbnailService {
+            Task { await existing.clearCache() }
+        }
+        thumbnailService = ThumbnailService(asset: asset)
+
         let playerItem = AVPlayerItem(asset: asset)
-        self.player = AVPlayer(playerItem: playerItem)
+        if player.currentItem == nil {
+            player = AVPlayer(playerItem: playerItem)
+        } else {
+            player.replaceCurrentItem(with: playerItem)
+        }
+        player.volume = volume
+        player.isMuted = isMuted
+
         isPresented = true
         showsControls = true
-        hasResizedForCurrentVideo = false
         setupObservers()
 
         if let subtitleURL {
             loadSubtitleStream(from: subtitleURL)
+        } else {
+            cancelSubtitleWork()
         }
-        
-        print("[DEBUG] Calling player.play()")
+
         player.play()
+        player.rate = Float(playbackRate)
         isPlaying = true
     }
 
@@ -235,17 +229,21 @@ public final class PlayerState {
     public func loadSubtitleStream(from url: URL) {
         subtitleURL = url
         subtitleLoadTask?.cancel()
-        subtitleLoadTask = Task {
+        subtitleUpdateTask?.cancel()
+        subtitleStream = nil
+        subtitleLoadTask = Task { @MainActor in
             do {
                 let (data, _) = try await URLSession.shared.data(from: url)
+                guard !Task.isCancelled else { return }
                 let stream = SubtitleStream()
                 await stream.load(from: data)
-                await MainActor.run {
-                    self.subtitleStream = stream
-                    self.activeSubtitleTrack = 0
-                    updateSubtitle(at: self.currentTime)
-                }
+                guard !Task.isCancelled else { return }
+                subtitleStream = stream
+                activeSubtitleTrack = 0
+                lastSubtitleSyncTime = -1
+                updateSubtitle(at: currentTime, force: true)
             } catch {
+                guard !Task.isCancelled else { return }
                 NSLog("Failed to load subtitle stream: \(error)")
             }
         }
@@ -265,21 +263,28 @@ public final class PlayerState {
         }
     }
 
-    public func updateSubtitle(at time: TimeInterval) {
+    public func updateSubtitle(at time: TimeInterval, force: Bool = false) {
         guard activeSubtitleTrack >= 0, let stream = subtitleStream else {
-            currentSubtitleText = ""
+            if !currentSubtitleText.isEmpty {
+                currentSubtitleText = ""
+            }
             return
         }
 
-        Task {
+        if !force, abs(time - lastSubtitleSyncTime) < Self.subtitleSyncInterval {
+            return
+        }
+        lastSubtitleSyncTime = time
+
+        subtitleUpdateTask?.cancel()
+        subtitleUpdateTask = Task { @MainActor in
+            guard !Task.isCancelled else { return }
             if let cue = await stream.cue(at: time) {
-                await MainActor.run {
-                    self.currentSubtitleText = cue.text
+                if !Task.isCancelled {
+                    currentSubtitleText = cue.text
                 }
-            } else {
-                await MainActor.run {
-                    self.currentSubtitleText = ""
-                }
+            } else if !Task.isCancelled {
+                currentSubtitleText = ""
             }
         }
     }
@@ -314,27 +319,65 @@ public final class PlayerState {
             window.setFrame(prevFrame, display: true, animate: true)
             previousWindowFrame = nil
         }
-        hasResizedForCurrentVideo = false
 
-        removeObservers()
-        player.pause()
-        player.replaceCurrentItem(with: nil)
+        stopPlaybackResources()
         isPresented = false
         isPlaying = false
         currentTime = 0
         duration = 0
         errorMessage = nil
+        episodes = []
+        currentEpisodeIndex = nil
+        isEpisodesSidebarOpen = false
+        seriesName = ""
+        episodeTitle = nil
+        hdrType = nil
+        if let existing = thumbnailService {
+            Task { await existing.clearCache() }
+        }
+        thumbnailService = nil
+    }
+
+    private func stopPlaybackResources() {
+        removeObservers()
+        teardownPiP()
+        cancelSubtitleWork()
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        observedPlayerItem = nil
+    }
+
+    private func cancelSubtitleWork() {
+        subtitleLoadTask?.cancel()
+        subtitleLoadTask = nil
+        subtitleUpdateTask?.cancel()
+        subtitleUpdateTask = nil
+        subtitleStream = nil
+        subtitleURL = nil
+        activeSubtitleTrack = -1
+        currentSubtitleText = ""
+        lastSubtitleSyncTime = -1
+    }
+
+    private func teardownPiP() {
+        if pipController?.isPictureInPictureActive == true {
+            pipController?.stopPictureInPicture()
+        }
+        pipController = nil
+        pipDelegate = nil
+        isPictureInPictureActive = false
+        isPictureInPicturePossible = false
     }
 
     public func setupPiP(with playerLayer: AVPlayerLayer) {
         guard AVPictureInPictureController.isPictureInPictureSupported() else { return }
-        print("[DEBUG] Setting up AVPictureInPictureController")
+        guard pipController == nil else { return }
         let delegate = PlayerPiPDelegate(state: self)
-        self.pipDelegate = delegate
+        pipDelegate = delegate
         let controller = AVPictureInPictureController(playerLayer: playerLayer)
         controller?.delegate = delegate
-        self.pipController = controller
-        self.isPictureInPicturePossible = controller?.isPictureInPicturePossible ?? false
+        pipController = controller
+        isPictureInPicturePossible = controller?.isPictureInPicturePossible ?? false
     }
 
     public func togglePictureInPicture() {
@@ -358,18 +401,16 @@ public final class PlayerState {
 
     public func play() {
         player.play()
+        player.rate = Float(playbackRate)
         isPlaying = true
     }
 
-    public func generateThumbnail(for time: Double) async -> NSImage? {
-        guard let service = thumbnailService else { return nil }
-        do {
-            let cmTime = CMTime(seconds: time, preferredTimescale: 600)
-            let cgImage = try await service.generateImage(at: cmTime)
-            return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-        } catch {
-            return nil
-        }
+    public func thumbnailImage(for seconds: Double, requestID: UInt64) async -> (UInt64, NSImage?) {
+        guard let service = thumbnailService else { return (requestID, nil) }
+        let result = await service.thumbnail(at: seconds, requestID: requestID)
+        guard let cgImage = result.image else { return (result.requestID, nil) }
+        let size = NSSize(width: cgImage.width, height: cgImage.height)
+        return (result.requestID, NSImage(cgImage: cgImage, size: size))
     }
 
     public func pause() {
@@ -381,7 +422,8 @@ public final class PlayerState {
         let clamped = max(0, min(time, duration))
         player.seek(to: CMTime(seconds: clamped, preferredTimescale: 600))
         currentTime = clamped
-        updateSubtitle(at: clamped)
+        lastSubtitleSyncTime = -1
+        updateSubtitle(at: clamped, force: true)
     }
 
     public func seek(by seconds: Double) {
@@ -412,96 +454,70 @@ public final class PlayerState {
     }
 
     private func setupObservers() {
-        print("[DEBUG] setupObservers() started")
         removeObservers()
 
         timeObserver = player.addPeriodicTimeObserver(
-            forInterval: CMTime(seconds: 0.5, preferredTimescale: 600),
+            forInterval: CMTime(seconds: Self.timeObserverInterval, preferredTimescale: 600),
             queue: .main
         ) { [weak self] time in
+            guard let self else { return }
+            let seconds = time.seconds
+            currentTime = seconds
+            updateSubtitle(at: seconds)
+
+            guard movieId != 0, duration > 0 else { return }
+            let now = Date()
+            let positionDelta = abs(seconds - lastReportedPosition)
+            let elapsed = now.timeIntervalSince(lastPositionReportTime)
+            guard elapsed >= Self.positionReportInterval || positionDelta >= Self.positionReportMinimumDelta else {
+                return
+            }
+            lastPositionReportTime = now
+            lastReportedPosition = seconds
+            onPositionUpdate?(movieId, seconds, duration)
+        }
+
+        guard let currentItem = player.currentItem else { return }
+        observedPlayerItem = currentItem
+
+        let itemDuration = currentItem.asset.duration.seconds
+        if itemDuration.isFinite, itemDuration > 0 {
+            duration = itemDuration
+        }
+
+        itemStatusObserver = currentItem.observe(\.status, options: [.new]) { [weak self] item, _ in
             Task { @MainActor in
-                self?.currentTime = time.seconds
-                self?.updateSubtitle(at: time.seconds)
-                if let movieId = self?.movieId, self?.movieId != 0,
-                   let duration = self?.duration, duration > 0 {
-                    self?.onPositionUpdate?(movieId, time.seconds, duration)
+                guard let self, item === self.observedPlayerItem else { return }
+                if item.status == .failed {
+                    self.errorMessage = item.error?.localizedDescription ?? "Playback failed. Please try a different source or format."
+                } else if item.status == .readyToPlay {
+                    let readyDuration = item.asset.duration.seconds
+                    if readyDuration.isFinite, readyDuration > 0 {
+                        self.duration = readyDuration
+                    }
+                    self.errorMessage = nil
                 }
             }
         }
 
-        if let currentItem = player.currentItem {
-            duration = currentItem.asset.duration.seconds
-            print("[DEBUG] Observing player item: \(currentItem)")
-            periodObserver = currentItem.observe(\.status, options: [.new]) { [weak self] item, _ in
-                Task { @MainActor in
-                    print("[DEBUG] PlayerItem status changed to: \(item.status.rawValue)")
-                    if item.status == .failed {
-                        print("[ERROR] PlayerItem failed! Error: \(String(describing: item.error?.localizedDescription))")
-                        print("[ERROR] Underlying error details: \(String(describing: item.error))")
-                        self?.errorMessage = item.error?.localizedDescription ?? "Playback failed. Please try a different source or format."
-                    } else if item.status == .readyToPlay {
-                        print("[DEBUG] PlayerItem ready to play! Duration: \(item.asset.duration.seconds)s")
-                        self?.duration = item.asset.duration.seconds
-                        self?.errorMessage = nil
-                    }
-                }
+        playbackEndObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: currentItem,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.playNextEpisode()
             }
-            
-            presentationSizeObserver = currentItem.observe(\.presentationSize, options: [.new]) { [weak self] item, _ in
-                Task { @MainActor in
-                    let size = item.presentationSize
-                    if size.width > 0 && size.height > 0 {
-                        self?.resizeWindowToMatch(aspectRatio: size)
-                    }
-                }
-            }
-        } else {
-            print("[WARNING] No currentItem found on player in setupObservers()")
         }
 
         player.publisher(for: \.timeControlStatus)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] status in
                 Task { @MainActor in
-                    print("[DEBUG] TimeControlStatus changed to: \(status.rawValue)")
                     self?.isPlaying = (status == .playing)
                 }
             }
             .store(in: &cancellables)
-
-        NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] notification in
-                Task { @MainActor in
-                    print("[DEBUG] PlayerItem completed playback! Moving to next episode...")
-                    self?.playNextEpisode()
-                }
-            }
-            .store(in: &cancellables)
-    }
-
-    private func resizeWindowToMatch(aspectRatio: CGSize) {
-        guard !hasResizedForCurrentVideo else { return }
-        guard let window = NSApplication.shared.keyWindow, !window.styleMask.contains(.fullScreen) else { return }
-        
-        hasResizedForCurrentVideo = true
-        
-        let currentFrame = window.frame
-        if previousWindowFrame == nil {
-            previousWindowFrame = currentFrame
-        }
-        
-        let ratio = aspectRatio.width / aspectRatio.height
-        
-        let newHeight = currentFrame.width / ratio
-        
-        if abs(currentFrame.height - newHeight) > 10 {
-            var newFrame = currentFrame
-            newFrame.size.height = newHeight
-            newFrame.origin.y = currentFrame.origin.y + (currentFrame.height - newHeight) / 2
-            
-            window.setFrame(newFrame, display: true, animate: true)
-        }
     }
 
     private func removeObservers() {
@@ -509,8 +525,14 @@ public final class PlayerState {
             player.removeTimeObserver(observer)
             timeObserver = nil
         }
-        periodObserver = nil
+        itemStatusObserver?.invalidate()
+        itemStatusObserver = nil
+        presentationSizeObserver?.invalidate()
         presentationSizeObserver = nil
+        if let playbackEndObserver {
+            NotificationCenter.default.removeObserver(playbackEndObserver)
+            self.playbackEndObserver = nil
+        }
         cancellables.removeAll()
     }
 }
@@ -537,6 +559,9 @@ public struct AVPlayerLayerView: NSViewRepresentable {
     public func updateNSView(_ nsView: PlayerContainerView, context: Context) {
         nsView.playerLayer.player = player
         nsView.playerLayer.videoGravity = state.videoGravity
+        if state.isPresented {
+            state.setupPiP(with: nsView.playerLayer)
+        }
     }
 }
 
@@ -573,11 +598,6 @@ public struct PlayerView: View {
     @State private var isHoveringHUD: Bool = false
     @State private var skipBackTrigger: Int = 0
     @State private var skipForwardTrigger: Int = 0
-    
-    @State private var hoverTime: Double? = nil
-    @State private var hoverX: CGFloat = 0
-    @State private var hoverImage: NSImage? = nil
-    @State private var hoverImageTask: Task<Void, Never>? = nil
 
     public init(state: PlayerState) {
         self.state = state
@@ -622,7 +642,7 @@ public struct PlayerView: View {
             // Beautiful, floating glassmorphic IINA top bar
             topHUD
                 .opacity(state.showsControls ? 1 : 0)
-                .animation(.easeOut(duration: 0.12), value: state.showsControls)
+                .animation(.easeOut(duration: 0.06), value: state.showsControls)
 
             // Center play/pause & seek overlay
             centerControls
@@ -630,7 +650,7 @@ public struct PlayerView: View {
             // Stunning, floating glassmorphic IINA control pod
             bottomHUD
                 .opacity(state.showsControls ? 1 : 0)
-                .animation(.easeOut(duration: 0.12), value: state.showsControls)
+                .animation(.easeOut(duration: 0.06), value: state.showsControls)
 
             // Frosted glass error overlay
             if let errorMsg = state.errorMessage {
@@ -701,8 +721,6 @@ public struct PlayerView: View {
                 .zIndex(8)
             }
         }
-        .focusable()
-        .focusEffectDisabled()
         .onKeyPress(.space) {
             state.togglePlayback()
             resetControlFade()
@@ -747,6 +765,21 @@ public struct PlayerView: View {
             resetControlFade()
             return .handled
         }
+        .onKeyPress("p") {
+            state.togglePictureInPicture()
+            resetControlFade()
+            return .handled
+        }
+        .onKeyPress("a") {
+            state.cycleVideoGravity()
+            resetControlFade()
+            return .handled
+        }
+        .onKeyPress("c") {
+            state.toggleSubtitle()
+            resetControlFade()
+            return .handled
+        }
         .overlay {
             MouseTrackingView(onMove: resetControlFade)
         }
@@ -787,7 +820,7 @@ public struct PlayerView: View {
                             .font(.system(size: 11, weight: .bold))
                             .foregroundStyle(.white.opacity(0.85))
                             .frame(width: 30, height: 30)
-                            .adaptiveGlass(cornerRadius: 15, strength: .thick)
+                            .nativeGlassEffect()
                     }
                     .buttonStyle(.plain)
 
@@ -815,12 +848,12 @@ public struct PlayerView: View {
                     }
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
-                    .adaptiveGlass(cornerRadius: 16, strength: .thick)
+                    .nativeGlassEffect()
                 }
 
                 Spacer()
 
-                // Top-Right Group: Volume Capsule
+                // Top-Right Group: Volume + Episodes
                 HStack(spacing: 12) {
                     CustomSlider(value: Binding(
                         get: { Double(state.volume) },
@@ -838,10 +871,27 @@ public struct PlayerView: View {
                             .contentTransition(.symbolEffect(.replace))
                     }
                     .buttonStyle(.plain)
+                    
+                    // Episodes Button (TV only)
+                    if !state.episodes.isEmpty {
+                        Divider()
+                            .frame(height: 20)
+                        
+                        Button {
+                            state.isEpisodesSidebarOpen.toggle()
+                        } label: {
+                            Image(systemName: "list.bullet")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(.white.opacity(state.isEpisodesSidebarOpen ? 1.0 : 0.85))
+                                .contentTransition(.symbolEffect(.replace))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Episodes")
+                    }
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
-                .adaptiveGlass(cornerRadius: 18, strength: .thick)
+                .nativeGlassEffect()
             }
             .padding(.top, 24)
             .padding(.horizontal, 24)
@@ -864,7 +914,7 @@ public struct PlayerView: View {
                     .foregroundStyle(.white)
                     .symbolEffect(.rotate, value: skipBackTrigger)
                     .frame(width: 52, height: 52)
-                    .adaptiveGlass(cornerRadius: 26, strength: .thick)
+                    .nativeGlassEffect()
             }
             .buttonStyle(CenterHUDButtonStyle())
 
@@ -878,10 +928,10 @@ public struct PlayerView: View {
                     .foregroundStyle(.white)
                     .contentTransition(.symbolEffect(.replace))
                     .frame(width: 72, height: 72)
-                    .adaptiveGlass(cornerRadius: 36, strength: .thick)
+                    .nativeGlassEffect()
             }
             .buttonStyle(CenterHUDButtonStyle())
-            .animation(.spring(response: 0.05, dampingFraction: 0.95), value: state.isPlaying)
+            .animation(.spring(response: 0.02, dampingFraction: 0.85), value: state.isPlaying)
 
             // Seek Forward Button
             Button {
@@ -894,7 +944,7 @@ public struct PlayerView: View {
                     .foregroundStyle(.white)
                     .symbolEffect(.rotate, value: skipForwardTrigger)
                     .frame(width: 52, height: 52)
-                    .adaptiveGlass(cornerRadius: 26, strength: .thick)
+                    .nativeGlassEffect()
             }
             .buttonStyle(CenterHUDButtonStyle())
         }
@@ -904,11 +954,18 @@ public struct PlayerView: View {
     }
 
     private var bottomHUD: some View {
-        VStack {
-            Spacer()
+        HStack(spacing: 0) {
+            // Episodes Sidebar (slides in from left)
+            if state.isEpisodesSidebarOpen && !state.episodes.isEmpty {
+                episodesSidebar
+                    .transition(.move(edge: .leading))
+            }
+            
+            VStack {
+                Spacer()
 
-            // TV Series & Episode Metadata overlay (left-aligned)
-            HStack {
+                // TV Series & Episode Metadata overlay (left-aligned)
+                HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     if let epTitle = state.episodeTitle, !epTitle.isEmpty {
                         Text(epTitle)
@@ -934,61 +991,17 @@ public struct PlayerView: View {
                         .monospacedDigit()
                         .foregroundStyle(.white.opacity(0.85))
 
-                    CustomSlider(
+                    ScrubberSlider(
                         value: Binding(
                             get: { state.currentTime },
                             set: { state.seek(to: $0) }
                         ),
                         range: 0...max(state.duration, 0.01),
-                        onHoverTime: { time, x in
-                            if let time = time, let x = x {
-                                hoverTime = time
-                                hoverX = x
-                                
-                                hoverImageTask?.cancel()
-                                hoverImageTask = Task {
-                                    if let img = await state.generateThumbnail(for: time) {
-                                        if !Task.isCancelled {
-                                            hoverImage = img
-                                        }
-                                    }
-                                }
-                            } else {
-                                hoverTime = nil
-                                hoverImageTask?.cancel()
-                                hoverImageTask = nil
-                            }
+                        formatTime: formatTime,
+                        thumbnailProvider: { time, requestID in
+                            await state.thumbnailImage(for: time, requestID: requestID)
                         }
                     )
-                    .overlay(alignment: .bottomLeading) {
-                        if let hTime = hoverTime {
-                            VStack(spacing: 8) {
-                                if let img = hoverImage {
-                                    Image(nsImage: img)
-                                        .resizable()
-                                        .aspectRatio(contentMode: .fit)
-                                        .frame(width: 160)
-                                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                                        .shadow(color: .black.opacity(0.5), radius: 10, y: 5)
-                                } else {
-                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                        .fill(.black.opacity(0.5))
-                                        .frame(width: 160, height: 90)
-                                        .overlay(ProgressView().controlSize(.small))
-                                }
-                                
-                                Text(formatTime(hTime))
-                                    .font(.system(size: 11, weight: .bold))
-                                    .monospacedDigit()
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(.black.opacity(0.6), in: Capsule())
-                            }
-                            .offset(x: hoverX - 80, y: -24)
-                            .allowsHitTesting(false)
-                        }
-                    }
 
                     Text(formatRemainingTime())
                         .font(.system(size: 11, weight: .semibold))
@@ -997,7 +1010,7 @@ public struct PlayerView: View {
                 }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 12)
-                .adaptiveGlass(cornerRadius: 18, strength: .thick)
+                .nativeGlassEffect()
                 .frame(maxWidth: .infinity)
 
                 // Subtitle, Audio & Video Aspect Selectors Capsule
@@ -1046,15 +1059,70 @@ public struct PlayerView: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
-                .adaptiveGlass(cornerRadius: 16, strength: .thick)
+                .nativeGlassEffect()
             }
             .padding(.horizontal, 24)
             .padding(.bottom, 24)
             .onHover { hovering in
                 isHoveringHUD = hovering
             }
+            }
+            .frame(maxWidth: .infinity)
         }
         .frame(maxWidth: .infinity)
+    }
+    
+    private var episodesSidebar: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Episodes")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 16)
+                .padding(.top, 16)
+            
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(state.episodes.enumerated()), id: \.element.id) { index, episode in
+                        Button {
+                            state.playEpisode(at: index)
+                            state.isEpisodesSidebarOpen = false
+                        } label: {
+                            HStack(spacing: 12) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("S\(episode.seasonNumber)E\(episode.episodeNumber)")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(.white.opacity(0.7))
+                                    
+                                    Text(episode.title)
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundStyle(.white)
+                                        .lineLimit(2)
+                                }
+                                
+                                Spacer()
+                                
+                                if index == state.currentEpisodeIndex {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundStyle(.green)
+                                }
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
+                            .background(index == state.currentEpisodeIndex ? Color.white.opacity(0.1) : Color.clear)
+                            .cornerRadius(8)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 8)
+            }
+            .frame(maxHeight: .infinity)
+            
+            Spacer()
+        }
+        .frame(width: 260)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .padding(12)
     }
 
     private func formatRemainingTime() -> String {
@@ -1344,6 +1412,25 @@ struct CustomSlider: View {
             )
         }
         .frame(height: 12)
+    }
+}
+
+// Native glass effect modifier
+struct NativeGlassEffectModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.glassEffect()
+        } else {
+            content
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.12), lineWidth: 1))
+        }
+    }
+}
+
+extension View {
+    func nativeGlassEffect() -> some View {
+        modifier(NativeGlassEffectModifier())
     }
 }
 

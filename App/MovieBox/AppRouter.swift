@@ -26,6 +26,20 @@ final class AppRouter {
     var detailKind: MediaKind = .movie
     var searchQuery = ""
     var selectedGenre: GenreCard? = nil
+    /// Magnet URI or raw info-hash pasted/opened from outside the app; consumed by Downloads.
+    var pendingMagnetImport: String?
+
+    func importMagnet(_ value: String) {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        pendingMagnetImport = trimmed
+        show(.downloads)
+    }
+
+    func consumePendingMagnetImport() -> String? {
+        defer { pendingMagnetImport = nil }
+        return pendingMagnetImport
+    }
 
     func show(_ route: Route) {
         withAnimation(.spring(response: 0.38, dampingFraction: 0.74)) {

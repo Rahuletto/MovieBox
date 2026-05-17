@@ -7,7 +7,14 @@ struct HeroCarousel: View {
     @Environment(\.colorScheme) private var colorScheme
 
     let movies: [Movie]
+    let kind: MediaKind
     let action: (Movie) -> Void
+
+    init(movies: [Movie], kind: MediaKind = .movie, action: @escaping (Movie) -> Void) {
+        self.movies = movies
+        self.kind = kind
+        self.action = action
+    }
     
     @State private var currentIndex: Int = 0
     @State private var progress: CGFloat = 0
@@ -67,7 +74,7 @@ struct HeroCarousel: View {
                         Spacer()
                         
                         // Logo or Native Title fallback
-                        AsyncLogoView(movieId: currentMovie.id, title: currentMovie.title, kind: .movie)
+                        AsyncLogoView(movieId: currentMovie.id, title: currentMovie.title, kind: kind)
                         
                         HStack {
                             GlassBadge("Trending")
