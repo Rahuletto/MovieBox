@@ -53,6 +53,18 @@ struct GenreResultsView: View {
                 }
             }
         }
+        .padding(24)
+        .background {
+            ZStack {
+                LinearGradient(colors: genre.colors, startPoint: .topLeading, endPoint: .bottomTrailing)
+                    .opacity(0.08)
+
+                Rectangle()
+                    .fill(.ultraThinMaterial)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .shadow(color: .black.opacity(0.12), radius: 15, x: 0, y: 6)
+        }
         .task(id: genre.id) { await load() }
     }
 

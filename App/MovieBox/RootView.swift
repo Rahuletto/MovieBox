@@ -21,6 +21,8 @@ struct RootView: View {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .ignoresSafeArea(edges: .top)
+                .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .center)))
+                .animation(.spring(response: 0.38, dampingFraction: 0.74), value: router.selectedRoute)
 
             VStack(spacing: 0) {
                 PillTabBar()
@@ -37,6 +39,7 @@ struct RootView: View {
                     .zIndex(10)
             }
         }
+        .ignoresSafeArea(edges: .top)
         .background(
             WindowConfigurator(trafficLightInset: CGPoint(x: 24, y: 20))
                 .frame(width: 0, height: 0)
@@ -47,25 +50,66 @@ struct RootView: View {
                 updateWatchHistory(tmdbId: movieId, position: position, fraction: fraction)
             }
         }
+        .task {
+            let descriptor = FetchDescriptor<AppSettings>()
+            if let existing = try? modelContext.fetch(descriptor) {
+                if existing.isEmpty {
+                    let defaultSettings = AppSettings(
+                        proxyBaseURL: "http://localhost:8787",
+                        appToken: "165663371760d04a573abb26622164c12c508819da49dc01cc13c833d03ee9aa",
+                        omdbAPIKey: "d6407590"
+                    )
+                    modelContext.insert(defaultSettings)
+                    try? modelContext.save()
+                } else if let first = existing.first, first.proxyBaseURL != "http://localhost:8787" {
+                    first.proxyBaseURL = "http://localhost:8787"
+                    first.appToken = "165663371760d04a573abb26622164c12c508819da49dc01cc13c833d03ee9aa"
+                    first.omdbAPIKey = "d6407590"
+                    try? modelContext.save()
+                }
+            }
+        }
     }
 
     @ViewBuilder
     private var content: some View {
-        switch router.selectedRoute {
-        case .home:
+        ZStack {
+            // 1. Home View
             HomeView()
-        case .movies:
+                .opacity(router.activeTab == .home ? 1 : 0)
+                .allowsHitTesting(router.activeTab == .home)
+
+            // 2. Movies Catalog
             CatalogView(kind: .movie)
-        case .tvShows:
+                .opacity(router.activeTab == .movies ? 1 : 0)
+                .allowsHitTesting(router.activeTab == .movies)
+
+            // 3. TV Shows Catalog
             CatalogView(kind: .tv)
-        case .library:
+                .opacity(router.activeTab == .tvShows ? 1 : 0)
+                .allowsHitTesting(router.activeTab == .tvShows)
+
+            // 4. Library View
             LibraryView()
-        case .downloads:
+                .opacity(router.activeTab == .library ? 1 : 0)
+                .allowsHitTesting(router.activeTab == .library)
+
+            // 5. Downloads View
             DownloadsView()
-        case .search:
+                .opacity(router.activeTab == .downloads ? 1 : 0)
+                .allowsHitTesting(router.activeTab == .downloads)
+
+            // 6. Search View
             SearchView()
-        case .movieDetail(let id):
-            MovieDetailView(movieId: id, orchestrator: streamingOrchestrator)
+                .opacity(router.activeTab == .search ? 1 : 0)
+                .allowsHitTesting(router.activeTab == .search)
+
+            // 7. Movie Detail View (Transient Overlay)
+            if case .movieDetail(let id) = router.selectedRoute {
+                MovieDetailView(movieId: id, orchestrator: streamingOrchestrator)
+                    .transition(.opacity.combined(with: .scale(scale: 0.985, anchor: .center)))
+                    .id("movie-detail-\(id)")
+            }
         }
     }
 
@@ -100,42 +144,44 @@ struct HomeView: View {
     @State private var isLoading = false
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 42) {
+        Group {
+            if let errorMessage {
                 if let mode = metadataMode {
-                    if let hero = rows[.trending]?.first {
-                        HeroSection(movie: hero) {
-                            router.showDetail(id: hero.id, kind: .movie)
+                    RetryCard(message: errorMessage) {
+                        Task { await load(mode: mode) }
+                    }
+                } else {
+                    RetryCard(message: errorMessage) {
+                        if let mode = metadataMode {
+                            Task { await load(mode: mode) }
                         }
                     }
-
-                    if !continueWatching.isEmpty {
-                        ContinueWatchingRow(records: continueWatching) { movie in
-                            router.showDetail(id: movie.tmdbId, kind: .movie)
-                        }
-                    }
-
-                    if !recommended.isEmpty {
-                        HorizontalMovieRow(title: "Recommended For You", items: recommended) { movie in
-                            MoviePosterCard(
-                                title: movie.title,
-                                subtitle: movie.releaseDate,
-                                posterURL: MetadataClient().imageURL(path: movie.posterPath)
-                            ) {
-                                router.showDetail(id: movie.id, kind: .movie)
+                }
+            } else if metadataMode == nil {
+                ContentUnavailableView(
+                    "Metadata Not Configured",
+                    systemImage: "key",
+                    description: Text("Open Settings and add either a backend URL with app token or a TMDB bearer token.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.top, topBarReservedHeight)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 42) {
+                        if let hero = rows[.trending]?.first {
+                            HeroSection(movie: hero) {
+                                router.showDetail(id: hero.id, kind: .movie)
                             }
                         }
-                    }
 
-                    if isLoading && rows.isEmpty {
-                        ProgressView("Loading movies...")
-                            .controlSize(.large)
-                            .frame(maxWidth: .infinity, minHeight: 260)
-                    }
+                        if !continueWatching.isEmpty {
+                            ContinueWatchingRow(records: continueWatching) { movie in
+                                router.showDetail(id: movie.tmdbId, kind: .movie)
+                            }
+                        }
 
-                    ForEach(MetadataCategory.allCases) { category in
-                        if let movies = rows[category], !movies.isEmpty {
-                            HorizontalMovieRow(title: category.rawValue, items: movies) { movie in
+                        if !recommended.isEmpty {
+                            HorizontalMovieRow(title: "Recommended For You", items: recommended) { movie in
                                 MoviePosterCard(
                                     title: movie.title,
                                     subtitle: movie.releaseDate,
@@ -145,25 +191,33 @@ struct HomeView: View {
                                 }
                             }
                         }
-                    }
 
-                    if let errorMessage {
-                        RetryCard(message: errorMessage) {
-                            Task { await load(mode: mode) }
+                        if isLoading && rows.isEmpty {
+                            ProgressView("Loading movies...")
+                                .controlSize(.large)
+                                .frame(maxWidth: .infinity, minHeight: 260)
+                        }
+
+                        ForEach(MetadataCategory.allCases) { category in
+                            if let movies = rows[category], !movies.isEmpty {
+                                HorizontalMovieRow(title: category.rawValue, items: movies) { movie in
+                                    MoviePosterCard(
+                                        title: movie.title,
+                                        subtitle: movie.releaseDate,
+                                        posterURL: MetadataClient().imageURL(path: movie.posterPath)
+                                    ) {
+                                        router.showDetail(id: movie.id, kind: .movie)
+                                    }
+                                }
+                            }
                         }
                     }
-                } else {
-                    ContentUnavailableView(
-                        "Metadata Not Configured",
-                        systemImage: "key",
-                        description: Text("Open Settings and add either a backend URL with app token or a TMDB bearer token.")
-                    )
-                    .frame(maxWidth: .infinity, minHeight: 420)
+                    .padding(.top, topBarReservedHeight)
+                    .padding(.bottom, 28)
                 }
             }
-            .padding(.top, topBarReservedHeight)
-            .padding(.bottom, 28)
         }
+        .ignoresSafeArea(edges: .top)
         .task(id: settingsKey) {
             guard let mode = metadataMode else { return }
             await load(mode: mode)
@@ -968,52 +1022,57 @@ struct CatalogView: View {
     private var title: String { kind == .movie ? "Movies" : "TV Shows" }
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 36) {
-                Text(title)
-                    .font(MovieBoxTypography.display)
-                    .padding(.horizontal, 28)
-                    .padding(.top, 4)
+        Group {
+            if let errorMessage {
+                RetryCard(message: errorMessage) {
+                    Task { await load() }
+                }
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 36) {
+                        Text(title)
+                            .font(MovieBoxTypography.display)
+                            .padding(.horizontal, 28)
+                            .padding(.top, 4)
 
-                if isLoading && rows.isEmpty {
-                    ProgressView()
-                        .controlSize(.large)
-                        .frame(maxWidth: .infinity, minHeight: 260)
-                } else if let errorMessage {
-                    RetryCard(message: errorMessage) {
-                        Task { await load() }
-                    }
-                } else if rows.values.allSatisfy(\.isEmpty) {
-                    ContentUnavailableView(
-                        "Nothing here yet",
-                        systemImage: kind == .movie ? "film" : "tv",
-                        description: Text("Configure metadata access in Settings.")
-                    )
-                    .frame(maxWidth: .infinity, minHeight: 260)
-                } else {
-                    if let hero = rows[.trending]?.first {
-                        HeroSection(movie: hero) {
-                            router.showDetail(id: hero.id, kind: kind)
-                        }
-                    }
+                        if isLoading && rows.isEmpty {
+                            ProgressView()
+                                .controlSize(.large)
+                                .frame(maxWidth: .infinity, minHeight: 260)
+                        } else if rows.values.allSatisfy(\.isEmpty) {
+                            ContentUnavailableView(
+                                "Nothing here yet",
+                                systemImage: kind == .movie ? "film" : "tv",
+                                description: Text("Configure metadata access in Settings.")
+                            )
+                            .frame(maxWidth: .infinity, minHeight: 260)
+                        } else {
+                            if let hero = rows[.trending]?.first {
+                                HeroSection(movie: hero) {
+                                    router.showDetail(id: hero.id, kind: kind)
+                                }
+                            }
 
-                    ForEach(MetadataCategory.allCases) { category in
-                        if let items = rows[category], !items.isEmpty {
-                            HorizontalMovieRow(title: category.displayTitle(for: kind), items: items) { movie in
-                                MoviePosterCard(
-                                    title: movie.title,
-                                    subtitle: movie.releaseDate,
-                                    posterURL: MetadataClient().imageURL(path: movie.posterPath)
-                                ) {
-                                    router.showDetail(id: movie.id, kind: kind)
+                            ForEach(MetadataCategory.allCases) { category in
+                                if let items = rows[category], !items.isEmpty {
+                                    HorizontalMovieRow(title: category.displayTitle(for: kind), items: items) { movie in
+                                        MoviePosterCard(
+                                            title: movie.title,
+                                            subtitle: movie.releaseDate,
+                                            posterURL: MetadataClient().imageURL(path: movie.posterPath)
+                                        ) {
+                                            router.showDetail(id: movie.id, kind: kind)
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
+                    .padding(.top, topBarReservedHeight)
+                    .padding(.bottom, 28)
                 }
+                .ignoresSafeArea(edges: .top)
             }
-            .padding(.top, topBarReservedHeight)
-            .padding(.bottom, 28)
         }
         .task(id: "\(settings.first?.cacheKey ?? "missing")|\(kind.rawValue)") {
             await load()
@@ -1076,6 +1135,7 @@ struct DownloadsView: View {
             }
         }
         .padding(.top, topBarReservedHeight)
+        .ignoresSafeArea(edges: .top)
         .navigationTitle("Downloads")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -1246,6 +1306,7 @@ struct LibraryView: View {
     var body: some View {
         MyListView()
             .padding(.top, topBarReservedHeight)
+            .ignoresSafeArea(edges: .top)
     }
 }
 
@@ -1322,20 +1383,32 @@ struct MyListView: View {
 
 // MARK: - Shared Components
 
-private struct RetryCard: View {
+struct RetryCard: View {
     let message: String
     let retry: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(spacing: 16) {
             Text(message)
+                .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(.secondary)
-            Button("Retry", action: retry)
+                .multilineTextAlignment(.center)
+
+            Button(action: retry) {
+                Text("Retry")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 10)
+                    .background(Color.red)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+            .buttonStyle(.plain)
         }
-        .padding(18)
-        .adaptiveGlass(cornerRadius: 18)
+        .padding(24)
+        .adaptiveGlass(cornerRadius: 24)
         .padding(.horizontal, 28)
-        .frame(maxWidth: .infinity, alignment: .center)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
     }
 }
 

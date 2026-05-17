@@ -1,5 +1,6 @@
 import CoreMetadata
 import Foundation
+import SwiftUI
 
 @MainActor
 @Observable
@@ -14,17 +15,32 @@ final class AppRouter {
         case movieDetail(Int)
     }
 
-    var selectedRoute: Route = .home
+    var selectedRoute: Route = .home {
+        didSet {
+            if selectedRoute.isTopLevelTab {
+                activeTab = selectedRoute
+            }
+        }
+    }
+    var activeTab: Route = .home
     var detailKind: MediaKind = .movie
     var searchQuery = ""
+    var selectedGenre: GenreCard? = nil
 
     func show(_ route: Route) {
-        selectedRoute = route
+        withAnimation(.spring(response: 0.38, dampingFraction: 0.74)) {
+            if route != .search {
+                selectedGenre = nil
+            }
+            selectedRoute = route
+        }
     }
 
     func showDetail(id: Int, kind: MediaKind = .movie) {
-        detailKind = kind
-        selectedRoute = .movieDetail(id)
+        withAnimation(.spring(response: 0.38, dampingFraction: 0.74)) {
+            detailKind = kind
+            selectedRoute = .movieDetail(id)
+        }
     }
 }
 
@@ -43,7 +59,7 @@ extension AppRouter.Route {
 
     var isTopLevelTab: Bool {
         switch self {
-        case .home, .movies, .tvShows, .library: true
+        case .home, .movies, .tvShows, .library, .downloads, .search: true
         default: false
         }
     }
