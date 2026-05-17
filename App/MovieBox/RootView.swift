@@ -74,6 +74,9 @@ struct RootView: View {
                     .transition(.opacity)
                     .zIndex(10)
             }
+
+            AppSettingsPlaybackSync()
+                .allowsHitTesting(false)
         }
         .ignoresSafeArea(edges: .top)
         .background(

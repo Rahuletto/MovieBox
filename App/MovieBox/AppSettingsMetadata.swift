@@ -27,6 +27,13 @@ extension AppSettings {
         SubtitleAppearance.from(settingsValue: subtitleStyle)
     }
 
+    func applyLivePlaybackSettings(to playerState: PlayerState) {
+        playerState.applyPlaybackSettings(
+            subtitleStyle: subtitleStyle,
+            subtitlesEnabled: subtitlesEnabled
+        )
+    }
+
     var enabledTorrentIndexerSet: Set<String> {
         let parsed = TorrentIndexerPreferences.parseCSV(enabledTorrentIndexers)
         if !enabledTorrentIndexers.isEmpty { return parsed }

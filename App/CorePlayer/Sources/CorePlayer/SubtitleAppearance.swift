@@ -41,32 +41,39 @@ public struct SubtitleOverlayView: View {
             Spacer()
             if isVisible, !text.isEmpty {
                 styledText(text)
-                    .id(cueID)
+                    .id(subtitleIdentity)
                     .padding(.horizontal, 48)
                     .padding(.bottom, 110)
                     .transition(.opacity.combined(with: .scale(scale: 0.94)))
                     .animation(.easeOut(duration: 0.2), value: cueID)
+                    .animation(.easeOut(duration: 0.2), value: appearance)
             }
         }
         .animation(.easeOut(duration: 0.15), value: isVisible)
+    }
+
+    private var subtitleIdentity: String {
+        "\(cueID?.uuidString ?? "none")-\(appearance.rawValue)"
     }
 
     @ViewBuilder
     private func styledText(_ text: String) -> some View {
         switch appearance {
         case .cinematic:
-            Text(text)
-                .font(.system(size: 20, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white)
-                .multilineTextAlignment(.center)
-                .lineSpacing(4)
-                .padding(.horizontal, 18)
-                .padding(.vertical, 10)
-                .background {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color.black.opacity(0.5))
-                }
-                .shadow(color: .black.opacity(0.35), radius: 8, y: 2)
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.black.opacity(0.55))
+                Text(text)
+                    .font(.system(size: 20, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(4)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 10)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .compositingGroup()
+            .shadow(color: .black.opacity(0.45), radius: 10, y: 3)
 
         case .largeWhite:
             Text(text)

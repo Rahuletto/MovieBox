@@ -186,6 +186,10 @@ public final class PlayerState {
         player.volume = volume
         player.isMuted = isMuted
 
+        if subtitleURL != nil {
+            disableEmbeddedCaptions(on: playerItem, asset: asset)
+        }
+
         isPresented = true
         showsControls = true
         setupObservers()
@@ -252,6 +256,40 @@ public final class PlayerState {
         case .resizeAspectFill: return "Fill"
         case .resize: return "100%"
         default: return "Fit"
+        }
+    }
+
+    /// Applies live Settings changes while playback is active.
+    public func applyPlaybackSettings(subtitleStyle: String, subtitlesEnabled: Bool) {
+        subtitleAppearance = SubtitleAppearance.from(settingsValue: subtitleStyle)
+
+        if !subtitlesEnabled {
+            if activeSubtitleTrack >= 0 {
+                activeSubtitleTrack = -1
+                currentSubtitleText = ""
+                currentSubtitleCueID = nil
+            }
+            return
+        }
+
+        guard subtitleURL != nil else { return }
+
+        if subtitleStream != nil {
+            if activeSubtitleTrack < 0 {
+                activeSubtitleTrack = 0
+            }
+            updateSubtitle(at: currentTime, force: true)
+        } else if let url = subtitleURL {
+            loadSubtitleStream(from: url)
+        }
+    }
+
+    private func disableEmbeddedCaptions(on playerItem: AVPlayerItem, asset: AVURLAsset) {
+        Task {
+            guard let group = try? await asset.loadMediaSelectionGroup(for: .legible) else { return }
+            await MainActor.run {
+                playerItem.select(nil, in: group)
+            }
         }
     }
 
