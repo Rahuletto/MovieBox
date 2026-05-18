@@ -329,15 +329,49 @@ struct MovieDetailView: View {
     }
 
     private func filterTorrents(_ results: [TorrentResult], season: Int, episode: Int) -> [TorrentResult] {
-        let patterns = [
+        let episodePatterns = [
             String(format: "S%02dE%02d", season, episode),
             String(format: "S%dE%d", season, episode),
             String(format: "%dx%02d", season, episode),
             String(format: "%dX%02d", season, episode)
         ]
+
+        let seasonPatterns = [
+            String(format: "S%02d", season),
+            String(format: "S%d", season),
+            String(format: "Season %02d", season),
+            String(format: "Season %d", season)
+        ]
+
         let filtered = results.filter { torrent in
             let title = torrent.title.uppercased()
-            return patterns.contains { title.contains($0.uppercased()) }
+
+            // 1. Direct episode match
+            if episodePatterns.contains(where: { title.contains($0.uppercased()) }) {
+                return true
+            }
+
+            // 2. Season pack match
+            // To prevent matching other episode files (e.g. S01E05 when we want S01E03),
+            // a season pack must match the season pattern but must NOT contain 'E' followed by a number.
+            let hasSeason = seasonPatterns.contains(where: { title.contains($0.uppercased()) })
+            if hasSeason {
+                let isEpisodeTorrent: Bool = {
+                    if let regex = try? NSRegularExpression(pattern: #"E(P|ISODE)?\s*\d+"#, options: .caseInsensitive) {
+                        let range = NSRange(title.startIndex..., in: title)
+                        return regex.firstMatch(in: title, options: [], range: range) != nil
+                    }
+                    return false
+                }()
+
+                let isPack = title.contains("COMPLETE") || title.contains("PACK") || title.contains("SEASON") || title.contains("S\(String(format: "%02d", season)) ") || title.contains("S\(season) ") || !isEpisodeTorrent
+
+                if isPack && !isEpisodeTorrent {
+                    return true
+                }
+            }
+
+            return false
         }
         return filtered.isEmpty ? results : filtered
     }

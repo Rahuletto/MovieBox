@@ -16,6 +16,9 @@ function torrentFileURLs(hash: string): string[] {
   return [
     `https://itorrents.org/torrent/${upper}.torrent`,
     `https://itorrents.org/torrent/${hash}.torrent`,
+    // High-speed secure proxy fallback to bypass ISP/school SNI domain blocks
+    `https://api.codetabs.com/v1/proxy/?quest=https://itorrents.org/torrent/${upper}.torrent`,
+    `https://api.codetabs.com/v1/proxy/?quest=https://itorrents.org/torrent/${hash}.torrent`,
     `http://itorrents.org/torrent/${hash}`,
     `http://itorrents.org/torrent/${upper}.torrent`,
   ]

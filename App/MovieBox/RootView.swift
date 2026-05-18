@@ -106,7 +106,7 @@ struct RootView: View {
                 if existing.isEmpty {
                     LogStore.shared.log("RootView: Inserting default AppSettings.")
                     let defaultSettings = AppSettings(
-                        proxyBaseURL: "http://127.0.0.1:8787",
+                        proxyBaseURL: "https://moviebox-backend.rahulmarban.workers.dev",
                         appToken: "165663371760d04a573abb26622164c12c508819da49dc01cc13c833d03ee9aa",
                         tmdbBearerToken: "",
                         omdbAPIKey: "d6407590",
@@ -116,9 +116,9 @@ struct RootView: View {
                     try? modelContext.save()
                 } else if let first = existing.first {
                     LogStore.shared.log("RootView: Loaded AppSettings. Proxy base URL is \(first.proxyBaseURL), downloads folder is \(first.defaultDownloadPath)")
-                    if first.proxyBaseURL.isEmpty || first.proxyBaseURL == "http://localhost:8787" {
-                        LogStore.shared.log("RootView: Migrating legacy localhost proxy base URL to 127.0.0.1")
-                        first.proxyBaseURL = "http://127.0.0.1:8787"
+                    if first.proxyBaseURL.isEmpty || first.proxyBaseURL == "http://localhost:8787" || first.proxyBaseURL == "http://127.0.0.1:8787" {
+                        LogStore.shared.log("RootView: Migrating legacy localhost proxy base URL to production workers URL")
+                        first.proxyBaseURL = "https://moviebox-backend.rahulmarban.workers.dev"
                         first.appToken = "165663371760d04a573abb26622164c12c508819da49dc01cc13c833d03ee9aa"
                         first.omdbAPIKey = "d6407590"
                         try? modelContext.save()

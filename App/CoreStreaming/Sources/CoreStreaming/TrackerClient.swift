@@ -28,9 +28,9 @@ public actor TrackerClient {
             throw TrackerError.invalidURL
         }
 
-        components.queryItems = [
+        components.percentEncodedQueryItems = [
             URLQueryItem(name: "info_hash", value: hexToPercentEncoded(infoHash)),
-            URLQueryItem(name: "peer_id", value: peerId),
+            URLQueryItem(name: "peer_id", value: peerId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? peerId),
             URLQueryItem(name: "port", value: String(port)),
             URLQueryItem(name: "uploaded", value: String(uploaded)),
             URLQueryItem(name: "downloaded", value: String(downloaded)),

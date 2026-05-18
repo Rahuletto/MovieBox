@@ -49,45 +49,66 @@ public enum UTMetadataFetcher {
         trackers: [String],
         peerId: String
     ) async -> [PeerInfo] {
-        var peers: [PeerInfo] = []
-        var seen = Set<String>()
-        let udp = UDPTrackerClient()
-        let http = TrackerClient()
+        print("[discoverPeers] InfoHash: \(infoHash), starting parallel discovery on \(trackers.count) trackers")
 
-        for tracker in trackers {
-            if tracker.hasPrefix("udp://") {
-                if let response = try? await udp.announce(
-                    trackerURL: tracker,
-                    infoHash: infoHash,
-                    peerId: peerId,
-                    port: 6881,
-                    left: 1,
-                    event: .started,
-                    numWant: 80
-                ) {
-                    for peer in response.peers {
-                        let key = "\(peer.ip):\(peer.port)"
-                        if seen.insert(key).inserted { peers.append(peer) }
+        return await withTaskGroup(of: [PeerInfo].self) { group in
+            let udp = UDPTrackerClient()
+            let http = TrackerClient()
+
+            for tracker in trackers {
+                group.addTask {
+                    if tracker.hasPrefix("udp://") {
+                        do {
+                            let response = try await udp.announce(
+                                trackerURL: tracker,
+                                infoHash: infoHash,
+                                peerId: peerId,
+                                port: 6881,
+                                left: 1,
+                                event: .started,
+                                numWant: 80
+                            )
+                            print("[discoverPeers] UDP tracker \(tracker) returned \(response.peers.count) peers")
+                            return response.peers
+                        } catch {
+                            print("[discoverPeers] UDP tracker \(tracker) failed: \(error)")
+                            return []
+                        }
+                    } else if tracker.hasPrefix("http") {
+                        do {
+                            let response = try await http.announce(
+                                trackerURL: tracker,
+                                infoHash: infoHash,
+                                peerId: peerId,
+                                port: 6881,
+                                left: 1,
+                                event: .started,
+                                numWant: 80
+                            )
+                            print("[discoverPeers] HTTP tracker \(tracker) returned \(response.peers.count) peers")
+                            return response.peers
+                        } catch {
+                            print("[discoverPeers] HTTP tracker \(tracker) failed: \(error)")
+                            return []
+                        }
                     }
+                    return []
                 }
-            } else if tracker.hasPrefix("http") {
-                if let response = try? await http.announce(
-                    trackerURL: tracker,
-                    infoHash: infoHash,
-                    peerId: peerId,
-                    port: 6881,
-                    left: 1,
-                    event: .started,
-                    numWant: 80
-                ) {
-                    for peer in response.peers {
-                        let key = "\(peer.ip):\(peer.port)"
-                        if seen.insert(key).inserted { peers.append(peer) }
+            }
+
+            var allPeers: [PeerInfo] = []
+            var seen = Set<String>()
+            for await peers in group {
+                for peer in peers {
+                    let key = "\(peer.ip):\(peer.port)"
+                    if seen.insert(key).inserted {
+                        allPeers.append(peer)
                     }
                 }
             }
+            print("[discoverPeers] Parallel discovery completed. Total unique peers found: \(allPeers.count)")
+            return allPeers
         }
-        return peers
     }
 
     private static func fetchFromPeer(
@@ -128,21 +149,34 @@ private final class MetadataPeerSession: @unchecked Sendable {
             throw TorrentMetadataFetcher.FetchError.torrentFileUnavailable
         }
 
-        let connection = NWConnection(host: NWEndpoint.Host(peer.ip), port: port, using: .tcp)
+        let parameters = NWParameters.tcp
+        let tcpOptions = NWProtocolTCP.Options()
+        tcpOptions.connectionTimeout = 5
+        parameters.defaultProtocolStack.transportProtocol = tcpOptions
+
+        let connection = NWConnection(host: NWEndpoint.Host(peer.ip), port: port, using: parameters)
         self.connection = connection
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let gate = ConnectionContinuationGate(continuation: continuation, connection: connection)
             connection.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
-                    continuation.resume()
+                    gate.finish()
                 case .failed(let error):
-                    continuation.resume(throwing: error)
+                    gate.finish(throwing: error)
+                case .waiting(_):
+                    gate.finish(throwing: TorrentMetadataFetcher.FetchError.torrentFileUnavailable)
                 default:
                     break
                 }
             }
             connection.start(queue: .global(qos: .userInitiated))
+
+            // Set an explicit connection safety timeout of 5 seconds
+            DispatchQueue.global().asyncAfter(deadline: .now() + 5.0) {
+                gate.finish(throwing: TorrentMetadataFetcher.FetchError.torrentFileUnavailable)
+            }
         }
 
         try await sendHandshake()
@@ -281,9 +315,18 @@ private final class MetadataPeerSession: @unchecked Sendable {
     private func appendReceive() async throws {
         guard let connection else { return }
         let chunk: Data? = try await withCheckedThrowingContinuation { continuation in
+            let gate = ReceiveContinuationGate(continuation: continuation)
             connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, _, error in
-                if let error { continuation.resume(throwing: error); return }
-                continuation.resume(returning: data)
+                if let error {
+                    gate.finish(throwing: error)
+                } else {
+                    gate.finish(returning: data)
+                }
+            }
+
+            // Prevent hanging indefinitely if peer does not send data
+            DispatchQueue.global().asyncAfter(deadline: .now() + 10.0) {
+                gate.finish(throwing: TorrentMetadataFetcher.FetchError.torrentFileUnavailable)
             }
         }
         if let chunk { buffer.append(chunk) }
@@ -335,5 +378,73 @@ private final class MetadataPeerSession: @unchecked Sendable {
 private extension Data {
     var sha1Hex: String {
         Insecure.SHA1.hash(data: self).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+private final class ConnectionContinuationGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var connection: NWConnection?
+
+    init(continuation: CheckedContinuation<Void, Error>, connection: NWConnection) {
+        self.continuation = continuation
+        self.connection = connection
+    }
+
+    func finish() {
+        lock.lock()
+        guard let continuation = self.continuation else {
+            lock.unlock()
+            return
+        }
+        self.continuation = nil
+        self.connection = nil
+        lock.unlock()
+        continuation.resume()
+    }
+
+    func finish(throwing error: Error) {
+        lock.lock()
+        guard let continuation = self.continuation else {
+            lock.unlock()
+            return
+        }
+        self.continuation = nil
+        let conn = self.connection
+        self.connection = nil
+        lock.unlock()
+        conn?.cancel()
+        continuation.resume(throwing: error)
+    }
+}
+
+private final class ReceiveContinuationGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Data?, Error>?
+
+    init(continuation: CheckedContinuation<Data?, Error>) {
+        self.continuation = continuation
+    }
+
+    func finish(returning value: Data?) {
+        lock.lock()
+        guard let continuation = self.continuation else {
+            lock.unlock()
+            return
+        }
+        self.continuation = nil
+        lock.unlock()
+        continuation.resume(returning: value)
+    }
+
+    func finish(throwing error: Error) {
+        lock.lock()
+        guard let continuation = self.continuation else {
+            lock.unlock()
+            return
+        }
+        self.continuation = nil
+        lock.unlock()
+        continuation.resume(throwing: error)
     }
 }

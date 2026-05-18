@@ -100,3 +100,22 @@ final class ReleaseParserIntegrationTests: XCTestCase {
         XCTAssertEqual(ReleaseParser.parseCodec(from: "Movie.2024.2160p.AV1.WEB-DL"), .av1)
     }
 }
+
+final class StreamingEndToEndTests: XCTestCase {
+    func testMetadataFetchAndP2P() async throws {
+        let bbbHash = "0e876ce2a1a504f849ca72a5e2bc07347b3bc957"
+        
+        print("--- STARTING METADATA FETCH TEST FOR BIG BUCK BUNNY ---")
+        do {
+            let metadata = try await TorrentMetadataFetcher.fetch(infoHash: bbbHash, magnetTrackers: [])
+            print("Successfully resolved metadata:")
+            print("Name: \(metadata.name)")
+            print("Piece Count: \(metadata.pieceCount)")
+            print("Total Size: \(metadata.totalSize)")
+            XCTAssertFalse(metadata.name.isEmpty)
+        } catch {
+            print("Failed to fetch metadata: \(error)")
+            XCTFail("Metadata fetch failed: \(error)")
+        }
+    }
+}

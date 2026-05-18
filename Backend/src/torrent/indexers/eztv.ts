@@ -11,9 +11,10 @@ export const eztvIndexer: TorrentIndexer = {
 
   async search(ctx) {
     const imdb = normalizeImdb(ctx.imdbId)
+    const cleanImdb = imdb ? imdb.replace(/^tt/, '') : null
     for (const host of ['eztv.wf', 'eztvx.to', 'eztv.re']) {
       const params = new URLSearchParams({ limit: '100' })
-      if (imdb) params.set('imdb_id', imdb)
+      if (cleanImdb) params.set('imdb_id', cleanImdb)
       else params.set('search_term', ctx.query)
 
       const url = `https://${host}/api/get-torrents?${params}`

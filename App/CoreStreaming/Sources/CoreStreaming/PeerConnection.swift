@@ -179,28 +179,50 @@ public final class PeerConnection: ObservableObject {
 
         let host = NWEndpoint.Host(peerInfo.ip)
 
-        let connection = NWConnection(host: host, port: port, using: .tcp)
+        let parameters = NWParameters.tcp
+        let tcpOptions = NWProtocolTCP.Options()
+        tcpOptions.connectionTimeout = 5
+        parameters.defaultProtocolStack.transportProtocol = tcpOptions
+
+        let connection = NWConnection(host: host, port: port, using: parameters)
         self.connection = connection
 
-        connection.stateUpdateHandler = { [weak self] state in
-            Task { @MainActor in
-                self?.handleConnectionState(state)
-            }
-        }
-
-        connection.start(queue: .main)
-
         await withCheckedContinuation { continuation in
+            let gate = PeerConnectionGate(continuation: continuation, connection: connection)
             connection.stateUpdateHandler = { [weak self] nwState in
                 Task { @MainActor in
-                    self?.handleConnectionState(nwState)
-                    if case .ready = nwState {
-                        continuation.resume()
+                    guard let self else {
+                        gate.finishWithCancellation()
+                        return
                     }
-                    if case .failed(let error) = nwState {
-                        self?.state = .error(error.localizedDescription)
-                        continuation.resume()
+                    self.handleConnectionState(nwState)
+                    switch nwState {
+                    case .ready:
+                        gate.finish()
+                    case .failed(let error):
+                        self.state = .error(error.localizedDescription)
+                        gate.finish()
+                    case .waiting(_):
+                        self.state = .error("Connection waiting (peer unreachable)")
+                        gate.finishWithCancellation()
+                    case .cancelled:
+                        self.state = .disconnected
+                        gate.finish()
+                    default:
+                        break
                     }
+                }
+            }
+
+            connection.start(queue: .main)
+
+            // Explicit safety timeout
+            DispatchQueue.global().asyncAfter(deadline: .now() + 5.0) {
+                Task { @MainActor in
+                    if self.state == .connecting {
+                        self.state = .error("Connection timeout")
+                    }
+                    gate.finishWithCancellation()
                 }
             }
         }
@@ -445,5 +467,42 @@ public final class PeerConnection: ObservableObject {
 private extension Data {
     var hexString: String {
         map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+private final class PeerConnectionGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var connection: NWConnection?
+
+    init(continuation: CheckedContinuation<Void, Never>, connection: NWConnection) {
+        self.continuation = continuation
+        self.connection = connection
+    }
+
+    func finish() {
+        lock.lock()
+        guard let continuation = self.continuation else {
+            lock.unlock()
+            return
+        }
+        self.continuation = nil
+        self.connection = nil
+        lock.unlock()
+        continuation.resume()
+    }
+
+    func finishWithCancellation() {
+        lock.lock()
+        guard let continuation = self.continuation else {
+            lock.unlock()
+            return
+        }
+        self.continuation = nil
+        let conn = self.connection
+        self.connection = nil
+        lock.unlock()
+        conn?.cancel()
+        continuation.resume()
     }
 }

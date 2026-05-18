@@ -11,8 +11,7 @@ export const pirateBayIndexer: TorrentIndexer = {
   },
 
   async search(ctx) {
-    const cat = ctx.kind === 'tv' ? '205' : '207'
-    const url = `https://apibay.org/q.php?q=${encodeURIComponent(ctx.query)}&cat=${cat}`
+    const url = `https://apibay.org/q.php?q=${encodeURIComponent(ctx.query)}&cat=200`
     const rows = await fetchJSON<Array<Record<string, string>>>(url)
     if (!rows?.length) return []
 

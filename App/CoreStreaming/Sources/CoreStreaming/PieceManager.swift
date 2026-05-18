@@ -20,9 +20,10 @@ public actor PieceManager {
         self.pieceLength = pieceLength
         self.totalSize = totalSize
 
+        let cleanHash = Data(piecesHash)
         var index = 0
-        while index + 20 <= piecesHash.count {
-            let hash = piecesHash[index..<index + 20]
+        while index + 20 <= cleanHash.count {
+            let hash = cleanHash[index..<index + 20]
             pieceHashes.append(hash)
             index += 20
         }

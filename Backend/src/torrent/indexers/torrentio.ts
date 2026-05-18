@@ -24,7 +24,7 @@ export const torrentioIndexer: TorrentIndexer = {
       const e = ctx.episode ?? 1
       id = `${cleanId}:${s}:${e}`
     }
-    const url = `https://torrentio.strem.fun/stream/${mediaPath}/${id}.json`
+    const url = `https://torrentio.strem.fun/providers=yts,eztv,rarbg,1337x,kickass,thepiratebay,torrentproject,limetorrents,zooqle,tgx/stream/${mediaPath}/${id}.json`
     const data = await fetchJSON<{ streams?: Array<{ title: string; infoHash: string }> }>(url)
     const streams = data?.streams ?? []
 

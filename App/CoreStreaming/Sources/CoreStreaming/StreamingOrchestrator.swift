@@ -158,6 +158,8 @@ public final class TorrentEngine {
             await announceToTrackers()
         }
 
+        startAnnounceTimer()
+
         statsTimer = Task {
             while !Task.isCancelled && isRunning {
                 await updateStats()
@@ -180,57 +182,84 @@ public final class TorrentEngine {
     }
 
     private func announceToTrackers() async {
-        var peersFound: [PeerInfo] = []
+        let trackerList = metadata.trackers
+        NSLog("Announcing to \(trackerList.count) trackers in parallel...")
 
-        for tracker in metadata.trackers {
-            if tracker.hasPrefix("udp://") {
-                do {
-                    let response = try await udpTrackerClient.announce(
-                        trackerURL: tracker,
-                        infoHash: metadata.infoHash,
-                        peerId: peerId,
-                        port: 6881,
-                        downloaded: bytesDownloaded,
-                        left: metadata.totalSize - bytesDownloaded,
-                        event: .started
-                    )
-                    peersFound.append(contentsOf: response.peers)
-                    NSLog("UDP tracker announce succeeded: \(tracker)")
-                } catch {
-                    NSLog("UDP tracker failed: \(tracker) - \(error)")
+        let peersFound = await withTaskGroup(of: [PeerInfo].self) { group in
+            for tracker in trackerList {
+                group.addTask { [self] in
+                    if tracker.hasPrefix("udp://") {
+                        do {
+                            let response = try await udpTrackerClient.announce(
+                                trackerURL: tracker,
+                                infoHash: metadata.infoHash,
+                                peerId: peerId,
+                                port: 6881,
+                                downloaded: bytesDownloaded,
+                                left: metadata.totalSize - bytesDownloaded,
+                                event: .started
+                            )
+                            NSLog("UDP tracker announce succeeded: \(tracker)")
+                            return response.peers
+                        } catch {
+                            NSLog("UDP tracker failed: \(tracker) - \(error)")
+                            return []
+                        }
+                    } else {
+                        do {
+                            let response = try await trackerClient.announce(
+                                trackerURL: tracker,
+                                infoHash: metadata.infoHash,
+                                peerId: peerId,
+                                port: 6881,
+                                downloaded: bytesDownloaded,
+                                left: metadata.totalSize - bytesDownloaded,
+                                event: .started
+                            )
+                            NSLog("HTTP tracker announce succeeded: \(tracker)")
+                            return response.peers
+                        } catch {
+                            NSLog("HTTP tracker failed: \(tracker) - \(error)")
+                            return []
+                        }
+                    }
                 }
-            } else {
-                do {
-                    let response = try await trackerClient.announce(
-                        trackerURL: tracker,
-                        infoHash: metadata.infoHash,
-                        peerId: peerId,
-                        port: 6881,
-                        downloaded: bytesDownloaded,
-                        left: metadata.totalSize - bytesDownloaded,
-                        event: .started
-                    )
-                    peersFound.append(contentsOf: response.peers)
-                    NSLog("HTTP tracker announce succeeded: \(tracker)")
-                } catch {
-                    NSLog("HTTP tracker failed: \(tracker) - \(error)")
+            }
+
+            var mergedPeers: [PeerInfo] = []
+            var seen = Set<String>()
+            for await peers in group {
+                for peer in peers {
+                    let key = "\(peer.ip):\(peer.port)"
+                    if seen.insert(key).inserted {
+                        mergedPeers.append(peer)
+                    }
+                }
+            }
+            return mergedPeers
+        }
+
+        var finalPeers = peersFound
+        if finalPeers.isEmpty {
+            NSLog("No peers from trackers, falling back to DHT")
+            await startDHT()
+            let dhtPeers = await dht?.findPeers(infoHash: metadata.infoHash) ?? []
+            for peer in dhtPeers {
+                let key = "\(peer.ip):\(peer.port)"
+                if !finalPeers.contains(where: { "\($0.ip):\($0.port)" == key }) {
+                    finalPeers.append(peer)
                 }
             }
         }
 
-        if peersFound.isEmpty {
-            NSLog("No peers from trackers, falling back to DHT")
-            await startDHT()
-            let dhtPeers = await dht?.findPeers(infoHash: metadata.infoHash) ?? []
-            peersFound.append(contentsOf: dhtPeers)
-        }
-
-        if !peersFound.isEmpty {
-            await connectToPeers(peersFound)
+        if !finalPeers.isEmpty {
+            await connectToPeers(finalPeers)
         } else {
-            NSLog("No peers found from any source")
+            NSLog("No peers found from trackers or DHT.")
         }
+    }
 
+    private func startAnnounceTimer() {
         announceTimer = Task {
             while !Task.isCancelled && isRunning {
                 try? await Task.sleep(for: .seconds(60))
