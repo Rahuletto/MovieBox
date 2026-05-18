@@ -212,6 +212,17 @@ public final class AppSettings {
     }
 }
 
+@Model
+public final class SearchHistoryRecord {
+    @Attribute(.unique) public var query: String
+    public var searchedAt: Date
+
+    public init(query: String, searchedAt: Date = Date()) {
+        self.query = query
+        self.searchedAt = searchedAt
+    }
+}
+
 public enum DownloadState: String, Sendable, Codable, CaseIterable {
     case queued
     case downloading
@@ -225,7 +236,8 @@ public enum MovieBoxSchema {
         MovieRecord.self,
         RatingRecord.self,
         DownloadRecord.self,
-        AppSettings.self
+        AppSettings.self,
+        SearchHistoryRecord.self
     ]
 }
 

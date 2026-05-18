@@ -157,16 +157,17 @@ public final class PeerConnection: ObservableObject {
     private var isChoked = true
     private var peerBitfield: Data = Data()
     private var pieceManager: PieceManager?
-    private var onPieceReceived: ((UInt32, UInt32, Data) -> Void)?
+    private var onPieceReceived: ((UInt32, UInt32, Data) async -> Void)?
     private var bytesDownloaded: Int64 = 0
     private var downloadStartTime: Date?
+    private var outstandingRequests: Set<BlockRequest> = []
 
     public init(peerInfo: PeerInfo, connectionPeerId: String) {
         self.peerInfo = peerInfo
         self.peerId = connectionPeerId
     }
 
-    public func connect(infoHash: String, pieceManager: PieceManager, onPieceReceived: @escaping (UInt32, UInt32, Data) -> Void) async {
+    public func connect(infoHash: String, pieceManager: PieceManager, onPieceReceived: @escaping (UInt32, UInt32, Data) async -> Void) async {
         self.pieceManager = pieceManager
         self.onPieceReceived = onPieceReceived
         downloadStartTime = Date.now
@@ -206,14 +207,17 @@ public final class PeerConnection: ObservableObject {
                     case .failed(let error):
                         NSLog("[PeerConnection] ❌ Connection failed with \(self.peerInfo.ip):\(self.peerInfo.port) - \(error.localizedDescription)")
                         self.state = .error(error.localizedDescription)
+                        self.recycleOutstandingRequests()
                         gate.finish()
                     case .waiting(let error):
                         NSLog("[PeerConnection] ⏳ Connection waiting (unreachable) for \(self.peerInfo.ip):\(self.peerInfo.port) - \(error.localizedDescription)")
                         self.state = .error("Connection waiting: \(error.localizedDescription)")
+                        self.recycleOutstandingRequests()
                         gate.finishWithCancellation()
                     case .cancelled:
                         NSLog("[PeerConnection] 🚫 Connection cancelled with \(self.peerInfo.ip):\(self.peerInfo.port)")
                         self.state = .disconnected
+                        self.recycleOutstandingRequests()
                         gate.finish()
                     default:
                         break
@@ -256,8 +260,19 @@ public final class PeerConnection: ObservableObject {
     }
 
     public func disconnect() {
+        recycleOutstandingRequests()
         connection?.cancel()
         state = .disconnected
+    }
+
+    private func recycleOutstandingRequests() {
+        guard !outstandingRequests.isEmpty else { return }
+        let requestsToRecycle = Array(outstandingRequests)
+        outstandingRequests.removeAll()
+        NSLog("[PeerConnection] ♻️ Recycling \(requestsToRecycle.count) outstanding requests from \(peerInfo.ip):\(peerInfo.port)")
+        Task { [pieceManager] in
+            await pieceManager?.recycleRequests(requestsToRecycle)
+        }
     }
 
     private func handleConnectionState(_ state: NWConnection.State) {
@@ -391,6 +406,7 @@ public final class PeerConnection: ObservableObject {
             NSLog("[PeerConnection] 🔴 \(peerInfo.ip):\(peerInfo.port) sent CHOKE (downloads choked)")
             isChoked = true
             state = .choked
+            recycleOutstandingRequests()
         case .unchoke:
             NSLog("[PeerConnection] 🟢 \(peerInfo.ip):\(peerInfo.port) sent UNCHOKE (downloads unchoked!)")
             isChoked = false
@@ -447,9 +463,9 @@ public final class PeerConnection: ObservableObject {
         state = .downloading
 
         for _ in 0..<8 {
-            guard let request = await pieceManager.getNextRequest() else { break }
-            if !peerBitfield.isEmpty, !peerHasPiece(request.pieceIndex) { continue }
+            guard let request = await pieceManager.getNextRequest(peerBitfield: peerBitfield) else { break }
 
+            outstandingRequests.insert(request)
             NSLog("[PeerConnection] 📤 Requesting block: piece \(request.pieceIndex), offset \(request.offset), length \(request.length) from \(peerInfo.ip):\(peerInfo.port)")
             let message = WireMessage.request(
                 pieceIndex: request.pieceIndex,
@@ -465,7 +481,12 @@ public final class PeerConnection: ObservableObject {
         piecesReceived += 1
         updateDownloadSpeed()
 
-        onPieceReceived?(pieceIndex, offset, block)
+        let request = BlockRequest(pieceIndex: pieceIndex, offset: offset, length: UInt32(block.count))
+        outstandingRequests.remove(request)
+
+        if let callback = onPieceReceived {
+            await callback(pieceIndex, offset, block)
+        }
         await requestPieces()
     }
 

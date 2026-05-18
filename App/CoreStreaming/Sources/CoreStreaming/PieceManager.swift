@@ -30,8 +30,19 @@ public actor PieceManager {
     }
 
     public func getNextRequest() -> BlockRequest? {
+        return getNextRequest(peerBitfield: Data())
+    }
+
+    public func getNextRequest(peerBitfield: Data) -> BlockRequest? {
         for pieceIndex in streamingOrder() {
             guard !downloadedPieces.contains(pieceIndex) else { continue }
+
+            if !peerBitfield.isEmpty {
+                let byteIndex = Int(pieceIndex / 8)
+                let bitIndex = Int(pieceIndex % 8)
+                guard byteIndex < peerBitfield.count else { continue }
+                guard (peerBitfield[byteIndex] & (1 << (7 - bitIndex))) != 0 else { continue }
+            }
 
             let pieceSize = pieceSize(for: pieceIndex)
             let blockCount = Int((pieceSize + Int64(blockSize) - 1) / Int64(blockSize))
@@ -49,6 +60,12 @@ public actor PieceManager {
         }
 
         return nil
+    }
+
+    public func recycleRequests(_ requests: [BlockRequest]) {
+        for request in requests {
+            pendingRequests.remove(request)
+        }
     }
 
     public func markBlockReceived(pieceIndex: UInt32, offset: UInt32, block: Data) -> Bool {

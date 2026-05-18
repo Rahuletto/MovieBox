@@ -338,9 +338,7 @@ public final class TorrentEngine {
                     infoHash: metadata.infoHash,
                     pieceManager: pieceManager,
                     onPieceReceived: { [weak self] pieceIndex, offset, block in
-                        Task { @MainActor in
-                            await self?.handlePieceReceived(pieceIndex: pieceIndex, offset: offset, block: block)
-                        }
+                        await self?.handlePieceReceived(pieceIndex: pieceIndex, offset: offset, block: block)
                     }
                 )
             }

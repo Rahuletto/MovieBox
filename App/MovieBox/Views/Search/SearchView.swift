@@ -6,7 +6,9 @@ import SwiftUI
 
 struct SearchView: View {
     @Environment(AppRouter.self) private var router
+    @Environment(\.modelContext) private var modelContext
     @Query private var settings: [AppSettings]
+    @Query(sort: \SearchHistoryRecord.searchedAt, order: .reverse) private var searchHistory: [SearchHistoryRecord]
 
     @State private var results: [Movie] = []
     @State private var isSearching = false
@@ -29,10 +31,15 @@ struct SearchView: View {
             
             // 1. Categories Grid ScrollView (Permanently mounted to preserve scroll state)
             ScrollView {
-                categoriesGrid
-                    .padding(.horizontal, 28)
-                    .padding(.top, 54)
-                    .padding(.bottom, 40)
+                VStack(alignment: .leading, spacing: 24) {
+                    if !searchHistory.isEmpty {
+                        recentSearchesSection
+                    }
+                    categoriesGrid
+                }
+                .padding(.horizontal, 28)
+                .padding(.top, 54)
+                .padding(.bottom, 40)
             }
             .ignoresSafeArea(edges: .top)
             .opacity(router.selectedGenre == nil && router.searchQuery.isEmpty ? 1 : 0)
@@ -155,6 +162,9 @@ struct SearchView: View {
                 let d2 = levenshteinDistance(m2.title.lowercased(), q)
                 return d1 < d2
             }
+            if !results.isEmpty {
+                saveSearchQuery(router.searchQuery)
+            }
         } catch {
             if let urlError = error as? URLError, urlError.code == .cancelled {
                 return
@@ -190,5 +200,92 @@ struct SearchView: View {
             current = empty
         }
         return last[s2.count]
+    }
+
+    private var recentSearchesSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Recent Searches")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                
+                Spacer()
+                
+                Button(action: clearAllHistory) {
+                    Text("Clear All")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.tint)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.top, 4)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(searchHistory.prefix(8)) { item in
+                        HStack(spacing: 6) {
+                            Text(item.query)
+                                .font(.system(size: 13, weight: .regular))
+                                .foregroundStyle(.primary)
+                            
+                            Button(action: { deleteHistoryItem(item) }) {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .foregroundStyle(.secondary)
+                                    .padding(4)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.leading, 12)
+                        .padding(.trailing, 6)
+                        .padding(.vertical, 5)
+                        .background(
+                            Capsule()
+                                .fill(.ultraThinMaterial)
+                        )
+                        .overlay(
+                            Capsule()
+                                .stroke(.white.opacity(0.08), lineWidth: 0.5)
+                        )
+                        .onTapGesture {
+                            router.searchQuery = item.query
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func saveSearchQuery(_ query: String) {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        
+        let fetchDescriptor = FetchDescriptor<SearchHistoryRecord>(
+            predicate: #Predicate { $0.query == trimmed }
+        )
+        if let existing = try? modelContext.fetch(fetchDescriptor).first {
+            existing.searchedAt = Date()
+        } else {
+            let record = SearchHistoryRecord(query: trimmed)
+            modelContext.insert(record)
+        }
+        try? modelContext.save()
+    }
+
+    private func clearAllHistory() {
+        withAnimation {
+            for item in searchHistory {
+                modelContext.delete(item)
+            }
+            try? modelContext.save()
+        }
+    }
+
+    private func deleteHistoryItem(_ item: SearchHistoryRecord) {
+        withAnimation {
+            modelContext.delete(item)
+            try? modelContext.save()
+        }
     }
 }

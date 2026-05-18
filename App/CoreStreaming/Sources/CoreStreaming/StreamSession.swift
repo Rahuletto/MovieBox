@@ -34,7 +34,7 @@ public final class StreamSession: ObservableObject {
     private var streamURL: URL?
     private var isReady = false
 
-    private static let bufferThresholdPieces = 4
+    private static let bufferThresholdPieces = 2
     private static let bufferThresholdSeconds = 5.0
 
     public init(orchestrator: StreamingOrchestrator) {
