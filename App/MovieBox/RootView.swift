@@ -267,17 +267,22 @@ struct DetailHeroHeader: View {
                           outlineForeground: .white,
                           outlineStroke: Color.white.opacity(0.45)
                       ) {
-                          HStack(spacing: 8) {
-                              if let imdbRating = detail.enrichment?.imdbRating {
-                                  IMDBBadge(rating: imdbRating)
-                              }
-                              MediaTechBadgeRow(kinds: techKinds)
+                          if let imdbRating = detail.enrichment?.imdbRating {
+                              IMDBBadge(rating: imdbRating)
                           }
                       }
 
                       if let rt = detail.enrichment?.rottenTomatoes {
                           RottenTomatoesBadge(score: rt)
                       }
+                  }
+
+                  // Tech badges (4K / HDR / Dolby Vision / Dolby Atmos) on a
+                  // separate row — the main metadata ribbon was getting
+                  // crowded with year, runtime, rating, CC, IMDb, RT all on
+                  // one line.
+                  if !techKinds.isEmpty {
+                      MediaTechBadgeRow(kinds: techKinds)
                   }
 
                   if !detail.genres.isEmpty {

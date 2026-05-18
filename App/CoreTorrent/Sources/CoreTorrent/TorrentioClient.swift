@@ -50,19 +50,22 @@ public actor TorrentioClient {
 
             return streams.compactMap { stream in
                 let titleLines = stream.title.components(separatedBy: "\n")
-                let detailsLine = titleLines.count > 1 ? titleLines[1] : stream.title
-                let metadataLine = titleLines.count > 2 ? titleLines[2] : ""
+                let movieTitle = titleLines.first ?? "Unknown Title"
+                
+                // Join the non-metadata lines to parse release features (quality, HDR, codec, source, audio).
+                // Usually the last line is the metadata line (which starts with 👤 or contains 💾).
+                let releaseInfoStr = titleLines.count > 1 ? titleLines.dropLast().joined(separator: " ") : stream.title
 
-                let quality = ReleaseParser.parseQuality(from: detailsLine)
-                let hdrType = ReleaseParser.parseHDR(from: detailsLine)
-                let codec = ReleaseParser.parseCodec(from: detailsLine)
-                let audio = ReleaseParser.parseAudio(from: detailsLine)
-                let source = ReleaseParser.parseSource(from: detailsLine)
+                let quality = ReleaseParser.parseQuality(from: releaseInfoStr)
+                let hdrType = ReleaseParser.parseHDR(from: releaseInfoStr)
+                let codec = ReleaseParser.parseCodec(from: releaseInfoStr)
+                let audio = ReleaseParser.parseAudio(from: releaseInfoStr)
+                let source = ReleaseParser.parseSource(from: releaseInfoStr)
 
-                // Parse size bytes (e.g. "1.8 GB" or "850 MB")
+                // Parse size bytes from the ENTIRE stream.title (extremely robust!)
                 var sizeBytes: Int64 = 0
-                if let sizeRange = detailsLine.range(of: #"\d+(\.\d+)?\s*(GB|MB)"#, options: .regularExpression) {
-                    let sizeStr = String(detailsLine[sizeRange]).lowercased()
+                if let sizeRange = stream.title.range(of: #"\d+(\.\d+)?\s*(GB|MB)"#, options: .regularExpression) {
+                    let sizeStr = String(stream.title[sizeRange]).lowercased()
                     if sizeStr.contains("gb") {
                         if let valStr = sizeStr.replacingOccurrences(of: "gb", with: "").trimmingCharacters(in: .whitespaces).components(separatedBy: " ").first,
                            let val = Double(valStr) {
@@ -76,19 +79,19 @@ public actor TorrentioClient {
                     }
                 }
 
-                // Parse seeders and leechers from emoji indicators (👤 and 👥)
+                // Parse seeders and leechers from the ENTIRE stream.title
                 var seeders = 0
                 var leechers = 0
-                if let seedsRange = metadataLine.range(of: #"👤\s*\d+"#, options: .regularExpression) {
-                    let valStr = String(metadataLine[seedsRange]).replacingOccurrences(of: "👤", with: "").trimmingCharacters(in: .whitespaces)
+                if let seedsRange = stream.title.range(of: #"👤\s*\d+"#, options: .regularExpression) {
+                    let valStr = String(stream.title[seedsRange]).replacingOccurrences(of: "👤", with: "").trimmingCharacters(in: .whitespaces)
                     seeders = Int(valStr) ?? 0
                 }
-                if let peersRange = metadataLine.range(of: #"👥\s*\d+"#, options: .regularExpression) {
-                    let valStr = String(metadataLine[peersRange]).replacingOccurrences(of: "👥", with: "").trimmingCharacters(in: .whitespaces)
+                if let peersRange = stream.title.range(of: #"👥\s*\d+"#, options: .regularExpression) {
+                    let valStr = String(stream.title[peersRange]).replacingOccurrences(of: "👥", with: "").trimmingCharacters(in: .whitespaces)
                     leechers = Int(valStr) ?? 0
                 }
 
-                // Fallback seeders extraction
+                // Fallback seeders extraction from S: or similar in full stream.title
                 if seeders == 0 {
                     if let sRange = stream.title.range(of: #"S:\s*\d+"#, options: .regularExpression) {
                         let valStr = String(stream.title[sRange]).replacingOccurrences(of: "S:", with: "").trimmingCharacters(in: .whitespaces)
@@ -96,7 +99,6 @@ public actor TorrentioClient {
                     }
                 }
 
-                let movieTitle = titleLines.first ?? "Unknown Movie"
                 let magnet = TorrentMagnet.build(infoHash: stream.infoHash, displayName: movieTitle)
 
                 return TorrentResult(

@@ -51,10 +51,15 @@ struct MediaTechBadge: View {
                 let overallHeight = kind.displayHeight(for: size)
                 let horizontalPadding = size == .list ? 3.5 * 1.05 : 3.5
                 let verticalPadding = size == .list ? 2.0 * 1.05 : 2.0
-                
+
+                // Dolby logos are wide horizontal lockups — wrap them in a
+                // dark rounded pill and force template+white so the two
+                // Dolby PNGs (different color casts) read the same.
                 Image(assetName)
+                    .renderingMode(.template)
                     .resizable()
                     .scaledToFit()
+                    .foregroundStyle(.white)
                     .frame(width: overallWidth - horizontalPadding * 2, height: overallHeight - verticalPadding * 2)
                     .padding(.horizontal, horizontalPadding)
                     .padding(.vertical, verticalPadding)
@@ -65,6 +70,7 @@ struct MediaTechBadge: View {
                     .frame(width: overallWidth, height: overallHeight)
                     .accessibilityLabel(kind.accessibilityLabel)
             } else {
+                // 4K / HDR — straight image, no pill background.
                 Image(assetName)
                     .resizable()
                     .scaledToFit()
@@ -89,24 +95,22 @@ private extension MediaTechKind {
 
     func displayHeight(for size: MediaTechBadgeSize) -> CGFloat {
         // Dolby logos are horizontal lockups that read smaller than the
-        // simple 4K/HDR pills at the same height, so they need a taller box.
+        // 4K/HDR pills at the same height, so they need a slightly taller box.
         let base: CGFloat = switch self {
-        case .fourK: 13
-        case .hdr: 13
-        case .dolbyVision: 18
-        case .dolbyAtmos: 18
+        case .fourK: 16
+        case .hdr: 16
+        case .dolbyVision: 17
+        case .dolbyAtmos: 17
         }
-        // List rows want compact badges that visually match the small text
-        // resolution chip (~14pt). Hero stays at base size.
         return size == .list ? base * 1.05 : base
     }
 
     func displayWidth(for size: MediaTechBadgeSize) -> CGFloat {
         let base: CGFloat = switch self {
-        case .fourK: 23
-        case .hdr: 30
-        case .dolbyVision: 48
-        case .dolbyAtmos: 42
+        case .fourK: 30
+        case .hdr: 36
+        case .dolbyVision: 44
+        case .dolbyAtmos: 39
         }
         return size == .list ? base * 1.05 : base
     }
