@@ -27,7 +27,7 @@ struct MediaTechBadgeRow: View {
     var size: MediaTechBadgeSize = .regular
 
     var body: some View {
-        HStack(spacing: size == .list ? 8 : (context == .hero ? 6 : 4)) {
+        HStack(spacing: size == .list ? 4 : (context == .hero ? 6 : 4)) {
             ForEach(kinds, id: \.self) { kind in
                 MediaTechBadge(kind: kind, context: context, size: size)
             }
@@ -70,7 +70,9 @@ private extension MediaTechKind {
         case .dolbyVision: 14
         case .dolbyAtmos: 12
         }
-        return size == .list ? base * 1.4 : base
+        // List rows want compact badges that visually match the small text
+        // resolution chip (~14pt). Hero stays at base size.
+        return size == .list ? base * 1.05 : base
     }
 
     func displayWidth(for size: MediaTechBadgeSize) -> CGFloat {
@@ -80,7 +82,7 @@ private extension MediaTechKind {
         case .dolbyVision: 32
         case .dolbyAtmos: 21
         }
-        return size == .list ? base * 1.4 : base
+        return size == .list ? base * 1.05 : base
     }
 
     var fallbackLabel: String {

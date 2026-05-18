@@ -551,47 +551,10 @@ struct MovieDetailView: View {
 
 // MARK: - Subviews
 
-/// Top ~60vh sharp; blur + black fade on the lower portion (not scroll-linked).
-private enum DetailBackdropBlur {
-    static let clearThrough: CGFloat = 0.60
-}
-
-private struct ProgressiveBackdropBlurMask: View {
-    let clearThrough: CGFloat
-    let rampLength: CGFloat
-
-    var body: some View {
-        LinearGradient(
-            stops: [
-                .init(color: .clear, location: 0),
-                .init(color: .clear, location: clearThrough),
-                .init(color: .white, location: min(clearThrough + rampLength, 1))
-            ],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-    }
-}
-
-private struct ProgressiveBackdropBlackFade: View {
-    let clearThrough: CGFloat
-
-    var body: some View {
-        LinearGradient(
-            stops: [
-                .init(color: .clear, location: 0),
-                .init(color: .clear, location: clearThrough),
-                .init(color: .black.opacity(0.25), location: min(clearThrough + 0.10, 1)),
-                .init(color: .black.opacity(0.55), location: min(clearThrough + 0.22, 1)),
-                .init(color: .black.opacity(0.88), location: 1)
-            ],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-    }
-}
-
-/// Fixed full-window image with a static blurred layer composited on top (no solid fill).
+/// Fixed, sharp full-window backdrop. Blur is provided by the scrolling content's
+/// material background (see `ScrollFillingBlurBackground`), which naturally
+/// progresses with scroll position via a GPU-accelerated backdrop filter — no
+/// per-frame `.blur(radius:)` work, no gradient masks on the image itself.
 private struct FixedDetailBackdrop: View {
     let backdropPath: String?
 
@@ -614,40 +577,90 @@ private struct FixedDetailBackdrop: View {
             CachedImageView(url: backdropURL) {
                 Color.clear
             } content: { image in
-                let base = image
+                image
                     .resizable()
                     .aspectRatio(contentMode: .fill)
                     .frame(width: size.width, height: size.height)
                     .clipped()
-
-                ZStack {
-                    base
-
-                    base
-                        .blur(radius: 16)
-                        .mask {
-                            ProgressiveBackdropBlurMask(
-                                clearThrough: DetailBackdropBlur.clearThrough,
-                                rampLength: 0.14
-                            )
-                        }
-
-                    base
-                        .blur(radius: 32)
-                        .mask {
-                            ProgressiveBackdropBlurMask(
-                                clearThrough: DetailBackdropBlur.clearThrough + 0.05,
-                                rampLength: 0.16
-                            )
-                        }
-
-                    ProgressiveBackdropBlackFade(clearThrough: DetailBackdropBlur.clearThrough)
-                }
-                .drawingGroup(opaque: false)
+                    .overlay(
+                        // Subtle bottom darkening for hero-text legibility while
+                        // the backdrop is still uncovered (top ~60% of screen).
+                        LinearGradient(
+                            stops: [
+                                .init(color: .clear, location: 0),
+                                .init(color: .clear, location: 0.55),
+                                .init(color: .black.opacity(0.35), location: 0.85),
+                                .init(color: .black.opacity(0.75), location: 1)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
             }
         } else {
             Color.clear
         }
+    }
+}
+
+/// Background placed behind the scrolling content sections (below the hero).
+/// Uses `.ultraThinMaterial` so the OS draws a native backdrop blur of whatever
+/// sits behind it (the fixed backdrop image). As the user scrolls, this view
+/// translates upward over the backdrop, so the blurred region grows naturally
+/// with scroll position — efficient, no recomputation per frame.
+///
+/// `topExtension` lets the material start above its host view's top edge
+/// (e.g. partway up the hero / backdrop image), so the blur visibly begins
+/// "mid-image" before the content section itself starts.
+private struct ScrollFillingBlurBackground: View {
+    var topExtension: CGFloat = 360
+
+    var body: some View {
+        GeometryReader { geo in
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    // Slight dark tint for readability over bright backdrops.
+                    LinearGradient(
+                        colors: [Color.black.opacity(0.20), Color.black.opacity(0.55)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .mask {
+                    // Fixed-height eased feather at the very top of the material,
+                    // then solid for the rest of the (very tall) content area.
+                    // Using a fixed pixel height (not a percentage) keeps the ramp
+                    // visible regardless of how long the content section is.
+                    VStack(spacing: 0) {
+                        LinearGradient(
+                            stops: [
+                                // Ease-OUT curve: gets going early, then asymptotes.
+                                .init(color: .clear, location: 0.00),
+                                .init(color: .white.opacity(0.12), location: 0.15),
+                                .init(color: .white.opacity(0.30), location: 0.30),
+                                .init(color: .white.opacity(0.50), location: 0.45),
+                                .init(color: .white.opacity(0.70), location: 0.60),
+                                .init(color: .white.opacity(0.85), location: 0.75),
+                                .init(color: .white.opacity(0.95), location: 0.90),
+                                .init(color: .white, location: 1.00)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                        .frame(height: 340)
+
+                        Rectangle().fill(.white)
+                    }
+                }
+                .frame(
+                    width: geo.size.width,
+                    height: geo.size.height + topExtension
+                )
+                .offset(y: -topExtension)
+        }
+        .ignoresSafeArea(edges: .bottom)
+        .allowsHitTesting(false)
     }
 }
 
@@ -755,6 +768,10 @@ private struct MainContentView: View {
                         onPlayTrailer: onPlayTrailer,
                         currentRating: currentRating
                     )
+                    // Keep the hero above the sections VStack's blur background,
+                    // which intentionally extends upward into the hero area. Without
+                    // this, the material would render on top of the hero text/logo.
+                    .zIndex(1)
 
                     VStack(alignment: .leading, spacing: 32) {
                         // Rating ALWAYS comes first
@@ -845,8 +862,10 @@ private struct MainContentView: View {
                         .frame(maxWidth: .infinity)
                     }
                     .padding(.horizontal, EdgeInsets.defaultHorizontalPadding)
-                    .padding(.vertical, 28)
+                    .padding(.top, 8)
+                    .padding(.bottom, 28)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(ScrollFillingBlurBackground())
                 } else if isLoading {
                     ProgressView("Loading movie...")
                         .controlSize(.large)

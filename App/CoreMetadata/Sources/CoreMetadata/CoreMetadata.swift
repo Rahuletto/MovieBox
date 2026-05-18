@@ -796,13 +796,14 @@ private struct SimilarBundleDTO: Decodable, Sendable {
 }
 
 private struct ExternalIdsDTO: Decodable, Sendable {
+    // Property names are camelCase; the decoder's `convertFromSnakeCase`
+    // strategy translates the JSON `imdb_id`/`tvdb_id` keys for us.
+    // Do NOT add an explicit `CodingKeys` enum with snake_case raw values
+    // here — when combined with `convertFromSnakeCase` it silently breaks
+    // decoding (the strategy pre-converts the key to camelCase, then the
+    // explicit CodingKey raw value never matches).
     let imdbId: String?
     let tvdbId: Int?
-
-    enum CodingKeys: String, CodingKey {
-        case imdbId = "imdb_id"
-        case tvdbId = "tvdb_id"
-    }
 }
 
 private struct VideosBundleDTO: Decodable, Sendable {
@@ -828,10 +829,8 @@ private struct VideoDTO: Decodable, Sendable {
 }
 
 private struct TMDBImageDTO: Decodable, Sendable {
+    // `file_path` is mapped via the decoder's `convertFromSnakeCase` strategy.
     let filePath: String
-    enum CodingKeys: String, CodingKey {
-        case filePath = "file_path"
-    }
 }
 
 private struct TVShowSeasonsDTO: Decodable, Sendable {
@@ -839,17 +838,12 @@ private struct TVShowSeasonsDTO: Decodable, Sendable {
 }
 
 private struct TVSeasonListItemDTO: Decodable, Sendable {
+    // Keys (`season_number`, `episode_count`, `poster_path`) are mapped via
+    // the decoder's `convertFromSnakeCase` strategy. See ExternalIdsDTO note.
     let seasonNumber: Int
     let name: String?
     let episodeCount: Int?
     let posterPath: String?
-
-    enum CodingKeys: String, CodingKey {
-        case seasonNumber = "season_number"
-        case name
-        case episodeCount = "episode_count"
-        case posterPath = "poster_path"
-    }
 }
 
 private struct TVSeasonDetailDTO: Decodable, Sendable {
@@ -857,21 +851,13 @@ private struct TVSeasonDetailDTO: Decodable, Sendable {
 }
 
 private struct TVEpisodeDTO: Decodable, Sendable {
+    // `episode_number` / `still_path` are mapped via `convertFromSnakeCase`.
     let id: Int
     let episodeNumber: Int
     let name: String?
     let overview: String?
     let stillPath: String?
     let runtime: Int?
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case episodeNumber = "episode_number"
-        case name
-        case overview
-        case stillPath = "still_path"
-        case runtime
-    }
 }
 
 private struct TMDBMovieDTO: Decodable, Sendable {

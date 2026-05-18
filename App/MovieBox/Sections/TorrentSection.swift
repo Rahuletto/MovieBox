@@ -357,7 +357,6 @@ private struct TorrentVersionList: View {
             ForEach(Array(models.enumerated()), id: \.element.id) { index, model in
                 TorrentVersionRow(
                     model: model,
-                    rowIndex: index,
                     isBusy: busyTorrentID == model.id,
                     errorMessage: cardErrors[model.id],
                     onStream: { onStream(model.id) },
@@ -368,29 +367,33 @@ private struct TorrentVersionList: View {
 
                 if index < models.count - 1 {
                     Divider()
+                        .padding(.leading, 12)
                 }
             }
         }
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        // Single uniform translucent container — matches Settings.app /
+        // inset-grouped list aesthetic instead of alternating row colors
+        // which look broken on top of an image backdrop.
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
         }
     }
 }
 
 private struct TorrentVersionRow: View, Equatable {
     let model: TorrentCardModel
-    let rowIndex: Int
     let isBusy: Bool
     let errorMessage: String?
     let onStream: () -> Void
     let onDownload: () -> Void
     let onCopyError: () -> Void
 
+    @State private var isHovering = false
+
     static func == (lhs: TorrentVersionRow, rhs: TorrentVersionRow) -> Bool {
         lhs.model == rhs.model
-            && lhs.rowIndex == rhs.rowIndex
             && lhs.isBusy == rhs.isBusy
             && lhs.errorMessage == rhs.errorMessage
     }
@@ -459,10 +462,14 @@ private struct TorrentVersionRow: View, Equatable {
             }
             .disabled(isBusy)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(rowBackground)
+        .contentShape(Rectangle())
+        .background(isHovering ? Color.primary.opacity(0.06) : Color.clear)
+        .onHover { hovering in
+            isHovering = hovering
+        }
     }
 
     private var metadataRow: some View {
@@ -515,11 +522,4 @@ private struct TorrentVersionRow: View, Equatable {
         }
     }
 
-    private var rowBackground: Color {
-        let colors = NSColor.controlAlternatingRowBackgroundColors
-        guard colors.count >= 2 else {
-            return Color(nsColor: .controlBackgroundColor)
-        }
-        return Color(nsColor: colors[rowIndex % colors.count])
-    }
 }
