@@ -3,7 +3,7 @@ import Network
 
 // MARK: - Peer Wire Protocol
 
-public enum WireMessage: Sendable {
+public enum WireMessage: Equatable, Sendable {
     case keepAlive
     case choke
     case unchoke
@@ -64,16 +64,17 @@ public enum WireMessage: Sendable {
     }
 
     public static func decode(_ data: Data) -> WireMessage? {
-        guard data.count >= 4 else { return nil }
+        let cleanData = Data(data)
+        guard cleanData.count >= 4 else { return nil }
 
-        let length = UInt32(data[0]) << 24 | UInt32(data[1]) << 16 | UInt32(data[2]) << 8 | UInt32(data[3])
+        let length = UInt32(cleanData[0]) << 24 | UInt32(cleanData[1]) << 16 | UInt32(cleanData[2]) << 8 | UInt32(cleanData[3])
 
         if length == 0 {
             return .keepAlive
         }
 
-        guard data.count >= 5 else { return nil }
-        let messageId = data[4]
+        guard cleanData.count >= 5 else { return nil }
+        let messageId = cleanData[4]
 
         switch messageId {
         case 0: return .choke
@@ -81,33 +82,33 @@ public enum WireMessage: Sendable {
         case 2: return .interested
         case 3: return .notInterested
         case 4:
-            guard data.count >= 9 else { return nil }
-            let piece = UInt32(data[5]) << 24 | UInt32(data[6]) << 16 | UInt32(data[7]) << 8 | UInt32(data[8])
+            guard cleanData.count >= 9 else { return nil }
+            let piece = UInt32(cleanData[5]) << 24 | UInt32(cleanData[6]) << 16 | UInt32(cleanData[7]) << 8 | UInt32(cleanData[8])
             return .have(pieceIndex: piece)
         case 5:
-            let field = data[5...]
+            let field = cleanData[5...]
             return .bitfield(Data(field))
         case 6:
-            guard data.count >= 17 else { return nil }
-            let piece = UInt32(data[5]) << 24 | UInt32(data[6]) << 16 | UInt32(data[7]) << 8 | UInt32(data[8])
-            let offset = UInt32(data[9]) << 24 | UInt32(data[10]) << 16 | UInt32(data[11]) << 8 | UInt32(data[12])
-            let length = UInt32(data[13]) << 24 | UInt32(data[14]) << 16 | UInt32(data[15]) << 8 | UInt32(data[16])
+            guard cleanData.count >= 17 else { return nil }
+            let piece = UInt32(cleanData[5]) << 24 | UInt32(cleanData[6]) << 16 | UInt32(cleanData[7]) << 8 | UInt32(cleanData[8])
+            let offset = UInt32(cleanData[9]) << 24 | UInt32(cleanData[10]) << 16 | UInt32(cleanData[11]) << 8 | UInt32(cleanData[12])
+            let length = UInt32(cleanData[13]) << 24 | UInt32(cleanData[14]) << 16 | UInt32(cleanData[15]) << 8 | UInt32(cleanData[16])
             return .request(pieceIndex: piece, offset: offset, length: length)
         case 7:
-            guard data.count >= 13 else { return nil }
-            let piece = UInt32(data[5]) << 24 | UInt32(data[6]) << 16 | UInt32(data[7]) << 8 | UInt32(data[8])
-            let offset = UInt32(data[9]) << 24 | UInt32(data[10]) << 16 | UInt32(data[11]) << 8 | UInt32(data[12])
-            let block = data[13...]
+            guard cleanData.count >= 13 else { return nil }
+            let piece = UInt32(cleanData[5]) << 24 | UInt32(cleanData[6]) << 16 | UInt32(cleanData[7]) << 8 | UInt32(cleanData[8])
+            let offset = UInt32(cleanData[9]) << 24 | UInt32(cleanData[10]) << 16 | UInt32(cleanData[11]) << 8 | UInt32(cleanData[12])
+            let block = cleanData[13...]
             return .piece(pieceIndex: piece, offset: offset, block: Data(block))
         case 8:
-            guard data.count >= 17 else { return nil }
-            let piece = UInt32(data[5]) << 24 | UInt32(data[6]) << 16 | UInt32(data[7]) << 8 | UInt32(data[8])
-            let offset = UInt32(data[9]) << 24 | UInt32(data[10]) << 16 | UInt32(data[11]) << 8 | UInt32(data[12])
-            let length = UInt32(data[13]) << 24 | UInt32(data[14]) << 16 | UInt32(data[15]) << 8 | UInt32(data[16])
+            guard cleanData.count >= 17 else { return nil }
+            let piece = UInt32(cleanData[5]) << 24 | UInt32(cleanData[6]) << 16 | UInt32(cleanData[7]) << 8 | UInt32(cleanData[8])
+            let offset = UInt32(cleanData[9]) << 24 | UInt32(cleanData[10]) << 16 | UInt32(cleanData[11]) << 8 | UInt32(cleanData[12])
+            let length = UInt32(cleanData[13]) << 24 | UInt32(cleanData[14]) << 16 | UInt32(cleanData[15]) << 8 | UInt32(cleanData[16])
             return .cancel(pieceIndex: piece, offset: offset, length: length)
         case 9:
-            guard data.count >= 7 else { return nil }
-            let port = UInt16(data[5]) << 8 | UInt16(data[6])
+            guard cleanData.count >= 7 else { return nil }
+            let port = UInt16(cleanData[5]) << 8 | UInt16(cleanData[6])
             return .port(port: port)
         default:
             return nil
@@ -174,9 +175,11 @@ public final class PeerConnection: ObservableObject {
         guard peerInfo.port > 0 && peerInfo.port < 65536,
               let port = NWEndpoint.Port(rawValue: UInt16(peerInfo.port)) else {
             state = .error("Invalid peer address")
+            NSLog("[PeerConnection] ❌ Invalid peer port for \(peerInfo.ip):\(peerInfo.port)")
             return
         }
 
+        NSLog("[PeerConnection] 🌐 Attempting to connect to peer \(peerInfo.ip):\(peerInfo.port)...")
         let host = NWEndpoint.Host(peerInfo.ip)
 
         let parameters = NWParameters.tcp
@@ -198,14 +201,18 @@ public final class PeerConnection: ObservableObject {
                     self.handleConnectionState(nwState)
                     switch nwState {
                     case .ready:
+                        NSLog("[PeerConnection] 🔌 Connection established (ready) with \(self.peerInfo.ip):\(self.peerInfo.port)")
                         gate.finish()
                     case .failed(let error):
+                        NSLog("[PeerConnection] ❌ Connection failed with \(self.peerInfo.ip):\(self.peerInfo.port) - \(error.localizedDescription)")
                         self.state = .error(error.localizedDescription)
                         gate.finish()
-                    case .waiting(_):
-                        self.state = .error("Connection waiting (peer unreachable)")
+                    case .waiting(let error):
+                        NSLog("[PeerConnection] ⏳ Connection waiting (unreachable) for \(self.peerInfo.ip):\(self.peerInfo.port) - \(error.localizedDescription)")
+                        self.state = .error("Connection waiting: \(error.localizedDescription)")
                         gate.finishWithCancellation()
                     case .cancelled:
+                        NSLog("[PeerConnection] 🚫 Connection cancelled with \(self.peerInfo.ip):\(self.peerInfo.port)")
                         self.state = .disconnected
                         gate.finish()
                     default:
@@ -220,6 +227,7 @@ public final class PeerConnection: ObservableObject {
             DispatchQueue.global().asyncAfter(deadline: .now() + 5.0) {
                 Task { @MainActor in
                     if self.state == .connecting {
+                        NSLog("[PeerConnection] ⏱️ Connection timeout (5.0s elapsed) for \(self.peerInfo.ip):\(self.peerInfo.port)")
                         self.state = .error("Connection timeout")
                     }
                     gate.finishWithCancellation()
@@ -227,14 +235,22 @@ public final class PeerConnection: ObservableObject {
             }
         }
 
-        guard case .connected = state else { return }
+        guard case .connected = state else {
+            NSLog("[PeerConnection] ❌ Connection aborted to \(peerInfo.ip):\(peerInfo.port) - State is not connected")
+            return
+        }
 
+        NSLog("[PeerConnection] 🤝 Starting BitTorrent handshake with \(peerInfo.ip):\(peerInfo.port)...")
         state = .handshaking
         await sendHandshake(infoHash: infoHash)
         await receiveHandshake(infoHash: infoHash)
 
-        guard case .connected = state else { return }
+        guard case .connected = state else {
+            NSLog("[PeerConnection] ❌ Handshake aborted with \(peerInfo.ip):\(peerInfo.port) - State is not connected")
+            return
+        }
 
+        NSLog("[PeerConnection] 💖 Handshake successful! Sending INTERESTED message to \(peerInfo.ip):\(peerInfo.port)")
         await sendInterested()
         await startReceiving()
     }
@@ -351,7 +367,8 @@ public final class PeerConnection: ObservableObject {
     private func parseNextMessage() -> WireMessage? {
         guard buffer.count >= 4 else { return nil }
 
-        let length = UInt32(buffer[0]) << 24 | UInt32(buffer[1]) << 16 | UInt32(buffer[2]) << 8 | UInt32(buffer[3])
+        let start = buffer.startIndex
+        let length = UInt32(buffer[start]) << 24 | UInt32(buffer[start + 1]) << 16 | UInt32(buffer[start + 2]) << 8 | UInt32(buffer[start + 3])
 
         if length == 0 {
             buffer.removeFirst(4)
@@ -361,7 +378,8 @@ public final class PeerConnection: ObservableObject {
         let totalLength = 4 + Int(length)
         guard buffer.count >= totalLength else { return nil }
 
-        let messageData = buffer[..<totalLength]
+        let messageEnd = start + totalLength
+        let messageData = Data(buffer[start..<messageEnd])
         buffer.removeFirst(totalLength)
 
         return WireMessage.decode(messageData)
@@ -370,30 +388,39 @@ public final class PeerConnection: ObservableObject {
     private func handleMessage(_ message: WireMessage) async {
         switch message {
         case .choke:
+            NSLog("[PeerConnection] 🔴 \(peerInfo.ip):\(peerInfo.port) sent CHOKE (downloads choked)")
             isChoked = true
             state = .choked
         case .unchoke:
+            NSLog("[PeerConnection] 🟢 \(peerInfo.ip):\(peerInfo.port) sent UNCHOKE (downloads unchoked!)")
             isChoked = false
             state = .unchoked
             await requestPieces()
         case .interested:
+            NSLog("[PeerConnection] 📥 \(peerInfo.ip):\(peerInfo.port) is INTERESTED")
             let message = WireMessage.unchoke.encode()
             connection?.send(content: message, completion: .contentProcessed { _ in })
         case .notInterested:
+            NSLog("[PeerConnection] 📥 \(peerInfo.ip):\(peerInfo.port) is NOT INTERESTED")
             break
         case .have(let pieceIndex):
+            NSLog("[PeerConnection] 📰 \(peerInfo.ip):\(peerInfo.port) has piece \(pieceIndex)")
             setPeerHasPiece(pieceIndex)
             if !isChoked {
                 await requestPieces()
             }
         case .bitfield(let field):
+            NSLog("[PeerConnection] 📊 \(peerInfo.ip):\(peerInfo.port) sent BITFIELD (size: \(field.count) bytes)")
             peerBitfield = field
             if !isChoked {
                 await requestPieces()
             }
         case .piece(let pieceIndex, let offset, let block):
+            NSLog("[PeerConnection] 📥 Received block: piece \(pieceIndex), offset \(offset), length \(block.count) bytes from \(peerInfo.ip):\(peerInfo.port)")
             await handlePiece(pieceIndex: pieceIndex, offset: offset, block: block)
-        case .request, .cancel, .port, .keepAlive:
+        case .request(let pieceIndex, let offset, let length):
+            NSLog("[PeerConnection] 📤 Peer requested block: piece \(pieceIndex), offset \(offset), length \(length) from us")
+        case .cancel, .port, .keepAlive:
             break
         }
     }
@@ -423,6 +450,7 @@ public final class PeerConnection: ObservableObject {
             guard let request = await pieceManager.getNextRequest() else { break }
             if !peerBitfield.isEmpty, !peerHasPiece(request.pieceIndex) { continue }
 
+            NSLog("[PeerConnection] 📤 Requesting block: piece \(request.pieceIndex), offset \(request.offset), length \(request.length) from \(peerInfo.ip):\(peerInfo.port)")
             let message = WireMessage.request(
                 pieceIndex: request.pieceIndex,
                 offset: request.offset,

@@ -79,7 +79,84 @@ final class PieceStoreTests: XCTestCase {
         await store.cleanup()
         try FileManager.default.removeItem(at: tempDir)
     }
+
+    func testBlockingReadSuccess() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("test_blocking_read")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+
+        let store = try await PieceStore(
+            infoHash: "blocking_test",
+            pieceCount: 2,
+            pieceSize: 1024,
+            storageDirectory: tempDir
+        )
+
+        let testData = Data(repeating: 0x55, count: 1024)
+
+        // Spin up a background task to write the piece after a short delay
+        Task {
+            try? await Task.sleep(for: .milliseconds(200))
+            try? await store.write(pieceIndex: 0, data: testData)
+        }
+
+        // Call read immediately (should block until the piece is written by the background task)
+        let startTime = Date.now
+        let readData = try await store.read(offset: 0, length: 1024)
+        let elapsed = Date.now.timeIntervalSince(startTime)
+
+        XCTAssertEqual(readData, testData)
+        XCTAssertGreaterThanOrEqual(elapsed, 0.19) // Verify that it blocked for the write delay
+
+        await store.cleanup()
+        try FileManager.default.removeItem(at: tempDir)
+    }
+
+    func testBlockingReadCancellation() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("test_blocking_cancel")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+
+        let store = try await PieceStore(
+            infoHash: "blocking_cancel_test",
+            pieceCount: 2,
+            pieceSize: 1024,
+            storageDirectory: tempDir
+        )
+
+        // Spin up a task that reads and will block forever since we won't write
+        let readTask = Task {
+            _ = try await store.read(offset: 0, length: 1024)
+        }
+
+        try? await Task.sleep(for: .milliseconds(100))
+        readTask.cancel()
+
+        let result = await readTask.result
+        switch result {
+        case .failure(let error):
+            XCTAssertTrue(error is CancellationError)
+        case .success:
+            XCTFail("Should have been cancelled")
+        }
+
+        await store.cleanup()
+        try FileManager.default.removeItem(at: tempDir)
+    }
+
+    func testWireMessageDecodeWithSliceOffset() {
+        // Construct a wire message (unchoke message: length = 1, ID = 1)
+        // [0, 0, 0, 1, 1]
+        let originalBuffer = Data([0xAA, 0xBB, 0xCC, 0x00, 0x00, 0x00, 0x01, 0x01, 0xDD, 0xEE])
+        
+        // Slice the buffer from index 3 to 7 (inclusive of [0, 0, 0, 1, 1])
+        let slice = originalBuffer[3...7]
+        XCTAssertEqual(slice.startIndex, 3)
+        
+        // Decode the slice
+        let decoded = WireMessage.decode(slice)
+        XCTAssertEqual(decoded, .unchoke)
+    }
 }
+
 
 final class ReleaseParserIntegrationTests: XCTestCase {
     func testParseQualityFromTorrentTitle() {

@@ -40,14 +40,46 @@ public actor PieceStore {
         }
 
         let offset = Int64(pieceIndex) * pieceSize
+        NSLog("[PieceStore] 💾 Writing piece \(pieceIndex) on disk (offset: \(offset), size: \(data.count) bytes)")
         try fileHandle?.seek(toOffset: UInt64(offset))
         fileHandle?.write(data)
         bitmap[pieceIndex] = true
+        NSLog("[PieceStore] ✅ Successfully wrote piece \(pieceIndex) to disk. Bitmap progress: \(String(format: "%.1f", progress() * 100))%")
     }
 
     public func read(offset: Int64, length: Int) async throws -> Data {
         guard offset >= 0 && offset < totalSize else {
             throw PieceStoreError.outOfRange(offset, totalSize)
+        }
+
+        let startPiece = Int(offset / pieceSize)
+        let endPiece = Int((offset + Int64(length) - 1) / pieceSize)
+
+        NSLog("[PieceStore] 🔍 Read requested: offset \(offset), length \(length) (requires pieces \(startPiece) to \(endPiece))")
+
+        // Wait asynchronously until the requested piece range is downloaded and written on disk
+        var waitCount = 0
+        while true {
+            try Task.checkCancellation()
+            var allAvailable = true
+            for i in startPiece...endPiece {
+                if !hasPiece(i) {
+                    allAvailable = false
+                    break
+                }
+            }
+            if allAvailable {
+                break
+            }
+            waitCount += 1
+            if waitCount % 50 == 0 { // Log once every 5 seconds (50 * 100ms)
+                NSLog("[PieceStore] ⏳ Still waiting for pieces \(startPiece)-\(endPiece) to download... (elapsed: \(waitCount * 100)ms)")
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+
+        if waitCount > 0 {
+            NSLog("[PieceStore] 🎉 Pieces \(startPiece)-\(endPiece) successfully acquired after waiting \(waitCount * 100)ms!")
         }
 
         let readHandle = try FileHandle(forReadingFrom: storageURL)

@@ -151,11 +151,14 @@ public final class HTTPRangeServer {
 
                     let length = Int(end - start + 1)
                     do {
+                        NSLog("[HTTPRangeServer] 📥 Received Range Request: bytes=\(start)-\(end) (length: \(length) bytes)")
                         bodyData = try await pieceStore.read(offset: start, length: length)
+                        NSLog("[HTTPRangeServer] 📤 Serving Range Request: bytes=\(start)-\(end) (served: \(bodyData.count) bytes)")
                         statusCode = 206
                         contentRange = "bytes \(start)-\(end)/\(totalSize)"
                         contentLength = Int64(bodyData.count)
                     } catch {
+                        NSLog("[HTTPRangeServer] ❌ Range Request failed: \(error.localizedDescription)")
                         return HTTPResponse(status: 500, body: "Internal Server Error")
                     }
                 }
@@ -163,9 +166,12 @@ public final class HTTPRangeServer {
         } else {
             do {
                 let length = min(1024 * 1024, Int(totalSize))
+                NSLog("[HTTPRangeServer] 📥 Received Full File Request (length: \(length) bytes)")
                 bodyData = try await pieceStore.read(offset: 0, length: length)
+                NSLog("[HTTPRangeServer] 📤 Serving Full File Request (served: \(bodyData.count) bytes)")
                 contentLength = Int64(bodyData.count)
             } catch {
+                NSLog("[HTTPRangeServer] ❌ Full File Request failed: \(error.localizedDescription)")
                 return HTTPResponse(status: 500, body: "Internal Server Error")
             }
         }

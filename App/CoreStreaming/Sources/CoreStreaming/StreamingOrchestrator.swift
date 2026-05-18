@@ -183,7 +183,7 @@ public final class TorrentEngine {
 
     private func announceToTrackers() async {
         let trackerList = metadata.trackers
-        NSLog("Announcing to \(trackerList.count) trackers in parallel...")
+        NSLog("[TorrentEngine] 📣 Announcing to \(trackerList.count) trackers in parallel...")
 
         let peersFound = await withTaskGroup(of: [PeerInfo].self) { group in
             for tracker in trackerList {
@@ -199,10 +199,10 @@ public final class TorrentEngine {
                                 left: metadata.totalSize - bytesDownloaded,
                                 event: .started
                             )
-                            NSLog("UDP tracker announce succeeded: \(tracker)")
+                            NSLog("[TorrentEngine] 🟢 UDP tracker announce succeeded: \(tracker) (found \(response.peers.count) peers)")
                             return response.peers
                         } catch {
-                            NSLog("UDP tracker failed: \(tracker) - \(error)")
+                            NSLog("[TorrentEngine] 🔴 UDP tracker failed: \(tracker) - \(error.localizedDescription)")
                             return []
                         }
                     } else {
@@ -216,10 +216,10 @@ public final class TorrentEngine {
                                 left: metadata.totalSize - bytesDownloaded,
                                 event: .started
                             )
-                            NSLog("HTTP tracker announce succeeded: \(tracker)")
+                            NSLog("[TorrentEngine] 🟢 HTTP tracker announce succeeded: \(tracker) (found \(response.peers.count) peers)")
                             return response.peers
                         } catch {
-                            NSLog("HTTP tracker failed: \(tracker) - \(error)")
+                            NSLog("[TorrentEngine] 🔴 HTTP tracker failed: \(tracker) - \(error.localizedDescription)")
                             return []
                         }
                     }
@@ -240,10 +240,13 @@ public final class TorrentEngine {
         }
 
         var finalPeers = peersFound
+        NSLog("[TorrentEngine] 📊 Found \(finalPeers.count) unique peers from trackers.")
+
         if finalPeers.isEmpty {
-            NSLog("No peers from trackers, falling back to DHT")
+            NSLog("[TorrentEngine] ⚠️ No peers found from trackers, falling back to DHT...")
             await startDHT()
             let dhtPeers = await dht?.findPeers(infoHash: metadata.infoHash) ?? []
+            NSLog("[TorrentEngine] 📊 Found \(dhtPeers.count) peers from DHT.")
             for peer in dhtPeers {
                 let key = "\(peer.ip):\(peer.port)"
                 if !finalPeers.contains(where: { "\($0.ip):\($0.port)" == key }) {
@@ -253,9 +256,10 @@ public final class TorrentEngine {
         }
 
         if !finalPeers.isEmpty {
+            NSLog("[TorrentEngine] 🌐 Initiating connection attempts to the first \(min(30, finalPeers.count)) peers...")
             await connectToPeers(finalPeers)
         } else {
-            NSLog("No peers found from trackers or DHT.")
+            NSLog("[TorrentEngine] ❌ No peers found from trackers or DHT. Waiting for announce retry...")
         }
     }
 
