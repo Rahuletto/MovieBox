@@ -25,8 +25,10 @@ public actor PieceStore {
         if FileManager.default.fileExists(atPath: storageURL.path) {
             try FileManager.default.removeItem(at: storageURL)
         }
-        FileManager.default.createFile(atPath: storageURL.path, contents: Data(count: Int(totalSize)))
-        fileHandle = try FileHandle(forWritingTo: storageURL)
+        FileManager.default.createFile(atPath: storageURL.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: storageURL)
+        try handle.truncate(atOffset: UInt64(totalSize))
+        self.fileHandle = handle
     }
 
     public func write(pieceIndex: Int, data: Data) async throws {
