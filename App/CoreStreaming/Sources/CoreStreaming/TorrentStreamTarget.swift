@@ -25,19 +25,19 @@ public struct TorrentStreamTarget: Sendable {
             return videoExtensions.contains(ext)
         }
 
-        let chosenIndex: Int
-        if let videoPick = videoCandidates.enumerated().max(by: { $0.element.length < $1.element.length }) {
-            chosenIndex = videoPick.offset
-        } else if let anyPick = metadata.files.enumerated().max(by: { $0.element.length < $1.element.length }) {
-            chosenIndex = anyPick.offset
+        let chosen: TorrentFile
+        if let largestVideo = videoCandidates.max(by: { $0.length < $1.length }) {
+            chosen = largestVideo
+        } else if let largestFile = metadata.files.max(by: { $0.length < $1.length }) {
+            chosen = largestFile
         } else {
-            chosenIndex = 0
+            chosen = metadata.files[0]
         }
 
-        let chosen = metadata.files[chosenIndex]
         var offset: Int64 = 0
-        for index in 0..<chosenIndex {
-            offset += metadata.files[index].length
+        for file in metadata.files {
+            if file.relativePath == chosen.relativePath { break }
+            offset += file.length
         }
 
         let firstPiece = Int(offset / metadata.pieceLength)

@@ -9,10 +9,14 @@ public actor PieceStore {
     public let totalSize: Int64
     public let storageURL: URL
     public let streamFirstPiece: Int
+    /// Byte offset in the torrent where the streamed media file begins.
+    public let streamMediaByteOffset: Int64
 
     private var bitmap: [Bool]
     private var writeHandle: FileHandle?
     private var readHandle: FileHandle?
+    /// Contiguous bytes written from the start of the streamed media file (may be unverified).
+    private var streamHeadContiguousEnd: Int64 = 0
 
     public init(
         infoHash: String,
@@ -20,12 +24,14 @@ public actor PieceStore {
         pieceSize: Int64,
         totalSize: Int64? = nil,
         streamFirstPiece: Int = 0,
+        streamMediaByteOffset: Int64 = 0,
         storageDirectory: URL = FileManager.default.temporaryDirectory
     ) async throws {
         self.infoHash = infoHash
         self.pieceCount = pieceCount
         self.pieceSize = pieceSize
         self.streamFirstPiece = streamFirstPiece
+        self.streamMediaByteOffset = streamMediaByteOffset
         let resolvedTotalSize = totalSize ?? Int64(pieceCount) * pieceSize
         self.totalSize = resolvedTotalSize
         self.storageURL = storageDirectory.appendingPathComponent("moviebox_\(infoHash).stream")
@@ -43,6 +49,30 @@ public actor PieceStore {
         self.readHandle = try FileHandle(forReadingFrom: storageURL)
     }
 
+    /// Writes a block to disk immediately for progressive playback (before hash verification).
+    public func writeBlock(pieceIndex: Int, blockOffset: Int64, data: Data) async throws {
+        guard pieceIndex >= 0, pieceIndex < pieceCount else {
+            throw PieceStoreError.invalidPieceIndex(pieceIndex)
+        }
+
+        let torrentOffset = Int64(pieceIndex) * pieceSize + blockOffset
+        try writeHandle?.seek(toOffset: UInt64(torrentOffset))
+        writeHandle?.write(data)
+
+        let mediaOffset = torrentOffset - streamMediaByteOffset
+        guard mediaOffset >= 0 else { return }
+
+        let mediaEnd = mediaOffset + Int64(data.count)
+        if mediaOffset <= streamHeadContiguousEnd {
+            streamHeadContiguousEnd = max(streamHeadContiguousEnd, mediaEnd)
+        }
+    }
+
+    public func markPieceVerified(pieceIndex: Int) {
+        guard pieceIndex >= 0, pieceIndex < pieceCount else { return }
+        bitmap[pieceIndex] = true
+    }
+
     public func write(pieceIndex: Int, data: Data) async throws {
         guard pieceIndex >= 0 && pieceIndex < pieceCount else {
             throw PieceStoreError.invalidPieceIndex(pieceIndex)
@@ -55,7 +85,14 @@ public actor PieceStore {
         try writeHandle?.seek(toOffset: UInt64(offset))
         writeHandle?.write(data)
         bitmap[pieceIndex] = true
-        TorrentLog.debug("[PieceStore] Wrote piece \(pieceIndex) (\(data.count) bytes)")
+
+        let mediaOffset = offset - streamMediaByteOffset
+        if mediaOffset >= 0 {
+            let mediaEnd = mediaOffset + Int64(data.count)
+            if mediaOffset <= streamHeadContiguousEnd {
+                streamHeadContiguousEnd = max(streamHeadContiguousEnd, mediaEnd)
+            }
+        }
     }
 
     public func read(offset: Int64, length: Int) async throws -> Data {
@@ -64,10 +101,7 @@ public actor PieceStore {
             throw PieceStoreError.outOfRange(offset, totalSize)
         }
 
-        let startPiece = Int(offset / pieceSize)
-        let endPiece = Int((offset + Int64(clampedLength) - 1) / pieceSize)
-
-        try await waitForPieces(from: startPiece, through: endPiece)
+        try await waitForReadable(offset: offset, length: clampedLength)
 
         guard let readHandle else {
             throw PieceStoreError.ioError("Read handle unavailable")
@@ -81,22 +115,12 @@ public actor PieceStore {
         return bitmap[index]
     }
 
-    public func hasRange(start: Int64, end: Int64) -> Bool {
-        let startPiece = Int(start / pieceSize)
-        let endPiece = Int(end / pieceSize)
-        for i in startPiece...endPiece where !hasPiece(i) {
-            return false
-        }
-        return true
-    }
-
     public func progress() -> Double {
         guard pieceCount > 0 else { return 0 }
         let completed = bitmap.filter { $0 }.count
         return Double(completed) / Double(pieceCount)
     }
 
-    /// Contiguous completed pieces starting at the stream's first piece (video file start).
     public func contiguousPiecesFromStart() -> Int {
         var count = 0
         for index in streamFirstPiece..<bitmap.count {
@@ -106,7 +130,6 @@ public actor PieceStore {
         return count
     }
 
-    /// Bytes available contiguously from the stream's first piece (for progressive play readiness).
     public func contiguousBytesFromStreamStart() -> Int64 {
         var bytes: Int64 = 0
         for index in streamFirstPiece..<bitmap.count {
@@ -118,6 +141,11 @@ public actor PieceStore {
             }
         }
         return bytes
+    }
+
+    /// Contiguous media bytes at the file head (includes in-flight blocks written before verify).
+    public func streamHeadContiguousBytes() -> Int64 {
+        streamHeadContiguousEnd
     }
 
     public func cleanup() async {
@@ -133,25 +161,57 @@ public actor PieceStore {
         try? readHandle?.close()
     }
 
-    private func waitForPieces(from startPiece: Int, through endPiece: Int) async throws {
+    private func waitForReadable(offset: Int64, length: Int) async throws {
+        let end = offset + Int64(length)
         var waitCount = 0
+
         while true {
             try Task.checkCancellation()
-            var allAvailable = true
-            for index in startPiece...endPiece {
-                if !hasPiece(index) {
-                    allAvailable = false
-                    break
-                }
+            if isRangeReadable(offset: offset, end: end) {
+                return
             }
-            if allAvailable { return }
 
             waitCount += 1
             if waitCount % 50 == 0 {
-                TorrentLog.debug("[PieceStore] Waiting for pieces \(startPiece)-\(endPiece)")
+                TorrentLog.debug(
+                    "[PieceStore] Waiting for readable bytes \(offset)-\(end) (head contiguous: \(streamHeadContiguousEnd))"
+                )
             }
             try await Task.sleep(for: .milliseconds(100))
         }
+    }
+
+    private func isRangeReadable(offset: Int64, end: Int64) -> Bool {
+        var position = offset
+        while position < end {
+            let pieceIndex = Int(position / pieceSize)
+            let pieceStart = Int64(pieceIndex) * pieceSize
+            let pieceEnd = min(end, pieceStart + pieceSize(for: pieceIndex))
+
+            if hasPiece(pieceIndex) {
+                position = pieceEnd
+                continue
+            }
+
+            let mediaStart = max(0, pieceStart - streamMediaByteOffset)
+            let mediaEnd = pieceEnd - streamMediaByteOffset
+            guard mediaEnd > 0, mediaEnd <= streamHeadContiguousEnd else {
+                return false
+            }
+            if mediaStart > 0, mediaStart > streamHeadContiguousEnd {
+                return false
+            }
+
+            position = pieceEnd
+        }
+        return true
+    }
+
+    private func pieceSize(for pieceIndex: Int) -> Int64 {
+        if pieceIndex == pieceCount - 1 {
+            return totalSize - Int64(pieceIndex) * pieceSize
+        }
+        return pieceSize
     }
 }
 

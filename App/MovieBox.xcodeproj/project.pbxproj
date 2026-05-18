@@ -14,9 +14,11 @@
 		AB0000010000000000000005 /* CoreStorage in Frameworks */ = {isa = PBXBuildFile; productRef = AB0000010000000000001005 /* CoreStorage */; };
 		AB0000010000000000000006 /* DesignSystem in Frameworks */ = {isa = PBXBuildFile; productRef = AB0000010000000000001006 /* DesignSystem */; };
 		AB0000010000000000000007 /* CoreStreaming in Frameworks */ = {isa = PBXBuildFile; productRef = AB0000010000000000001007 /* CoreStreaming */; };
+		D23E0D542FBB6FA400526BEF /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = D23E0D532FBB6FA400526BEF /* AppIcon.icon */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		D23E0D532FBB6FA400526BEF /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		D2898CB22FB9961F005174CF /* MovieBox.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MovieBox.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -51,6 +53,7 @@
 			children = (
 				D2898CB42FB9961F005174CF /* MovieBox */,
 				D2898CB32FB9961F005174CF /* Products */,
+				D23E0D532FBB6FA400526BEF /* AppIcon.icon */,
 			);
 			sourceTree = "<group>";
 		};
@@ -142,6 +145,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D23E0D542FBB6FA400526BEF /* AppIcon.icon in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -281,6 +285,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CODE_SIGN_ENTITLEMENTS = MovieBox/MovieBox.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
@@ -313,6 +318,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CODE_SIGN_ENTITLEMENTS = MovieBox/MovieBox.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;

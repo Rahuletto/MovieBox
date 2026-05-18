@@ -49,7 +49,7 @@ public enum UTMetadataFetcher {
         trackers: [String],
         peerId: String
     ) async -> [PeerInfo] {
-        print("[discoverPeers] InfoHash: \(infoHash), starting parallel discovery on \(trackers.count) trackers")
+        TorrentLog.debug("[discoverPeers] InfoHash: \(infoHash), \(trackers.count) trackers")
 
         return await withTaskGroup(of: [PeerInfo].self) { group in
             let udp = UDPTrackerClient()
@@ -68,10 +68,10 @@ public enum UTMetadataFetcher {
                                 event: .started,
                                 numWant: 80
                             )
-                            print("[discoverPeers] UDP tracker \(tracker) returned \(response.peers.count) peers")
+                            TorrentLog.debug("[discoverPeers] UDP \(tracker): \(response.peers.count) peers")
                             return response.peers
                         } catch {
-                            print("[discoverPeers] UDP tracker \(tracker) failed: \(error)")
+                            TorrentLog.debug("[discoverPeers] UDP \(tracker) failed: \(error)")
                             return []
                         }
                     } else if tracker.hasPrefix("http") {
@@ -85,10 +85,10 @@ public enum UTMetadataFetcher {
                                 event: .started,
                                 numWant: 80
                             )
-                            print("[discoverPeers] HTTP tracker \(tracker) returned \(response.peers.count) peers")
+                            TorrentLog.debug("[discoverPeers] HTTP \(tracker): \(response.peers.count) peers")
                             return response.peers
                         } catch {
-                            print("[discoverPeers] HTTP tracker \(tracker) failed: \(error)")
+                            TorrentLog.debug("[discoverPeers] HTTP \(tracker) failed: \(error)")
                             return []
                         }
                     }
@@ -106,7 +106,7 @@ public enum UTMetadataFetcher {
                     }
                 }
             }
-            print("[discoverPeers] Parallel discovery completed. Total unique peers found: \(allPeers.count)")
+            TorrentLog.debug("[discoverPeers] Done — \(allPeers.count) unique peers")
             return allPeers
         }
     }

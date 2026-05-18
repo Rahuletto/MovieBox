@@ -27,7 +27,7 @@ struct TorrentSection: View {
     @State private var busyTorrentID: UUID?
     @State private var cardErrors: [UUID: String] = [:]
     @State private var errorDismissTasks: [UUID: Task<Void, Never>] = [:]
-    @State private var streamSession: StreamSession?
+    @State private var streamSession: TorrentStreamSession?
     @State private var playbackCoordinator: TorrentPlaybackCoordinator?
     @State private var downloadWatchTask: Task<Void, Never>?
     @State private var visibleCardModels: [TorrentCardModel] = []
@@ -201,41 +201,39 @@ struct TorrentSection: View {
 
         let coordinator = TorrentPlaybackCoordinator(orchestrator: orchestrator)
         playbackCoordinator = coordinator
-        let session = coordinator.beginStream(torrent: torrent)
-        streamSession = session
 
-        Task {
-            await session.waitUntilSettled(timeout: 120)
+        Task { @MainActor in
+            let session = await coordinator.startSession(for: torrent)
+            streamSession = session
+            await session.waitForPlayback(timeout: 180)
 
-            await MainActor.run {
-                withAnimation(MovieBoxMotion.player) {
-                    busyTorrentID = nil
-                }
+            withAnimation(MovieBoxMotion.player) {
+                busyTorrentID = nil
+            }
 
-                if case .failed(let message) = session.state {
-                    presentError(message, for: torrent.id)
-                    return
-                }
+            if case .failed(let message) = session.state {
+                presentError(message, for: torrent.id)
+                return
+            }
 
-                guard case .ready = session.state else {
-                    presentError("Stream did not become ready.", for: torrent.id)
-                    return
-                }
+            guard case .ready = session.state else {
+                presentError("Stream did not become ready.", for: torrent.id)
+                return
+            }
 
-                do {
-                    try coordinator.finishPlayback(
-                        torrent: torrent,
-                        allTorrents: torrents,
-                        session: session,
-                        playerState: playerState,
-                        movieId: movie.id,
-                        subtitleURL: subtitleURL,
-                        subtitleAppearance: subtitleAppearance,
-                        subtitleFontSize: subtitleFontSize
-                    )
-                } catch {
-                    presentError(error.localizedDescription, for: torrent.id)
-                }
+            do {
+                try coordinator.finishPlayback(
+                    torrent: torrent,
+                    allTorrents: torrents,
+                    session: session,
+                    playerState: playerState,
+                    movieId: movie.id,
+                    subtitleURL: subtitleURL,
+                    subtitleAppearance: subtitleAppearance,
+                    subtitleFontSize: subtitleFontSize
+                )
+            } catch {
+                presentError(error.localizedDescription, for: torrent.id)
             }
         }
     }

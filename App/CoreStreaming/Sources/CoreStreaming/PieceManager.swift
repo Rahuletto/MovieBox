@@ -14,7 +14,6 @@ public actor PieceManager {
     private var downloadedPieces: Set<UInt32> = []
     private var pendingRequests: Set<BlockRequest> = []
     private var pieceBuffers: [UInt32: Data] = [:]
-    /// Tracks which block offsets within a piece have been written (handles duplicate deliveries).
     private var receivedBlockOffsets: [UInt32: Set<UInt32>] = [:]
 
     public init(
@@ -38,30 +37,24 @@ public actor PieceManager {
     }
 
     public func getNextRequest(peerBitfield: Data = Data()) -> BlockRequest? {
-        for pieceIndex in streamingOrder() {
-            guard !downloadedPieces.contains(pieceIndex) else { continue }
+        guard let pieceIndex = earliestIncompletePiece(peerBitfield: peerBitfield) else { return nil }
 
-            if !peerBitfield.isEmpty, !peerHasPiece(pieceIndex, in: peerBitfield) {
+        let pieceSize = pieceSize(for: pieceIndex)
+        let blockCount = Int((pieceSize + Int64(blockSize) - 1) / Int64(blockSize))
+
+        for blockIndex in 0..<blockCount {
+            let offset = UInt32(blockIndex) * blockSize
+            if receivedBlockOffsets[pieceIndex]?.contains(offset) == true {
                 continue
             }
 
-            let pieceSize = pieceSize(for: pieceIndex)
-            let blockCount = Int((pieceSize + Int64(blockSize) - 1) / Int64(blockSize))
+            let length = min(blockSize, UInt32(pieceSize) - offset)
+            let request = BlockRequest(pieceIndex: pieceIndex, offset: offset, length: length)
 
-            for blockIndex in 0..<blockCount {
-                let offset = UInt32(blockIndex) * blockSize
-                if receivedBlockOffsets[pieceIndex]?.contains(offset) == true {
-                    continue
-                }
+            guard !pendingRequests.contains(request) else { continue }
 
-                let length = min(blockSize, UInt32(pieceSize) - offset)
-                let request = BlockRequest(pieceIndex: pieceIndex, offset: offset, length: length)
-
-                guard !pendingRequests.contains(request) else { continue }
-
-                pendingRequests.insert(request)
-                return request
-            }
+            pendingRequests.insert(request)
+            return request
         }
 
         return nil
@@ -120,8 +113,22 @@ public actor PieceManager {
         downloadedPieces.count
     }
 
-    public func getPieceData(_ pieceIndex: UInt32) -> Data? {
-        pieceBuffers[pieceIndex]
+    public func takePieceData(_ pieceIndex: UInt32) -> Data? {
+        defer { pieceBuffers.removeValue(forKey: pieceIndex) }
+        return pieceBuffers[pieceIndex]
+    }
+
+    /// Lowest-index incomplete piece — fills the file from the start so playback can begin.
+    private func earliestIncompletePiece(peerBitfield: Data) -> UInt32? {
+        for i in 0..<pieceCount {
+            let index = UInt32(i)
+            guard !downloadedPieces.contains(index) else { continue }
+            if !peerBitfield.isEmpty, !peerHasPiece(index, in: peerBitfield) {
+                continue
+            }
+            return index
+        }
+        return nil
     }
 
     private func isPieceFullyReceived(pieceIndex: UInt32, expectedSize: Int) -> Bool {
@@ -140,37 +147,6 @@ public actor PieceManager {
         pieceBuffers[pieceIndex] = nil
         receivedBlockOffsets[pieceIndex] = nil
         pendingRequests = pendingRequests.filter { $0.pieceIndex != pieceIndex }
-    }
-
-    private func streamingOrder() -> [UInt32] {
-        var order: [UInt32] = []
-        for i in 0..<pieceCount {
-            let index = UInt32(i)
-            if !downloadedPieces.contains(index) {
-                order.append(index)
-            }
-        }
-
-        return order.sorted { streamingPriority(for: $0) > streamingPriority(for: $1) }
-    }
-
-    private func streamingPriority(for pieceIndex: UInt32) -> Int {
-        let streamStart = UInt32(streamFirstPiece)
-        let headWindow = 24
-
-        if pieceIndex >= streamStart && pieceIndex < streamStart + UInt32(headWindow) {
-            return 2000 - Int(pieceIndex - streamStart)
-        }
-
-        // MP4/MOV often store the `moov` atom in the last ~1% of the file.
-        if pieceIndex == UInt32(pieceCount - 1) {
-            return 800
-        }
-        if pieceCount > 2, pieceIndex == UInt32(pieceCount - 2) {
-            return 400
-        }
-
-        return 0
     }
 
     private func pieceSize(for pieceIndex: UInt32) -> Int64 {
@@ -201,11 +177,6 @@ public actor PieceManager {
         downloadedPieces.insert(pieceIndex)
         receivedBlockOffsets.removeValue(forKey: pieceIndex)
         return true
-    }
-
-    public func takePieceData(_ pieceIndex: UInt32) -> Data? {
-        defer { pieceBuffers.removeValue(forKey: pieceIndex) }
-        return pieceBuffers[pieceIndex]
     }
 }
 

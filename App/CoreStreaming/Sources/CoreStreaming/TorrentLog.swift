@@ -1,6 +1,6 @@
 import Foundation
 
-/// Hot-path logging is disabled by default — enable for debugging P2P issues.
+/// BitTorrent / P2P logging. Disabled by default — set `isVerbose = true` when debugging peers.
 enum TorrentLog {
     static let isVerbose = false
 
@@ -10,6 +10,12 @@ enum TorrentLog {
     }
 
     static func info(_ message: String) {
+        guard isVerbose else { return }
+        NSLog(message)
+    }
+
+    /// Real failures only (I/O, listener, hash verification after retries).
+    static func warn(_ message: String) {
         NSLog(message)
     }
 }

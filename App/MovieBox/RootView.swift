@@ -578,7 +578,7 @@ struct DownloadsView: View {
     @State private var showsTorrentFileImporter = false
     @State private var errorMessage: String? = nil
     @State private var isStreaming = false
-    @State private var activeStreamSession: StreamSession? = nil
+    @State private var activeStreamSession: TorrentStreamSession? = nil
     @State private var streamingOrchestrator = StreamingOrchestrator()
 
     var body: some View {
@@ -770,46 +770,41 @@ struct DownloadsView: View {
 
             isStreaming = true
             let coordinator = TorrentPlaybackCoordinator(orchestrator: streamingOrchestrator)
-            let session = coordinator.beginStream(torrent: torrent)
-            activeStreamSession = session
 
-            Task {
-                await session.waitUntilSettled(timeout: 120)
+            Task { @MainActor in
+                let session = await coordinator.startSession(for: torrent)
+                activeStreamSession = session
+
+                await session.waitForPlayback(timeout: 180)
 
                 if case .failed(let err) = session.state {
-                    await MainActor.run {
-                        isStreaming = false
-                        errorMessage = "Streaming failed: \(err)"
-                    }
+                    isStreaming = false
+                    errorMessage = "Streaming failed: \(err)"
                     return
                 }
 
                 guard case .ready = session.state else {
-                    await MainActor.run {
-                        isStreaming = false
-                        errorMessage = "Streaming timed out. Try another release."
-                    }
+                    isStreaming = false
+                    errorMessage = "Streaming timed out. Try another release."
                     return
                 }
 
-                await MainActor.run {
-                    isStreaming = false
-                    do {
-                        try coordinator.finishPlayback(
-                            torrent: torrent,
-                            allTorrents: [torrent],
-                            session: session,
-                            playerState: playerState,
-                            movieId: 0,
-                            subtitleURL: nil,
-                            subtitleAppearance: playbackSettings.appearance,
-                            subtitleFontSize: playbackSettings.fontSize
-                        )
-                        magnetInput = ""
-                        showsMagnetSheet = false
-                    } catch {
-                        errorMessage = error.localizedDescription
-                    }
+                isStreaming = false
+                do {
+                    try coordinator.finishPlayback(
+                        torrent: torrent,
+                        allTorrents: [torrent],
+                        session: session,
+                        playerState: playerState,
+                        movieId: 0,
+                        subtitleURL: nil,
+                        subtitleAppearance: playbackSettings.appearance,
+                        subtitleFontSize: playbackSettings.fontSize
+                    )
+                    magnetInput = ""
+                    showsMagnetSheet = false
+                } catch {
+                    errorMessage = error.localizedDescription
                 }
             }
         }

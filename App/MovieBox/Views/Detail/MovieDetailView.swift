@@ -26,9 +26,11 @@ struct MovieDetailView: View {
     @State private var subtitleFileURL: URL?
     @State private var showTrailer = false
     @State private var trailerURL: URL?
-    @State private var activeStreamSession: StreamSession?
+    @State private var activeStreamSession: TorrentStreamSession?
     @State private var torrentCoordinator: TorrentPlaybackCoordinator?
     @State private var isPreparingStream = false
+    /// Cancels an in-flight `playBestTorrent` attempt when the user starts another play.
+    @State private var prepareStreamTask: Task<Void, Never>?
     @State private var tvSeasons: [TVSeasonSummary] = []
     @State private var tvEpisodes: [TVEpisode] = []
     @State private var selectedTVSeason = 1
@@ -524,10 +526,11 @@ struct MovieDetailView: View {
         }
 
         isPreparingStream = true
+        prepareStreamTask?.cancel()
         let coordinator = TorrentPlaybackCoordinator(orchestrator: orchestrator)
         torrentCoordinator = coordinator
 
-        Task {
+        prepareStreamTask = Task {
             if subtitleFileURL == nil, let preferred = subtitles.first {
                 await downloadSubtitleAsync(preferred)
             }
@@ -535,10 +538,10 @@ struct MovieDetailView: View {
             var lastError: String?
             for torrent in ordered.prefix(8) {
                 await coordinator.cancel()
-                let session = coordinator.beginStream(torrent: torrent)
-                activeStreamSession = session
+                let session = await coordinator.startSession(for: torrent)
+                await MainActor.run { activeStreamSession = session }
 
-                await session.waitUntilSettled(timeout: 120)
+                await session.waitForPlayback(timeout: 180)
 
                 if case .failed(let err) = session.state {
                     lastError = err
@@ -1006,7 +1009,7 @@ private struct EdgeInsets {
 }
 
 private struct GlassStreamOverlay: View {
-    @ObservedObject var session: StreamSession
+    @ObservedObject var session: TorrentStreamSession
     let onCancel: () -> Void
 
     var body: some View {

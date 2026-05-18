@@ -229,7 +229,7 @@ public final class KademliaDHT {
             responseArgs["nodes"] = .string(nodesData)
         case "announce_peer":
             if let infoHashData = args["info_hash"]?.string {
-                NSLog("DHT announce for \(infoHashData)")
+                TorrentLog.debug("DHT announce for \(infoHashData)")
             }
         default:
             break

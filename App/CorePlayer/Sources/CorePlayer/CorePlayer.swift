@@ -184,6 +184,8 @@ public final class PlayerState {
         }
         thumbnailService = ThumbnailService(asset: asset)
 
+        PlaybackLog.log("load url=\(url.absoluteString) title=\(title)")
+
         let playerItem = AVPlayerItem(asset: asset)
         if player.currentItem == nil {
             player = AVPlayer(playerItem: playerItem)
@@ -207,12 +209,14 @@ public final class PlayerState {
         }
 
         if isPresented && isPlayerRevealed {
+            PlaybackLog.log("play() immediately (player already revealed)")
             player.play()
             player.rate = Float(playbackRate)
             isPlaying = true
             return
         }
 
+        PlaybackLog.log("revealPlayerWithTransition → will play after fade")
         revealPlayerWithTransition()
     }
 
@@ -677,14 +681,22 @@ public final class PlayerState {
         itemStatusObserver = currentItem.observe(\.status, options: [.new]) { [weak self] item, _ in
             Task { @MainActor in
                 guard let self, item === self.observedPlayerItem else { return }
-                if item.status == .failed {
-                    self.errorMessage = item.error?.localizedDescription ?? "Playback failed. Please try a different source or format."
-                } else if item.status == .readyToPlay {
+                switch item.status {
+                case .failed:
+                    let message = item.error?.localizedDescription ?? "Playback failed. Please try a different source or format."
+                    PlaybackLog.log("AVPlayerItem failed: \(message)")
+                    self.errorMessage = message
+                case .readyToPlay:
                     let readyDuration = item.asset.duration.seconds
                     if readyDuration.isFinite, readyDuration > 0 {
                         self.duration = readyDuration
                     }
+                    PlaybackLog.log("AVPlayerItem readyToPlay duration=\(self.duration)s")
                     self.errorMessage = nil
+                case .unknown:
+                    PlaybackLog.log("AVPlayerItem status=unknown (buffering)")
+                @unknown default:
+                    break
                 }
             }
         }
@@ -712,7 +724,16 @@ public final class PlayerState {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] status in
                 Task { @MainActor in
-                    self?.isPlaying = (status == .playing)
+                    guard let self else { return }
+                    let playing = status == .playing
+                    if self.isPlaying != playing {
+                        PlaybackLog.log("timeControlStatus=\(status) isPlaying=\(playing)")
+                    }
+                    self.isPlaying = playing
+                    if status == .waitingToPlayAtSpecifiedRate,
+                       let reason = self.player.reasonForWaitingToPlay {
+                        PlaybackLog.log("waitingToPlay reason=\(reason.rawValue)")
+                    }
                 }
             }
             .store(in: &cancellables)

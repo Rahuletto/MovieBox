@@ -6,7 +6,7 @@ import Foundation
 @MainActor
 final class TorrentPlaybackCoordinator {
     private let orchestrator: StreamingOrchestrator
-    private(set) var session: StreamSession?
+    private(set) var session: TorrentStreamSession?
     private(set) var torrents: [TorrentResult] = []
 
     init(orchestrator: StreamingOrchestrator) {
@@ -30,13 +30,13 @@ final class TorrentPlaybackCoordinator {
         }
     }
 
-    /// Creates a stream session and starts the BitTorrent engine for `torrent`.
-    func beginStream(torrent: TorrentResult) -> StreamSession {
-        let streamSession = StreamSession(orchestrator: orchestrator)
+    /// Creates a session and runs `start` to completion (metadata + HTTP URL). Must be awaited before `waitForPlayback` so startup is not starved by the waiter loop on the same main actor.
+    func startSession(for torrent: TorrentResult) async -> TorrentStreamSession {
+        let streamSession = TorrentStreamSession(orchestrator: orchestrator)
         session = streamSession
-        Task {
-            await streamSession.start(torrent: torrent)
-        }
+        PlaybackLog.log("startSession — \(torrent.title)")
+        await streamSession.start(torrent: torrent)
+        PlaybackLog.log("startSession finished — \(streamSession.stateLabel)")
         return streamSession
     }
 
@@ -44,7 +44,7 @@ final class TorrentPlaybackCoordinator {
     func finishPlayback(
         torrent: TorrentResult,
         allTorrents: [TorrentResult],
-        session: StreamSession,
+        session: TorrentStreamSession,
         playerState: PlayerState,
         movieId: Int,
         subtitleURL: URL?,
@@ -56,11 +56,14 @@ final class TorrentPlaybackCoordinator {
 
         guard case .ready(let url) = session.state else {
             if case .failed(let message) = session.state {
+                PlaybackLog.log("finishPlayback aborted — stream failed: \(message)")
                 throw TorrentPlaybackError.streamingFailed(message)
             }
+            PlaybackLog.log("finishPlayback aborted — stream not ready (state=\(session.state))")
             throw TorrentPlaybackError.streamingFailed("Stream did not become ready.")
         }
 
+        PlaybackLog.log("finishPlayback → loading player url=\(url.absoluteString)")
         playerState.load(
             url: url,
             title: torrent.title,
@@ -84,7 +87,7 @@ final class TorrentPlaybackCoordinator {
         playerState.isSwitchingSource = true
         await session?.cancel()
 
-        let streamSession = StreamSession(orchestrator: orchestrator)
+        let streamSession = TorrentStreamSession(orchestrator: orchestrator)
         session = streamSession
         await streamSession.start(torrent: torrent)
 

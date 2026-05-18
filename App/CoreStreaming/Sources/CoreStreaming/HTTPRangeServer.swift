@@ -18,6 +18,14 @@ public final class HTTPRangeServer {
 
     public init() {}
 
+    /// Configures stream byte mapping without starting the TCP listener (unit tests).
+    func configureForTests(pieceStore: PieceStore, streamTarget: TorrentStreamTarget) {
+        self.pieceStore = pieceStore
+        streamByteOffset = streamTarget.byteOffset
+        streamByteLength = streamTarget.byteLength
+        contentType = streamTarget.contentType
+    }
+
     public func start(
         pieceStore: PieceStore,
         streamTarget: TorrentStreamTarget,
@@ -44,7 +52,7 @@ public final class HTTPRangeServer {
                     self?.isRunning = true
                 case .failed(let error):
                     self?.isRunning = false
-                    TorrentLog.info("[HTTPRangeServer] Listener failed: \(error)")
+                    TorrentLog.warn("[HTTPRangeServer] Listener failed: \(error)")
                 case .cancelled:
                     self?.isRunning = false
                 default:
@@ -146,7 +154,7 @@ public final class HTTPRangeServer {
         }
     }
 
-    private func handleRequest(_ request: String, pieceStore: PieceStore) async -> HTTPResponse {
+    func handleRequest(_ request: String, pieceStore: PieceStore) async -> HTTPResponse {
         let lines = request.components(separatedBy: "\r\n")
         guard let requestLine = lines.first else {
             return HTTPResponse(status: 400, body: "Bad Request")
@@ -192,13 +200,17 @@ public final class HTTPRangeServer {
                         contentRange = "bytes \(mediaStart)-\(servedEnd)/\(mediaLength)"
                         contentLength = Int64(bodyData.count)
                     } catch {
-                        TorrentLog.info("[HTTPRangeServer] Range read failed: \(error.localizedDescription)")
+                        TorrentLog.warn("[HTTPRangeServer] Range read failed: \(error.localizedDescription)")
                         return HTTPResponse(status: 500, body: "Internal Server Error")
                     }
                 }
             }
         } else {
-            let length = min(512 * 1024, Int(mediaLength))
+            let headAvailable = await pieceStore.streamHeadContiguousBytes()
+            let length = min(512 * 1024, Int(mediaLength), Int(headAvailable))
+            guard length > 0 else {
+                return HTTPResponse(status: 503, body: "Buffering")
+            }
             do {
                 bodyData = try await pieceStore.read(offset: streamByteOffset, length: length)
                 contentLength = Int64(bodyData.count)
@@ -213,14 +225,13 @@ public final class HTTPRangeServer {
             "Content-Length: \(contentLength)",
             "Accept-Ranges: bytes",
             "Connection: close",
-            ""
         ]
 
         if let contentRange {
-            headers.insert("Content-Range: \(contentRange)", at: headers.count - 1)
+            headers.append("Content-Range: \(contentRange)")
         }
 
-        let headerString = headers.joined(separator: "\r\n")
+        let headerString = headers.joined(separator: "\r\n") + "\r\n\r\n"
         var response = Data()
         response.append(headerString.data(using: .utf8)!)
         response.append(bodyData)
@@ -235,7 +246,7 @@ public final class HTTPRangeServer {
     }
 }
 
-private struct HTTPResponse {
+struct HTTPResponse {
     let status: Int
     let data: Data
 

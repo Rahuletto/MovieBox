@@ -4,7 +4,7 @@ import CoreTorrent
 // MARK: - Streaming Orchestrator
 
 @MainActor
-public final class StreamingOrchestrator {
+public final class StreamingOrchestrator: @unchecked Sendable {
     private var pieceStore: PieceStore?
     private var pieceManager: PieceManager?
     private var rangeServer = HTTPRangeServer()
@@ -51,6 +51,7 @@ public final class StreamingOrchestrator {
             pieceSize: metadata.pieceLength,
             totalSize: metadata.totalSize,
             streamFirstPiece: target.firstPieceIndex,
+            streamMediaByteOffset: target.byteOffset,
             storageDirectory: FileManager.default.temporaryDirectory.appendingPathComponent("moviebox_streams")
         )
 
@@ -99,6 +100,10 @@ public final class StreamingOrchestrator {
 
     public func contiguousBytesFromStreamStart() async -> Int64 {
         await pieceStore?.contiguousBytesFromStreamStart() ?? 0
+    }
+
+    public func streamHeadContiguousBytes() async -> Int64 {
+        await pieceStore?.streamHeadContiguousBytes() ?? 0
     }
 
     public func downloadSpeed() async -> Double {
@@ -353,7 +358,9 @@ public final class TorrentEngine {
     }
 
     private func handlePieceReceived(pieceIndex: UInt32, offset: UInt32, block: Data) async {
-        let pieceComplete = await pieceManager.markBlockReceived(
+        _ = await PieceIngestion.apply(
+            pieceStore: pieceStore,
+            pieceManager: pieceManager,
             pieceIndex: pieceIndex,
             offset: offset,
             block: block
@@ -361,15 +368,6 @@ public final class TorrentEngine {
 
         bytesDownloaded += Int64(block.count)
         recordBytesSample()
-
-        if pieceComplete, let pieceData = await pieceManager.takePieceData(pieceIndex) {
-            do {
-                try await pieceStore.write(pieceIndex: Int(pieceIndex), data: pieceData)
-            } catch {
-                TorrentLog.info("[TorrentEngine] Failed to write piece \(pieceIndex): \(error)")
-            }
-        }
-
         await publishProgress()
     }
 
