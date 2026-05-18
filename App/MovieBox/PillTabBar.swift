@@ -1,8 +1,10 @@
 import DesignSystem
+import SwiftData
 import SwiftUI
 
 struct PillTabBar: View {
     @Environment(AppRouter.self) private var router
+    @Environment(\.modelContext) private var modelContext
     @Namespace private var animationNamespace
 
     @State private var isMenuExpanded = false
@@ -188,7 +190,10 @@ struct PillTabBar: View {
                 showSearchContents = true
             }
         }
-        .onChange(of: router.selectedRoute) { _, newValue in
+        .onChange(of: router.selectedRoute) { oldValue, newValue in
+            if oldValue == .search, newValue != .search {
+                commitSearchQueryIfNeeded()
+            }
             if newValue == .search {
                 isMenuExpanded = false
                 withAnimation(.easeIn(duration: 0.12).delay(0.12)) {
@@ -201,6 +206,11 @@ struct PillTabBar: View {
             } else {
                 showSearchContents = false
                 isSearchFieldFocused = false
+            }
+        }
+        .onChange(of: isSearchFieldFocused) { wasFocused, isFocused in
+            if wasFocused, !isFocused {
+                commitSearchQueryIfNeeded()
             }
         }
         .onChange(of: isMenuExpanded) { _, newValue in
@@ -278,5 +288,9 @@ struct PillTabBar: View {
 
     private var currentTopLevelRoute: AppRouter.Route? {
         router.selectedRoute.isTopLevelTab ? router.selectedRoute : nil
+    }
+
+    private func commitSearchQueryIfNeeded() {
+        SearchHistoryStore.save(query: router.searchQuery, in: modelContext)
     }
 }

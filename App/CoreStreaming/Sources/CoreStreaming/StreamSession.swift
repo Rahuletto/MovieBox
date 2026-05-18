@@ -28,14 +28,17 @@ public final class StreamSession: ObservableObject {
     @Published public private(set) var downloadSpeed: Double = 0
     @Published public private(set) var peerCount: Int = 0
     @Published public private(set) var bufferedPieces: Int = 0
+    @Published public private(set) var bufferedBytes: Int64 = 0
 
     private let orchestrator: StreamingOrchestrator
     private var monitorTask: Task<Void, Never>?
     private var streamURL: URL?
-    private var isReady = false
 
-    private static let bufferThresholdPieces = 2
-    private static let bufferThresholdSeconds = 5.0
+    /// Progressive play: one verified piece from the video start is enough (~256KB–4MB).
+    /// The rest of the file continues downloading while AVPlayer reads ahead via HTTP ranges.
+    private static let minimumBufferedPieces = 1
+    /// Fallback when piece size is tiny — ~384KB covers most container headers.
+    private static let minimumBufferedBytes: Int64 = 384 * 1024
 
     public init(orchestrator: StreamingOrchestrator) {
         self.orchestrator = orchestrator
@@ -43,6 +46,10 @@ public final class StreamSession: ObservableObject {
 
     public func start(torrent: TorrentResult) async {
         state = .preparing
+        streamURL = nil
+        bufferedPieces = 0
+        bufferedBytes = 0
+
         do {
             streamURL = try await TaskTimeout.withTimeout(seconds: 50) { [self] in
                 try await self.orchestrator.startStream(torrent: torrent) { [weak self] progress, speed, peers in
@@ -50,28 +57,14 @@ public final class StreamSession: ObservableObject {
                         guard let self else { return }
                         self.downloadSpeed = speed
                         self.peerCount = peers
-                        self.bufferedPieces = await self.orchestrator.contiguousPiecesFromStart()
-
-                        let meetsThreshold = self.bufferedPieces >= Self.bufferThresholdPieces
-                        if !self.isReady && meetsThreshold {
-                            self.isReady = true
-                            if let url = self.streamURL {
-                                self.state = .ready(streamURL: url)
-                            }
-                        } else if !self.isReady {
-                            self.state = .buffering(progress: progress)
-                        }
+                        await self.refreshBufferMetrics()
+                        self.updatePlaybackReadiness(progress: progress)
                     }
                 }
             }
 
-            if let url = streamURL {
-                let initialBuffered = await orchestrator.contiguousPiecesFromStart()
-                if initialBuffered >= Self.bufferThresholdPieces {
-                    isReady = true
-                    state = .ready(streamURL: url)
-                }
-            }
+            await refreshBufferMetrics()
+            updatePlaybackReadiness(progress: await orchestrator.progress())
             startMonitoring()
             startBufferingWatchdog()
         } catch is TaskTimeoutError {
@@ -83,10 +76,16 @@ public final class StreamSession: ObservableObject {
         }
     }
 
+    private func refreshBufferMetrics() async {
+        bufferedPieces = await orchestrator.contiguousPiecesFromStart()
+        bufferedBytes = await orchestrator.contiguousBytesFromStreamStart()
+    }
+
     private func startBufferingWatchdog() {
         Task {
-            try? await Task.sleep(for: .seconds(75))
-            guard !Task.isCancelled, !isReady else { return }
+            try? await Task.sleep(for: .seconds(90))
+            if case .ready = state { return }
+            guard !Task.isCancelled else { return }
             switch state {
             case .preparing, .buffering:
                 await orchestrator.stop()
@@ -120,16 +119,42 @@ public final class StreamSession: ObservableObject {
                 let progress = await orchestrator.progress()
                 let speed = await orchestrator.downloadSpeed()
                 let peers = await orchestrator.peerCount()
-                let contiguous = await orchestrator.contiguousPiecesFromStart()
 
                 await MainActor.run {
                     self.downloadSpeed = speed
                     self.peerCount = peers
-                    self.bufferedPieces = contiguous
+                }
+                await refreshBufferMetrics()
+                await MainActor.run {
+                    self.updatePlaybackReadiness(progress: progress)
                 }
 
-                try? await Task.sleep(for: .seconds(1))
+                try? await Task.sleep(for: .milliseconds(400))
             }
+        }
+    }
+
+    /// Opens the player once the local HTTP URL is up and the head of the file is on disk.
+    /// Does not wait for the full torrent — AVPlayer fetches ranges on demand.
+    private func updatePlaybackReadiness(progress: Double) {
+        guard let url = streamURL else {
+            state = .preparing
+            return
+        }
+
+        let hasHeadChunk = bufferedPieces >= Self.minimumBufferedPieces
+            || bufferedBytes >= Self.minimumBufferedBytes
+
+        if hasHeadChunk {
+            if case .ready = state {} else {
+                TorrentLog.info(
+                    "[StreamSession] ▶️ Progressive play ready — \(bufferedPieces) piece(s), \(bufferedBytes) bytes buffered"
+                )
+                state = .ready(streamURL: url)
+            }
+        } else {
+            let hint = max(progress, bufferedBytes > 0 ? 0.05 : 0.01)
+            state = .buffering(progress: hint)
         }
     }
 }

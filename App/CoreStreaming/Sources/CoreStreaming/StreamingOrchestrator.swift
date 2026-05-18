@@ -10,9 +10,9 @@ public final class StreamingOrchestrator {
     private var rangeServer = HTTPRangeServer()
     private var torrentEngine: TorrentEngine?
     private var metadata: TorrentMetadata?
+    private var streamTarget: TorrentStreamTarget?
     private var peerId: String = ""
     private var dht: KademliaDHT?
-    private var udpTrackerClient = UDPTrackerClient()
 
     public init() {}
 
@@ -41,10 +41,16 @@ public final class StreamingOrchestrator {
             throw StreamingOrchestratorError.failedToInitialize
         }
 
+        let target = TorrentStreamTarget.selectPrimary(from: metadata)
+        streamTarget = target
+        TorrentLog.info("[Streaming] Target file: \(target.file.relativePath) (\(target.byteLength) bytes, piece \(target.firstPieceIndex)+)")
+
         pieceStore = try await PieceStore(
             infoHash: metadata.infoHash,
             pieceCount: metadata.pieceCount,
             pieceSize: metadata.pieceLength,
+            totalSize: metadata.totalSize,
+            streamFirstPiece: target.firstPieceIndex,
             storageDirectory: FileManager.default.temporaryDirectory.appendingPathComponent("moviebox_streams")
         )
 
@@ -52,7 +58,8 @@ public final class StreamingOrchestrator {
             pieceCount: metadata.pieceCount,
             pieceLength: metadata.pieceLength,
             totalSize: metadata.totalSize,
-            piecesHash: metadata.pieces
+            piecesHash: metadata.pieces,
+            streamFirstPiece: target.firstPieceIndex
         )
 
         torrentEngine = TorrentEngine(
@@ -65,7 +72,7 @@ public final class StreamingOrchestrator {
 
         await torrentEngine?.start()
 
-        let streamURL = try await rangeServer.start(pieceStore: pieceStore!)
+        let streamURL = try await rangeServer.start(pieceStore: pieceStore!, streamTarget: target)
         return streamURL
     }
 
@@ -77,6 +84,7 @@ public final class StreamingOrchestrator {
         pieceStore = nil
         pieceManager = nil
         metadata = nil
+        streamTarget = nil
         dht?.stop()
         dht = nil
     }
@@ -89,6 +97,10 @@ public final class StreamingOrchestrator {
         await pieceStore?.contiguousPiecesFromStart() ?? 0
     }
 
+    public func contiguousBytesFromStreamStart() async -> Int64 {
+        await pieceStore?.contiguousBytesFromStreamStart() ?? 0
+    }
+
     public func downloadSpeed() async -> Double {
         await torrentEngine?.downloadSpeed ?? 0
     }
@@ -96,7 +108,6 @@ public final class StreamingOrchestrator {
     public func peerCount() async -> Int {
         await torrentEngine?.activePeerCount ?? 0
     }
-
 }
 
 public enum StreamingOrchestratorError: Error, LocalizedError {
@@ -113,27 +124,34 @@ public enum StreamingOrchestratorError: Error, LocalizedError {
     }
 }
 
-// MARK: - Real Torrent Engine
+// MARK: - Torrent Engine
 
 @MainActor
 public final class TorrentEngine {
-    public var downloadSpeed: Double = 0
-    public var activePeerCount: Int = 0
+    public private(set) var downloadSpeed: Double = 0
+    public private(set) var activePeerCount: Int = 0
 
     private let metadata: TorrentMetadata
     private let pieceManager: PieceManager
     private let pieceStore: PieceStore
     private let peerId: String
     private let progressHandler: @Sendable (Double, Double, Int) -> Void
+
     private var trackerClient = TrackerClient()
     private var udpTrackerClient = UDPTrackerClient()
     private var dht: KademliaDHT?
     private var peerConnections: [PeerConnection] = []
+    private var connectedPeerKeys = Set<String>()
     private var isRunning = false
     private var announceTimer: Task<Void, Never>?
     private var statsTimer: Task<Void, Never>?
+    private var maintenanceTimer: Task<Void, Never>?
+
     private var bytesDownloaded: Int64 = 0
-    private var downloadStartTime: Date?
+    private var recentBytesSamples: [(date: Date, bytes: Int64)] = []
+
+    private let maxPeerConnections = 36
+    private let peersPerAnnounce = 20
 
     public init(
         metadata: TorrentMetadata,
@@ -152,13 +170,10 @@ public final class TorrentEngine {
     public func start() {
         guard !isRunning else { return }
         isRunning = true
-        downloadStartTime = Date.now
 
-        Task {
-            await announceToTrackers()
-        }
-
+        Task { await announceToTrackers() }
         startAnnounceTimer()
+        startMaintenanceTimer()
 
         statsTimer = Task {
             while !Task.isCancelled && isRunning {
@@ -172,6 +187,7 @@ public final class TorrentEngine {
         isRunning = false
         announceTimer?.cancel()
         statsTimer?.cancel()
+        maintenanceTimer?.cancel()
         dht?.stop()
         dht = nil
 
@@ -179,159 +195,124 @@ public final class TorrentEngine {
             peer.disconnect()
         }
         peerConnections.removeAll()
+        connectedPeerKeys.removeAll()
     }
 
     private func announceToTrackers() async {
-        let trackerList = metadata.trackers
-        NSLog("[TorrentEngine] 📣 Announcing to \(trackerList.count) trackers in parallel...")
+        let peers = await fetchPeersFromTrackers(event: .started)
+        await connectToPeers(peers)
+    }
+
+    private func fetchPeersFromTrackers(event: TrackerEvent) async -> [PeerInfo] {
+        TorrentLog.info("[TorrentEngine] Announcing to \(metadata.trackers.count) trackers...")
+        let eventCode = event.rawValue
 
         let peersFound = await withTaskGroup(of: [PeerInfo].self) { group in
-            for tracker in trackerList {
+            for tracker in metadata.trackers {
+                let trackerURL = tracker
                 group.addTask { [self] in
-                    if tracker.hasPrefix("udp://") {
-                        do {
-                            let response = try await udpTrackerClient.announce(
-                                trackerURL: tracker,
-                                infoHash: metadata.infoHash,
-                                peerId: peerId,
-                                port: 6881,
-                                downloaded: bytesDownloaded,
-                                left: metadata.totalSize - bytesDownloaded,
-                                event: .started
-                            )
-                            NSLog("[TorrentEngine] 🟢 UDP tracker announce succeeded: \(tracker) (found \(response.peers.count) peers)")
-                            return response.peers
-                        } catch {
-                            NSLog("[TorrentEngine] 🔴 UDP tracker failed: \(tracker) - \(error.localizedDescription)")
-                            return []
-                        }
-                    } else {
-                        do {
-                            let response = try await trackerClient.announce(
-                                trackerURL: tracker,
-                                infoHash: metadata.infoHash,
-                                peerId: peerId,
-                                port: 6881,
-                                downloaded: bytesDownloaded,
-                                left: metadata.totalSize - bytesDownloaded,
-                                event: .started
-                            )
-                            NSLog("[TorrentEngine] 🟢 HTTP tracker announce succeeded: \(tracker) (found \(response.peers.count) peers)")
-                            return response.peers
-                        } catch {
-                            NSLog("[TorrentEngine] 🔴 HTTP tracker failed: \(tracker) - \(error.localizedDescription)")
-                            return []
-                        }
+                    if trackerURL.hasPrefix("udp://") {
+                        guard let response = try? await udpTrackerClient.announce(
+                            trackerURL: trackerURL,
+                            infoHash: metadata.infoHash,
+                            peerId: peerId,
+                            port: 6881,
+                            downloaded: bytesDownloaded,
+                            left: metadata.totalSize - bytesDownloaded,
+                            event: TrackerEvent(rawValue: eventCode) ?? .empty
+                        ) else { return [] }
+                        return response.peers
                     }
+                    guard let response = try? await trackerClient.announce(
+                        trackerURL: trackerURL,
+                        infoHash: metadata.infoHash,
+                        peerId: peerId,
+                        port: 6881,
+                        downloaded: bytesDownloaded,
+                        left: metadata.totalSize - bytesDownloaded,
+                        event: TrackerEvent(rawValue: eventCode) ?? .empty
+                    ) else { return [] }
+                    return response.peers
                 }
             }
 
-            var mergedPeers: [PeerInfo] = []
+            var merged: [PeerInfo] = []
             var seen = Set<String>()
             for await peers in group {
                 for peer in peers {
-                    let key = "\(peer.ip):\(peer.port)"
+                    let key = peerKey(peer)
                     if seen.insert(key).inserted {
-                        mergedPeers.append(peer)
+                        merged.append(peer)
                     }
                 }
             }
-            return mergedPeers
+            return merged
         }
 
         var finalPeers = peersFound
-        NSLog("[TorrentEngine] 📊 Found \(finalPeers.count) unique peers from trackers.")
-
         if finalPeers.isEmpty {
-            NSLog("[TorrentEngine] ⚠️ No peers found from trackers, falling back to DHT...")
             await startDHT()
             let dhtPeers = await dht?.findPeers(infoHash: metadata.infoHash) ?? []
-            NSLog("[TorrentEngine] 📊 Found \(dhtPeers.count) peers from DHT.")
             for peer in dhtPeers {
-                let key = "\(peer.ip):\(peer.port)"
-                if !finalPeers.contains(where: { "\($0.ip):\($0.port)" == key }) {
+                let key = peerKey(peer)
+                if !connectedPeerKeys.contains(key), !finalPeers.contains(where: { peerKey($0) == key }) {
                     finalPeers.append(peer)
                 }
             }
         }
 
-        if !finalPeers.isEmpty {
-            NSLog("[TorrentEngine] 🌐 Initiating connection attempts to the first \(min(30, finalPeers.count)) peers...")
-            await connectToPeers(finalPeers)
-        } else {
-            NSLog("[TorrentEngine] ❌ No peers found from trackers or DHT. Waiting for announce retry...")
-        }
+        TorrentLog.info("[TorrentEngine] Found \(finalPeers.count) unique peers")
+        return finalPeers
     }
 
     private func startAnnounceTimer() {
         announceTimer = Task {
             while !Task.isCancelled && isRunning {
                 try? await Task.sleep(for: .seconds(60))
-                if isRunning {
-                    var newPeers: [PeerInfo] = []
+                guard isRunning else { return }
+                let peers = await fetchPeersFromTrackers(event: .empty)
+                await connectToPeers(peers)
+            }
+        }
+    }
 
-                    for tracker in metadata.trackers {
-                        if tracker.hasPrefix("udp://") {
-                            if let response = try? await udpTrackerClient.announce(
-                                trackerURL: tracker,
-                                infoHash: metadata.infoHash,
-                                peerId: peerId,
-                                port: 6881,
-                                downloaded: bytesDownloaded,
-                                left: metadata.totalSize - bytesDownloaded,
-                                event: .empty
-                            ) {
-                                newPeers.append(contentsOf: response.peers)
-                            }
-                        } else {
-                            if let response = try? await trackerClient.announce(
-                                trackerURL: tracker,
-                                infoHash: metadata.infoHash,
-                                peerId: peerId,
-                                port: 6881,
-                                downloaded: bytesDownloaded,
-                                left: metadata.totalSize - bytesDownloaded,
-                                event: .empty
-                            ) {
-                                newPeers.append(contentsOf: response.peers)
-                            }
-                        }
-                    }
-
-                    if newPeers.isEmpty, let dhtPeers = await dht?.findPeers(infoHash: metadata.infoHash) {
-                        newPeers.append(contentsOf: dhtPeers)
-                    }
-
-                    if !newPeers.isEmpty {
-                        await connectToPeers(newPeers)
-                    }
-                }
+    private func startMaintenanceTimer() {
+        maintenanceTimer = Task {
+            while !Task.isCancelled && isRunning {
+                try? await Task.sleep(for: .seconds(10))
+                guard isRunning else { return }
+                pruneDeadPeers()
+                await expireStalledRequests()
             }
         }
     }
 
     private func startDHT() async {
         guard dht == nil else { return }
-
         let dht = KademliaDHT()
         self.dht = dht
-
         do {
             try await dht.start(port: 6882)
-            NSLog("DHT started on port 6882")
             await dht.announce(infoHash: metadata.infoHash, port: 6881)
         } catch {
-            NSLog("DHT failed to start: \(error)")
             self.dht = nil
         }
     }
 
     private func connectToPeers(_ peers: [PeerInfo]) async {
-        for peerInfo in peers.prefix(30) {
+        pruneDeadPeers()
+
+        var connected = 0
+        for peerInfo in peers {
             guard isRunning else { return }
+            guard peerConnections.count < maxPeerConnections else { break }
+
+            let key = peerKey(peerInfo)
+            guard connectedPeerKeys.insert(key).inserted else { continue }
 
             let connection = PeerConnection(peerInfo: peerInfo, connectionPeerId: peerId)
             peerConnections.append(connection)
+            connected += 1
 
             Task {
                 await connection.connect(
@@ -343,6 +324,32 @@ public final class TorrentEngine {
                 )
             }
         }
+
+        if connected > 0 {
+            TorrentLog.debug("[TorrentEngine] Connecting to \(connected) new peers (\(peerConnections.count) total)")
+        }
+    }
+
+    private func pruneDeadPeers() {
+        let before = peerConnections.count
+        peerConnections.removeAll { peer in
+            switch peer.state {
+            case .disconnected, .error:
+                connectedPeerKeys.remove(peerKey(peer.peerInfo))
+                return true
+            default:
+                return false
+            }
+        }
+        if peerConnections.count != before {
+            TorrentLog.debug("[TorrentEngine] Pruned \(before - peerConnections.count) dead peers")
+        }
+    }
+
+    private func expireStalledRequests() async {
+        for peer in peerConnections {
+            await peer.expireStalledRequests()
+        }
     }
 
     private func handlePieceReceived(pieceIndex: UInt32, offset: UInt32, block: Data) async {
@@ -353,46 +360,48 @@ public final class TorrentEngine {
         )
 
         bytesDownloaded += Int64(block.count)
+        recordBytesSample()
 
-        if pieceComplete, let pieceData = await pieceManager.getPieceData(pieceIndex) {
+        if pieceComplete, let pieceData = await pieceManager.takePieceData(pieceIndex) {
             do {
                 try await pieceStore.write(pieceIndex: Int(pieceIndex), data: pieceData)
             } catch {
-                NSLog("Failed to write piece \(pieceIndex): \(error)")
+                TorrentLog.info("[TorrentEngine] Failed to write piece \(pieceIndex): \(error)")
             }
         }
 
-        let progress = await pieceManager.progress()
-        let downloadedCount = await pieceManager.downloadedCount()
-
-        let elapsed = downloadStartTime.map { Date.now.timeIntervalSince($0) } ?? 1
-        let speed = elapsed > 0 ? Double(bytesDownloaded) / elapsed : 0
-
-        downloadSpeed = speed
-        activePeerCount = peerConnections.filter {
-            switch $0.state {
-            case .disconnected: return false
-            case .error(_): return false
-            default: return true
-            }
-        }.count
-
-        progressHandler(progress, speed, activePeerCount)
+        await publishProgress()
     }
 
     private func updateStats() async {
+        recordBytesSample()
+        await publishProgress()
+    }
+
+    private func publishProgress() async {
         let progress = await pieceManager.progress()
-        let elapsed = downloadStartTime.map { Date.now.timeIntervalSince($0) } ?? 1
-        let speed = elapsed > 0 ? Double(bytesDownloaded) / elapsed : 0
+        downloadSpeed = recentDownloadSpeed()
+        activePeerCount = peerConnections.filter { $0.isActive }.count
+        progressHandler(progress, downloadSpeed, activePeerCount)
+    }
 
-        downloadSpeed = speed
-        activePeerCount = peerConnections.filter {
-            switch $0.state {
-            case .disconnected, .error(_): return false
-            default: return true
-            }
-        }.count
+    private func recordBytesSample() {
+        let now = Date.now
+        recentBytesSamples.append((now, bytesDownloaded))
+        let cutoff = now.addingTimeInterval(-3)
+        recentBytesSamples.removeAll { $0.date < cutoff }
+    }
 
-        progressHandler(progress, speed, activePeerCount)
+    private func recentDownloadSpeed() -> Double {
+        guard let oldest = recentBytesSamples.first,
+              let newest = recentBytesSamples.last,
+              newest.date > oldest.date else { return 0 }
+        let deltaBytes = Double(newest.bytes - oldest.bytes)
+        let deltaTime = newest.date.timeIntervalSince(oldest.date)
+        return deltaTime > 0 ? deltaBytes / deltaTime : 0
+    }
+
+    private func peerKey(_ peer: PeerInfo) -> String {
+        "\(peer.ip):\(peer.port)"
     }
 }

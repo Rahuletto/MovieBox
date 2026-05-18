@@ -138,6 +138,7 @@ struct SearchView: View {
                             subtitle: movie.releaseDate,
                             posterURL: MetadataClient().imageURL(path: movie.posterPath)
                         ) {
+                            commitCurrentSearch()
                             router.showDetail(id: movie.id, kind: router.detailKind)
                         }
                     }
@@ -161,9 +162,6 @@ struct SearchView: View {
                 let d1 = levenshteinDistance(m1.title.lowercased(), q)
                 let d2 = levenshteinDistance(m2.title.lowercased(), q)
                 return d1 < d2
-            }
-            if !results.isEmpty {
-                saveSearchQuery(router.searchQuery)
             }
         } catch {
             if let urlError = error as? URLError, urlError.code == .cancelled {
@@ -257,20 +255,8 @@ struct SearchView: View {
         }
     }
 
-    private func saveSearchQuery(_ query: String) {
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        
-        let fetchDescriptor = FetchDescriptor<SearchHistoryRecord>(
-            predicate: #Predicate { $0.query == trimmed }
-        )
-        if let existing = try? modelContext.fetch(fetchDescriptor).first {
-            existing.searchedAt = Date()
-        } else {
-            let record = SearchHistoryRecord(query: trimmed)
-            modelContext.insert(record)
-        }
-        try? modelContext.save()
+    private func commitCurrentSearch() {
+        SearchHistoryStore.save(query: router.searchQuery, in: modelContext)
     }
 
     private func clearAllHistory() {

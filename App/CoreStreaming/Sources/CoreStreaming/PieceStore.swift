@@ -8,15 +8,26 @@ public actor PieceStore {
     public let pieceSize: Int64
     public let totalSize: Int64
     public let storageURL: URL
+    public let streamFirstPiece: Int
 
     private var bitmap: [Bool]
-    private var fileHandle: FileHandle?
+    private var writeHandle: FileHandle?
+    private var readHandle: FileHandle?
 
-    public init(infoHash: String, pieceCount: Int, pieceSize: Int64, storageDirectory: URL = FileManager.default.temporaryDirectory) async throws {
+    public init(
+        infoHash: String,
+        pieceCount: Int,
+        pieceSize: Int64,
+        totalSize: Int64? = nil,
+        streamFirstPiece: Int = 0,
+        storageDirectory: URL = FileManager.default.temporaryDirectory
+    ) async throws {
         self.infoHash = infoHash
         self.pieceCount = pieceCount
         self.pieceSize = pieceSize
-        self.totalSize = Int64(pieceCount) * pieceSize
+        self.streamFirstPiece = streamFirstPiece
+        let resolvedTotalSize = totalSize ?? Int64(pieceCount) * pieceSize
+        self.totalSize = resolvedTotalSize
         self.storageURL = storageDirectory.appendingPathComponent("moviebox_\(infoHash).stream")
         self.bitmap = Array(repeating: false, count: pieceCount)
 
@@ -27,8 +38,9 @@ public actor PieceStore {
         }
         FileManager.default.createFile(atPath: storageURL.path, contents: nil)
         let handle = try FileHandle(forWritingTo: storageURL)
-        try handle.truncate(atOffset: UInt64(totalSize))
-        self.fileHandle = handle
+        try handle.truncate(atOffset: UInt64(resolvedTotalSize))
+        self.writeHandle = handle
+        self.readHandle = try FileHandle(forReadingFrom: storageURL)
     }
 
     public func write(pieceIndex: Int, data: Data) async throws {
@@ -40,53 +52,28 @@ public actor PieceStore {
         }
 
         let offset = Int64(pieceIndex) * pieceSize
-        NSLog("[PieceStore] 💾 Writing piece \(pieceIndex) on disk (offset: \(offset), size: \(data.count) bytes)")
-        try fileHandle?.seek(toOffset: UInt64(offset))
-        fileHandle?.write(data)
+        try writeHandle?.seek(toOffset: UInt64(offset))
+        writeHandle?.write(data)
         bitmap[pieceIndex] = true
-        NSLog("[PieceStore] ✅ Successfully wrote piece \(pieceIndex) to disk. Bitmap progress: \(String(format: "%.1f", progress() * 100))%")
+        TorrentLog.debug("[PieceStore] Wrote piece \(pieceIndex) (\(data.count) bytes)")
     }
 
     public func read(offset: Int64, length: Int) async throws -> Data {
-        guard offset >= 0 && offset < totalSize else {
+        let clampedLength = min(length, Int(totalSize - offset))
+        guard offset >= 0, clampedLength > 0, offset < totalSize else {
             throw PieceStoreError.outOfRange(offset, totalSize)
         }
 
         let startPiece = Int(offset / pieceSize)
-        let endPiece = Int((offset + Int64(length) - 1) / pieceSize)
+        let endPiece = Int((offset + Int64(clampedLength) - 1) / pieceSize)
 
-        NSLog("[PieceStore] 🔍 Read requested: offset \(offset), length \(length) (requires pieces \(startPiece) to \(endPiece))")
+        try await waitForPieces(from: startPiece, through: endPiece)
 
-        // Wait asynchronously until the requested piece range is downloaded and written on disk
-        var waitCount = 0
-        while true {
-            try Task.checkCancellation()
-            var allAvailable = true
-            for i in startPiece...endPiece {
-                if !hasPiece(i) {
-                    allAvailable = false
-                    break
-                }
-            }
-            if allAvailable {
-                break
-            }
-            waitCount += 1
-            if waitCount % 50 == 0 { // Log once every 5 seconds (50 * 100ms)
-                NSLog("[PieceStore] ⏳ Still waiting for pieces \(startPiece)-\(endPiece) to download... (elapsed: \(waitCount * 100)ms)")
-            }
-            try await Task.sleep(for: .milliseconds(100))
+        guard let readHandle else {
+            throw PieceStoreError.ioError("Read handle unavailable")
         }
-
-        if waitCount > 0 {
-            NSLog("[PieceStore] 🎉 Pieces \(startPiece)-\(endPiece) successfully acquired after waiting \(waitCount * 100)ms!")
-        }
-
-        let readHandle = try FileHandle(forReadingFrom: storageURL)
         try readHandle.seek(toOffset: UInt64(offset))
-        let data = readHandle.readData(ofLength: length)
-        try readHandle.close()
-        return data
+        return readHandle.readData(ofLength: clampedLength)
     }
 
     public func hasPiece(_ index: Int) -> Bool {
@@ -97,33 +84,74 @@ public actor PieceStore {
     public func hasRange(start: Int64, end: Int64) -> Bool {
         let startPiece = Int(start / pieceSize)
         let endPiece = Int(end / pieceSize)
-        for i in startPiece...endPiece {
-            if !hasPiece(i) { return false }
+        for i in startPiece...endPiece where !hasPiece(i) {
+            return false
         }
         return true
     }
 
     public func progress() -> Double {
+        guard pieceCount > 0 else { return 0 }
         let completed = bitmap.filter { $0 }.count
         return Double(completed) / Double(pieceCount)
     }
 
+    /// Contiguous completed pieces starting at the stream's first piece (video file start).
     public func contiguousPiecesFromStart() -> Int {
         var count = 0
-        for hasPiece in bitmap {
-            guard hasPiece else { break }
+        for index in streamFirstPiece..<bitmap.count {
+            guard bitmap[index] else { break }
             count += 1
         }
         return count
     }
 
+    /// Bytes available contiguously from the stream's first piece (for progressive play readiness).
+    public func contiguousBytesFromStreamStart() -> Int64 {
+        var bytes: Int64 = 0
+        for index in streamFirstPiece..<bitmap.count {
+            guard bitmap[index] else { break }
+            if index == pieceCount - 1 {
+                bytes += totalSize - Int64(index) * pieceSize
+            } else {
+                bytes += pieceSize
+            }
+        }
+        return bytes
+    }
+
     public func cleanup() async {
-        try? fileHandle?.close()
+        try? writeHandle?.close()
+        try? readHandle?.close()
+        writeHandle = nil
+        readHandle = nil
         try? FileManager.default.removeItem(at: storageURL)
     }
 
     deinit {
-        try? fileHandle?.close()
+        try? writeHandle?.close()
+        try? readHandle?.close()
+    }
+
+    private func waitForPieces(from startPiece: Int, through endPiece: Int) async throws {
+        var waitCount = 0
+        while true {
+            try Task.checkCancellation()
+            var allAvailable = true
+            for index in startPiece...endPiece {
+                if !hasPiece(index) {
+                    allAvailable = false
+                    break
+                }
+            }
+            if allAvailable { return }
+
+            waitCount += 1
+            if waitCount % 50 == 0 {
+                TorrentLog.debug("[PieceStore] Waiting for pieces \(startPiece)-\(endPiece)")
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
     }
 }
 

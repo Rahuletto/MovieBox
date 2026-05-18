@@ -1,0 +1,61 @@
+import Foundation
+
+/// Identifies which file inside a multi-file torrent is streamed to the player.
+public struct TorrentStreamTarget: Sendable {
+    public let file: TorrentFile
+    /// Byte offset of this file within the torrent's piece-addressable layout.
+    public let byteOffset: Int64
+    public let byteLength: Int64
+    public let firstPieceIndex: Int
+    public let contentType: String
+
+    public init(file: TorrentFile, byteOffset: Int64, byteLength: Int64, firstPieceIndex: Int, contentType: String) {
+        self.file = file
+        self.byteOffset = byteOffset
+        self.byteLength = byteLength
+        self.firstPieceIndex = firstPieceIndex
+        self.contentType = contentType
+    }
+
+    public static func selectPrimary(from metadata: TorrentMetadata) -> TorrentStreamTarget {
+        let videoExtensions: Set<String> = ["mkv", "mp4", "m4v", "avi", "mov", "webm", "ts", "m2ts"]
+
+        let videoCandidates = metadata.files.filter { file in
+            let ext = (file.relativePath as NSString).pathExtension.lowercased()
+            return videoExtensions.contains(ext)
+        }
+
+        let chosenIndex: Int
+        if let videoPick = videoCandidates.enumerated().max(by: { $0.element.length < $1.element.length }) {
+            chosenIndex = videoPick.offset
+        } else if let anyPick = metadata.files.enumerated().max(by: { $0.element.length < $1.element.length }) {
+            chosenIndex = anyPick.offset
+        } else {
+            chosenIndex = 0
+        }
+
+        let chosen = metadata.files[chosenIndex]
+        var offset: Int64 = 0
+        for index in 0..<chosenIndex {
+            offset += metadata.files[index].length
+        }
+
+        let firstPiece = Int(offset / metadata.pieceLength)
+        let ext = (chosen.relativePath as NSString).pathExtension.lowercased()
+        let mime: String
+        switch ext {
+        case "mkv": mime = "video/x-matroska"
+        case "webm": mime = "video/webm"
+        case "mov", "m4v": mime = "video/quicktime"
+        default: mime = "video/mp4"
+        }
+
+        return TorrentStreamTarget(
+            file: chosen,
+            byteOffset: offset,
+            byteLength: chosen.length,
+            firstPieceIndex: firstPiece,
+            contentType: mime
+        )
+    }
+}

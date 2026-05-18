@@ -1030,15 +1030,20 @@ private struct GlassStreamOverlay: View {
                         Text("Connecting to seeders...")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
-                    case .buffering(let progress):
+                    case .buffering:
                         VStack(spacing: 8) {
-                            ProgressView(value: progress)
-                                .progressViewStyle(.linear)
+                            ProgressView()
+                                .controlSize(.regular)
                                 .tint(.white)
-                                .frame(width: 200)
-                            
+
+                            Text("Buffering first chunk…")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+
                             HStack {
-                                Text("\(Int(progress * 100))%")
+                                if session.bufferedBytes > 0 {
+                                    Text(formatBytes(session.bufferedBytes))
+                                }
                                 Spacer()
                                 if session.downloadSpeed > 0 {
                                     Text(formatSpeed(session.downloadSpeed))
@@ -1087,5 +1092,15 @@ private struct GlassStreamOverlay: View {
             return String(format: "%.1f KB/s", bytesPerSecond / 1000)
         }
         return String(format: "%.0f B/s", bytesPerSecond)
+    }
+
+    private func formatBytes(_ bytes: Int64) -> String {
+        if bytes >= 1_048_576 {
+            return String(format: "%.1f MB buffered", Double(bytes) / 1_048_576)
+        }
+        if bytes >= 1024 {
+            return String(format: "%.0f KB buffered", Double(bytes) / 1024)
+        }
+        return "\(bytes) B buffered"
     }
 }

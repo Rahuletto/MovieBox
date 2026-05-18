@@ -10,11 +10,23 @@ public final class HTTPRangeServer {
 
     private var listener: NWListener?
     private var pieceStore: PieceStore?
+    private var streamByteOffset: Int64 = 0
+    private var streamByteLength: Int64 = 0
+    private var contentType = "application/octet-stream"
+
+    private static let maxRangeBytes = 2 * 1024 * 1024
 
     public init() {}
 
-    public func start(pieceStore: PieceStore, preferredPort: UInt16 = 0) async throws -> URL {
+    public func start(
+        pieceStore: PieceStore,
+        streamTarget: TorrentStreamTarget,
+        preferredPort: UInt16 = 0
+    ) async throws -> URL {
         self.pieceStore = pieceStore
+        self.streamByteOffset = streamTarget.byteOffset
+        self.streamByteLength = streamTarget.byteLength
+        self.contentType = streamTarget.contentType
 
         let parameters = NWParameters.tcp
         let nwPort: NWEndpoint.Port
@@ -32,7 +44,7 @@ public final class HTTPRangeServer {
                     self?.isRunning = true
                 case .failed(let error):
                     self?.isRunning = false
-                    NSLog("HTTPRangeServer failed: \(error)")
+                    TorrentLog.info("[HTTPRangeServer] Listener failed: \(error)")
                 case .cancelled:
                     self?.isRunning = false
                 default:
@@ -73,6 +85,7 @@ public final class HTTPRangeServer {
         isRunning = false
         listener?.cancel()
         listener = nil
+        pieceStore = nil
     }
 
     private func handleConnection(_ connection: NWConnection) async {
@@ -81,39 +94,54 @@ public final class HTTPRangeServer {
             return
         }
 
-        connection.stateUpdateHandler = { state in
+        connection.stateUpdateHandler = { [weak self] state in
             if case .ready = state {
                 Task { @MainActor in
-                    await self.receiveHTTPRequest(connection: connection, pieceStore: pieceStore)
+                    self?.receiveHTTPRequest(connection: connection, pieceStore: pieceStore)
                 }
             }
         }
         connection.start(queue: .main)
     }
 
-    private func receiveHTTPRequest(connection: NWConnection, pieceStore: PieceStore) async {
-        var buffer = Data()
-
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 4096) { data, _, isComplete, error in
-            guard let data, !isComplete, error == nil else {
+    private func receiveHTTPRequest(connection: NWConnection, pieceStore: PieceStore, buffer: Data = Data()) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, isComplete, error in
+            guard let self else {
                 connection.cancel()
                 return
             }
 
-            buffer.append(data)
+            if let error {
+                TorrentLog.debug("[HTTPRangeServer] Receive error: \(error.localizedDescription)")
+                connection.cancel()
+                return
+            }
 
-            if let requestEnd = buffer.range(of: Data("\r\n\r\n".utf8)) {
-                let headerData = buffer[..<requestEnd.lowerBound]
-                if let request = String(data: headerData, encoding: .utf8) {
-                    Task { @MainActor in
-                        let response = await self.handleRequest(request, pieceStore: pieceStore)
-                        self.sendResponse(connection: connection, response: response)
-                    }
+            var requestBuffer = buffer
+            if let data, !data.isEmpty {
+                requestBuffer.append(data)
+            }
+
+            if let requestEnd = requestBuffer.range(of: Data("\r\n\r\n".utf8)) {
+                let headerData = requestBuffer[..<requestEnd.lowerBound]
+                guard let request = String(data: headerData, encoding: .utf8) else {
+                    connection.cancel()
+                    return
                 }
-            } else {
                 Task { @MainActor in
-                    await self.receiveHTTPRequest(connection: connection, pieceStore: pieceStore)
+                    let response = await self.handleRequest(request, pieceStore: pieceStore)
+                    self.sendResponse(connection: connection, response: response)
                 }
+                return
+            }
+
+            if isComplete {
+                connection.cancel()
+                return
+            }
+
+            Task { @MainActor in
+                self.receiveHTTPRequest(connection: connection, pieceStore: pieceStore, buffer: requestBuffer)
             }
         }
     }
@@ -129,56 +157,59 @@ public final class HTTPRangeServer {
             return HTTPResponse(status: 405, body: "Method Not Allowed")
         }
 
-        let totalSize = pieceStore.totalSize
+        let mediaLength = streamByteLength
 
         var statusCode = 200
-        var bodyData: Data = Data()
+        var bodyData = Data()
         var contentRange: String?
-        var contentLength = totalSize
+        var contentLength = mediaLength
 
         if let rangeHeader = lines.first(where: { $0.lowercased().hasPrefix("range:") }) {
             let rangeParts = rangeHeader.components(separatedBy: "=")
             if rangeParts.count == 2 {
                 let byteRange = rangeParts[1]
                 let rangeComponents = byteRange.components(separatedBy: "-")
-                if let startStr = rangeComponents.first, let start = Int64(startStr) {
-                    let end: Int64
+                if let startStr = rangeComponents.first, let mediaStart = Int64(startStr) {
+                    let mediaEnd: Int64
                     if let endStr = rangeComponents.last, !endStr.isEmpty, let parsedEnd = Int64(endStr) {
-                        end = parsedEnd
+                        mediaEnd = min(parsedEnd, mediaLength - 1)
                     } else {
-                        end = totalSize - 1
+                        mediaEnd = mediaLength - 1
                     }
 
-                    let length = Int(end - start + 1)
+                    guard mediaStart < mediaLength, mediaEnd >= mediaStart else {
+                        return HTTPResponse(status: 416, body: "Range Not Satisfiable")
+                    }
+
+                    var length = Int(mediaEnd - mediaStart + 1)
+                    length = min(length, Self.maxRangeBytes)
+                    let torrentOffset = streamByteOffset + mediaStart
+
                     do {
-                        NSLog("[HTTPRangeServer] 📥 Received Range Request: bytes=\(start)-\(end) (length: \(length) bytes)")
-                        bodyData = try await pieceStore.read(offset: start, length: length)
-                        NSLog("[HTTPRangeServer] 📤 Serving Range Request: bytes=\(start)-\(end) (served: \(bodyData.count) bytes)")
+                        bodyData = try await pieceStore.read(offset: torrentOffset, length: length)
+                        let servedEnd = mediaStart + Int64(bodyData.count) - 1
                         statusCode = 206
-                        contentRange = "bytes \(start)-\(end)/\(totalSize)"
+                        contentRange = "bytes \(mediaStart)-\(servedEnd)/\(mediaLength)"
                         contentLength = Int64(bodyData.count)
                     } catch {
-                        NSLog("[HTTPRangeServer] ❌ Range Request failed: \(error.localizedDescription)")
+                        TorrentLog.info("[HTTPRangeServer] Range read failed: \(error.localizedDescription)")
                         return HTTPResponse(status: 500, body: "Internal Server Error")
                     }
                 }
             }
         } else {
+            let length = min(512 * 1024, Int(mediaLength))
             do {
-                let length = min(1024 * 1024, Int(totalSize))
-                NSLog("[HTTPRangeServer] 📥 Received Full File Request (length: \(length) bytes)")
-                bodyData = try await pieceStore.read(offset: 0, length: length)
-                NSLog("[HTTPRangeServer] 📤 Serving Full File Request (served: \(bodyData.count) bytes)")
+                bodyData = try await pieceStore.read(offset: streamByteOffset, length: length)
                 contentLength = Int64(bodyData.count)
             } catch {
-                NSLog("[HTTPRangeServer] ❌ Full File Request failed: \(error.localizedDescription)")
                 return HTTPResponse(status: 500, body: "Internal Server Error")
             }
         }
 
         var headers = [
             "HTTP/1.1 \(statusCode) \(HTTPResponse.statusMessage(for: statusCode))",
-            "Content-Type: video/mp4",
+            "Content-Type: \(contentType)",
             "Content-Length: \(contentLength)",
             "Accept-Ranges: bytes",
             "Connection: close",
@@ -190,20 +221,15 @@ public final class HTTPRangeServer {
         }
 
         let headerString = headers.joined(separator: "\r\n")
-        let headerData = headerString.data(using: .utf8)!
-
         var response = Data()
-        response.append(headerData)
+        response.append(headerString.data(using: .utf8)!)
         response.append(bodyData)
 
         return HTTPResponse(status: statusCode, data: response)
     }
 
     private func sendResponse(connection: NWConnection, response: HTTPResponse) {
-        connection.send(content: response.data, completion: .contentProcessed { error in
-            if error != nil {
-                NSLog("HTTPRangeServer send error: \(String(describing: error))")
-            }
+        connection.send(content: response.data, completion: .contentProcessed { _ in
             connection.cancel()
         })
     }
@@ -229,6 +255,7 @@ private struct HTTPResponse {
         case 206: "Partial Content"
         case 400: "Bad Request"
         case 405: "Method Not Allowed"
+        case 416: "Range Not Satisfiable"
         case 500: "Internal Server Error"
         default: "Unknown"
         }
