@@ -40,8 +40,6 @@ export async function runIndexers(
   const active = INDEXERS.filter((i) => enabledIds.has(i.id) && i.supports(ctx))
   const counts: Record<string, number> = {}
   const errors: Record<string, string> = {}
-  const merged: TorrentSearchHit[] = []
-  const seen = new Set<string>()
 
   const settled = await Promise.allSettled(
     active.map(async (indexer) => {
@@ -49,6 +47,13 @@ export async function runIndexers(
       return { id: indexer.id, rows }
     })
   )
+
+  // Dedup by infoHash, keeping the row with the HIGHEST seeders.
+  // This avoids the previous bug where torrentio's lower-seeded entry would
+  // silently absorb a Pirate Bay / 1337x match with more seeders, making
+  // those sources look like they returned nothing.
+  const byHash = new Map<string, TorrentSearchHit>()
+  const unhashed: TorrentSearchHit[] = []
 
   for (let i = 0; i < settled.length; i++) {
     const outcome = settled[i]
@@ -58,15 +63,26 @@ export async function runIndexers(
       counts[id] = rows.length
       for (const row of rows) {
         const key = row.infoHash?.toLowerCase()
-        if (key && seen.has(key)) continue
-        if (key) seen.add(key)
-        merged.push(row)
+        if (!key) {
+          unhashed.push(row)
+          continue
+        }
+        const existing = byHash.get(key)
+        if (!existing || (row.seeders ?? 0) > (existing.seeders ?? 0)) {
+          byHash.set(key, row)
+        }
       }
     } else {
       errors[indexer.id] = outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason)
       counts[indexer.id] = 0
     }
   }
+
+  // Sort merged results by seeders (descending) so the most healthy releases
+  // surface first regardless of which indexer returned them.
+  const merged = [...byHash.values(), ...unhashed].sort(
+    (a, b) => (b.seeders ?? 0) - (a.seeders ?? 0)
+  )
 
   return { results: merged, counts, errors }
 }

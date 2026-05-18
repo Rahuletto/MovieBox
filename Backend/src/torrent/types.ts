@@ -19,6 +19,9 @@ export interface SearchContext {
   imdbId: string | null
   kind: TorrentKind
   enableYTS: boolean
+  /** Parsed from the query when present (e.g. "The Boys S01E03 2019"). */
+  season: number | null
+  episode: number | null
 }
 
 export interface TorrentSearchPayload {

@@ -37,8 +37,10 @@ struct TorrentSection: View {
     private var seededTorrents: [TorrentResult] { torrents.filter { $0.seeders > 0 } }
     private var unseededTorrents: [TorrentResult] { torrents.filter { $0.seeders <= 0 } }
     /// Seeded releases only; if none exist, show everything so the section is not empty.
+    /// Always sorted by seeders descending so the healthiest releases come first.
     private var displayedTorrents: [TorrentResult] {
-        seededTorrents.isEmpty ? torrents : seededTorrents
+        let pool = seededTorrents.isEmpty ? torrents : seededTorrents
+        return pool.sorted { $0.seeders > $1.seeders }
     }
 
     private var pageCount: Int {
@@ -401,7 +403,7 @@ private struct TorrentVersionRow: View, Equatable {
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 8) {
+                HStack(spacing: 5) {
                     resolutionBadge
                     if !model.techKinds.isEmpty {
                         MediaTechBadgeRow(kinds: model.techKinds, context: .hero, size: .list)

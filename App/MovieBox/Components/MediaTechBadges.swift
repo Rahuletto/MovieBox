@@ -40,13 +40,37 @@ struct MediaTechBadge: View {
     var context: MediaTechBadgeContext = .hero
     var size: MediaTechBadgeSize = .regular
 
+    private var isDolby: Bool {
+        kind == .dolbyAtmos || kind == .dolbyVision
+    }
+
     var body: some View {
         if let assetName = kind.assetName {
-            Image(assetName)
-                .resizable()
-                .scaledToFit()
-                .frame(width: kind.displayWidth(for: size), height: kind.displayHeight(for: size))
-                .accessibilityLabel(kind.accessibilityLabel)
+            if isDolby {
+                let overallWidth = kind.displayWidth(for: size)
+                let overallHeight = kind.displayHeight(for: size)
+                let horizontalPadding = size == .list ? 3.5 * 1.05 : 3.5
+                let verticalPadding = size == .list ? 2.0 * 1.05 : 2.0
+                
+                Image(assetName)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: overallWidth - horizontalPadding * 2, height: overallHeight - verticalPadding * 2)
+                    .padding(.horizontal, horizontalPadding)
+                    .padding(.vertical, verticalPadding)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(Color.black.opacity(0.55))
+                    )
+                    .frame(width: overallWidth, height: overallHeight)
+                    .accessibilityLabel(kind.accessibilityLabel)
+            } else {
+                Image(assetName)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: kind.displayWidth(for: size), height: kind.displayHeight(for: size))
+                    .accessibilityLabel(kind.accessibilityLabel)
+            }
         } else {
             MediaFilledBadge(kind.fallbackLabel)
         }
@@ -64,11 +88,13 @@ private extension MediaTechKind {
     }
 
     func displayHeight(for size: MediaTechBadgeSize) -> CGFloat {
+        // Dolby logos are horizontal lockups that read smaller than the
+        // simple 4K/HDR pills at the same height, so they need a taller box.
         let base: CGFloat = switch self {
         case .fourK: 13
         case .hdr: 13
-        case .dolbyVision: 14
-        case .dolbyAtmos: 12
+        case .dolbyVision: 18
+        case .dolbyAtmos: 18
         }
         // List rows want compact badges that visually match the small text
         // resolution chip (~14pt). Hero stays at base size.
@@ -77,10 +103,10 @@ private extension MediaTechKind {
 
     func displayWidth(for size: MediaTechBadgeSize) -> CGFloat {
         let base: CGFloat = switch self {
-        case .fourK: 35
-        case .hdr: 31
-        case .dolbyVision: 32
-        case .dolbyAtmos: 21
+        case .fourK: 23
+        case .hdr: 30
+        case .dolbyVision: 48
+        case .dolbyAtmos: 42
         }
         return size == .list ? base * 1.05 : base
     }

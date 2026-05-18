@@ -17,12 +17,33 @@ export async function searchAllTorrents(opts: {
 }): Promise<TorrentSearchPayload> {
   const q = sanitizeQuery(opts.query, opts.year)
   const enabled = parseEnabledIndexerIDs(opts.enabledIndexerIDs)
+
+  // Extract S{NN}E{NN} (or "1x03"-style) from the query so TV-aware indexers
+  // (e.g. torrentio's `/series/{imdb}:{s}:{e}.json`) can target the episode.
+  let season: number | null = null
+  let episode: number | null = null
+  if (opts.kind === 'tv') {
+    const seMatch = opts.query.match(/[Ss](\d{1,2})[\s\-_.]*[Ee](\d{1,2})/)
+    if (seMatch) {
+      season = parseInt(seMatch[1], 10)
+      episode = parseInt(seMatch[2], 10)
+    } else {
+      const altMatch = opts.query.match(/\b(\d{1,2})[xX](\d{1,2})\b/)
+      if (altMatch) {
+        season = parseInt(altMatch[1], 10)
+        episode = parseInt(altMatch[2], 10)
+      }
+    }
+  }
+
   const ctx = {
     query: q,
     year: opts.year ?? null,
     imdbId: opts.imdbId ?? null,
     kind: opts.kind,
     enableYTS: enabled.has('yts'),
+    season,
+    episode,
   }
 
   const { results, counts, errors } = await runIndexers(ctx, enabled)

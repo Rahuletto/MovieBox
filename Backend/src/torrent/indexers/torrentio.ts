@@ -14,7 +14,17 @@ export const torrentioIndexer: TorrentIndexer = {
     if (!cleanId) return []
 
     const mediaPath = ctx.kind === 'tv' ? 'series' : 'movie'
-    const url = `https://torrentio.strem.fun/stream/${mediaPath}/${cleanId}.json`
+    // Torrentio's series endpoint requires `imdbid:season:episode`. Without
+    // the suffix it returns zero streams. If no season/episode was parsed
+    // out of the query, fall back to S1E1 so the user gets *something*
+    // rather than an empty list.
+    let id = cleanId
+    if (ctx.kind === 'tv') {
+      const s = ctx.season ?? 1
+      const e = ctx.episode ?? 1
+      id = `${cleanId}:${s}:${e}`
+    }
+    const url = `https://torrentio.strem.fun/stream/${mediaPath}/${id}.json`
     const data = await fetchJSON<{ streams?: Array<{ title: string; infoHash: string }> }>(url)
     const streams = data?.streams ?? []
 
