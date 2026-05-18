@@ -5,7 +5,12 @@ import type { TorrentKind, TorrentSearchPayload } from './types'
 import { TORRENT_API_VERSION } from './types'
 
 export { TORRENT_API_VERSION } from './types'
-export { INDEXER_IDS, INDEXER_CATALOG, DEFAULT_ENABLED_INDEXER_IDS, parseEnabledIndexerIDs } from './catalog'
+export {
+  INDEXER_IDS,
+  INDEXER_CATALOG,
+  DEFAULT_ENABLED_INDEXER_IDS,
+  parseEnabledIndexerIDs,
+} from './catalog'
 export { parse1337xSearchRows } from './indexers/x1337'
 
 export async function searchAllTorrents(opts: {
@@ -50,15 +55,20 @@ export async function searchAllTorrents(opts: {
   const mainPromise = runIndexers(ctx, enabled)
 
   // 2. If TV show and season is known, also run season pack search in parallel
-  let seasonPromise: Promise<{ results: any[]; counts: Record<string, number>; errors: Record<string, string> }> = Promise.resolve({
+  let seasonPromise: Promise<{
+    results: any[]
+    counts: Record<string, number>
+    errors: Record<string, string>
+  }> = Promise.resolve({
     results: [],
     counts: {},
-    errors: {}
+    errors: {},
   })
 
   if (opts.kind === 'tv' && season !== null) {
     let baseShowTitle = opts.query
-    const titleMatch = opts.query.match(/^(.*?)\s+[Ss]\d{1,2}/i) ?? opts.query.match(/^(.*?)\s+\d{1,2}[xX]/i)
+    const titleMatch =
+      opts.query.match(/^(.*?)\s+[Ss]\d{1,2}/i) ?? opts.query.match(/^(.*?)\s+\d{1,2}[xX]/i)
     if (titleMatch) {
       baseShowTitle = titleMatch[1].trim()
     }
@@ -73,7 +83,7 @@ export async function searchAllTorrents(opts: {
     if (seasonEnabled.size > 0) {
       const seasonCtx = {
         ...ctx,
-        query: seasonQuery
+        query: seasonQuery,
       }
       seasonPromise = runIndexers(seasonCtx, seasonEnabled)
     }
@@ -83,8 +93,8 @@ export async function searchAllTorrents(opts: {
 
   // Merge the results, deduping by infoHash and taking the one with highest seeders
   const allResults = [...mainRes.results, ...seasonRes.results]
-  const byHash = new Map<string, typeof allResults[0]>()
-  const unhashed: typeof allResults[0][] = []
+  const byHash = new Map<string, (typeof allResults)[0]>()
+  const unhashed: (typeof allResults)[0][] = []
 
   for (const row of allResults) {
     const key = row.infoHash?.toLowerCase()
@@ -98,7 +108,7 @@ export async function searchAllTorrents(opts: {
     }
   }
 
-  const mergedResults = [...byHash.values(), ...unhashed].sort(
+  const mergedResults = [...byHash.values(), ...unhashed].toSorted(
     (a, b) => (b.seeders ?? 0) - (a.seeders ?? 0)
   )
 

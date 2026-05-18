@@ -29,7 +29,7 @@ public actor TrackerClient {
         }
 
         components.percentEncodedQueryItems = [
-            URLQueryItem(name: "info_hash", value: hexToPercentEncoded(infoHash)),
+            URLQueryItem(name: "info_hash", value: TrackerEncoding.percentEncodeInfoHash(hex: infoHash)),
             URLQueryItem(name: "peer_id", value: peerId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? peerId),
             URLQueryItem(name: "port", value: String(port)),
             URLQueryItem(name: "uploaded", value: String(uploaded)),
@@ -145,17 +145,6 @@ public actor TrackerClient {
         )
     }
 
-    private func hexToPercentEncoded(_ hex: String) -> String {
-        var result = ""
-        var index = hex.startIndex
-        while index < hex.endIndex {
-            let nextIndex = hex.index(index, offsetBy: 2)
-            let byte = hex[index..<nextIndex]
-            result += "%" + byte
-            index = nextIndex
-        }
-        return result
-    }
 }
 
 public enum TrackerEvent: RawRepresentable {

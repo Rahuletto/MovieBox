@@ -175,8 +175,19 @@ public actor PieceManager {
         }
 
         downloadedPieces.insert(pieceIndex)
+        pieceBuffers.removeValue(forKey: pieceIndex)
         receivedBlockOffsets.removeValue(forKey: pieceIndex)
+        trimPieceBuffers(keeping: pieceIndex)
         return true
+    }
+
+    private func trimPieceBuffers(keeping current: UInt32) {
+        let maxBuffers = 2
+        guard pieceBuffers.count > maxBuffers else { return }
+        for key in pieceBuffers.keys where key != current {
+            pieceBuffers.removeValue(forKey: key)
+            if pieceBuffers.count <= maxBuffers { break }
+        }
     }
 }
 

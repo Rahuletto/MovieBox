@@ -50,24 +50,3 @@ struct NavigationHeader: View {
     }
 
 }
-
-#Preview {
-    ZStack {
-        LinearGradient(
-            colors: [.blue, .purple],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-        .ignoresSafeArea()
-
-        VStack {
-            NavigationHeader(
-                title: nil,
-                shareURL: URL(string: "https://www.imdb.com/title/tt1375666/")!,
-                shareTitle: "Inception",
-                onBack: {}
-            )
-            Spacer()
-        }
-    }
-}

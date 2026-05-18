@@ -4,8 +4,12 @@ import Network
 // MARK: - UDP Tracker Client
 
 public actor UDPTrackerClient {
-    private var connectionId: UInt64 = 0
-    private var connectionExpiry: Date = Date.distantPast
+    private struct TrackerSession {
+        var connectionId: UInt64
+        var expiry: Date
+    }
+
+    private var sessions: [String: TrackerSession] = [:]
 
     public init() {}
 
@@ -34,7 +38,7 @@ public actor UDPTrackerClient {
         data.append(contentsOf: connId.bigEndianBytes)
         data.append(contentsOf: UInt32(1).bigEndianBytes)
         data.append(contentsOf: transactionId.bigEndianBytes)
-        data.append(contentsOf: hexToData(infoHash))
+        data.append(contentsOf: HexEncoding.data(fromHex: infoHash))
         data.append(BitTorrentPeerID.data(for: peerId))
         data.append(contentsOf: downloaded.bigEndianBytes)
         data.append(contentsOf: left.bigEndianBytes)
@@ -83,8 +87,9 @@ public actor UDPTrackerClient {
     }
 
     private func connect(host: String, port: Int) async throws -> UInt64 {
-        if Date.now < connectionExpiry {
-            return connectionId
+        let key = "\(host):\(port)"
+        if let session = sessions[key], Date.now < session.expiry {
+            return session.connectionId
         }
 
         let transactionId = UInt32.random(in: 1...UInt32.max)
@@ -111,9 +116,8 @@ public actor UDPTrackerClient {
             throw UDPTrackerError.transactionMismatch
         }
 
-        connectionId = response.readUInt64(at: 8)
-        connectionExpiry = Date.now.addingTimeInterval(60)
-
+        let connectionId = response.readUInt64(at: 8)
+        sessions[key] = TrackerSession(connectionId: connectionId, expiry: Date.now.addingTimeInterval(60))
         return connectionId
     }
 
@@ -150,19 +154,6 @@ public actor UDPTrackerClient {
         }
     }
 
-    private func hexToData(_ hex: String) -> Data {
-        var data = Data()
-        var index = hex.startIndex
-        while index < hex.endIndex {
-            let nextIndex = hex.index(index, offsetBy: 2)
-            let byteString = String(hex[index..<nextIndex])
-            if let byte = UInt8(byteString, radix: 16) {
-                data.append(byte)
-            }
-            index = nextIndex
-        }
-        return data
-    }
 }
 
 extension Data {

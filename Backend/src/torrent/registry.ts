@@ -73,14 +73,15 @@ export async function runIndexers(
         }
       }
     } else {
-      errors[indexer.id] = outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason)
+      errors[indexer.id] =
+        outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason)
       counts[indexer.id] = 0
     }
   }
 
   // Sort merged results by seeders (descending) so the most healthy releases
   // surface first regardless of which indexer returned them.
-  const merged = [...byHash.values(), ...unhashed].sort(
+  const merged = [...byHash.values(), ...unhashed].toSorted(
     (a, b) => (b.seeders ?? 0) - (a.seeders ?? 0)
   )
 

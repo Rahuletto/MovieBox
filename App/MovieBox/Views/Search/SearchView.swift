@@ -1,4 +1,5 @@
 import CoreMetadata
+import MovieBoxCore
 import CoreStorage
 import DesignSystem
 import SwiftData
@@ -11,6 +12,7 @@ struct SearchView: View {
     @Query(sort: \SearchHistoryRecord.searchedAt, order: .reverse) private var searchHistory: [SearchHistoryRecord]
 
     @State private var results: [Movie] = []
+    @State private var resultKinds: [Int: MediaKind] = [:]
     @State private var isSearching = false
     @State private var errorMessage: String?
 
@@ -139,7 +141,7 @@ struct SearchView: View {
                             posterURL: MetadataClient().imageURL(path: movie.posterPath)
                         ) {
                             commitCurrentSearch()
-                            router.showDetail(id: movie.id, kind: router.detailKind)
+                            router.showDetail(id: movie.id, kind: resultKinds[movie.id] ?? .movie)
                         }
                     }
                 }
@@ -148,7 +150,7 @@ struct SearchView: View {
     }
 
     private func search() async {
-        guard let mode = resolveMetadataMode(from: settings) else {
+        guard let mode = MetadataSettings.mode(from: settings) else {
             errorMessage = "Configure metadata access in Settings first."
             return
         }
@@ -156,9 +158,18 @@ struct SearchView: View {
         errorMessage = nil
         do {
             let client = MetadataClient(mode: mode)
-            let rawResults = try await client.searchMovies(query: router.searchQuery, kind: router.detailKind)
-            let q = router.searchQuery.lowercased()
-            results = rawResults.sorted { m1, m2 in
+            let query = router.searchQuery
+            async let movies = client.searchMovies(query: query, kind: .movie)
+            async let tv = client.searchMovies(query: query, kind: .tv)
+            let movieResults = try await movies
+            let tvResults = try await tv
+            var kinds: [Int: MediaKind] = [:]
+            movieResults.forEach { kinds[$0.id] = .movie }
+            tvResults.forEach { kinds[$0.id] = .tv }
+            resultKinds = kinds
+            let combined = movieResults + tvResults
+            let q = query.lowercased()
+            results = combined.sorted { m1, m2 in
                 let d1 = levenshteinDistance(m1.title.lowercased(), q)
                 let d2 = levenshteinDistance(m2.title.lowercased(), q)
                 return d1 < d2
@@ -167,8 +178,7 @@ struct SearchView: View {
             if let urlError = error as? URLError, urlError.code == .cancelled {
                 return
             }
-            LogStore.shared.log("Error searching movies: \(error)")
-            LogStore.shared.log("Stack Trace:\n\(Thread.callStackSymbols.prefix(8).joined(separator: "\n"))")
+            MetadataErrorLogger.record(error, context: "Search")
             errorMessage = error.localizedDescription
         }
         isSearching = false

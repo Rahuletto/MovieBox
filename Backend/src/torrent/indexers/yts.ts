@@ -10,7 +10,13 @@ interface YTSWebResult {
 
 function mapYtsTorrents(
   title: string,
-  torrents: Array<{ hash: string; quality: string; size_bytes?: number; seeds?: number; peers?: number }>
+  torrents: Array<{
+    hash: string
+    quality: string
+    size_bytes?: number
+    seeds?: number
+    peers?: number
+  }>
 ): TorrentSearchHit[] {
   const hits: TorrentSearchHit[] = []
   for (const t of torrents) {
@@ -42,7 +48,18 @@ async function fetchYTSMovieDetailsById(tmdbId: number): Promise<TorrentSearchHi
   for (const host of ['yts.mx', 'yts.lt', 'yts.pm', 'yts.am']) {
     const url = `https://${host}/api/v2/movie_details.json?movie_id=${tmdbId}`
     const data = await fetchJSON<{
-      data?: { movie?: { title?: string; torrents?: Array<{ hash: string; quality: string; size_bytes?: number; seeds?: number; peers?: number }> } }
+      data?: {
+        movie?: {
+          title?: string
+          torrents?: Array<{
+            hash: string
+            quality: string
+            size_bytes?: number
+            seeds?: number
+            peers?: number
+          }>
+        }
+      }
     }>(url)
     const movie = data?.data?.movie
     if (movie?.torrents?.length) return mapYtsTorrents(movie.title ?? 'Unknown', movie.torrents)
@@ -138,13 +155,25 @@ async function searchYTSListMovies(query: string): Promise<TorrentSearchHit[]> {
   for (const host of ['yts.mx', 'yts.pm', 'yts.lt']) {
     const url = `https://${host}/api/v2/list_movies.json?query_term=${encodeURIComponent(query)}`
     const data = await fetchJSON<{
-      data?: { movies?: Array<{ title?: string; torrents?: Array<{ hash: string; quality: string; size_bytes?: number; seeds?: number; peers?: number }> }> }
+      data?: {
+        movies?: Array<{
+          title?: string
+          torrents?: Array<{
+            hash: string
+            quality: string
+            size_bytes?: number
+            seeds?: number
+            peers?: number
+          }>
+        }>
+      }
     }>(url)
     const movies = data?.data?.movies
     if (!movies?.length) continue
 
     const hits: TorrentSearchHit[] = []
-    for (const movie of movies) hits.push(...mapYtsTorrents(movie.title ?? 'Unknown', movie.torrents ?? []))
+    for (const movie of movies)
+      hits.push(...mapYtsTorrents(movie.title ?? 'Unknown', movie.torrents ?? []))
     if (hits.length) return hits
   }
   return []

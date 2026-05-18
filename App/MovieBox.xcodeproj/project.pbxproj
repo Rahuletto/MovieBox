@@ -14,6 +14,8 @@
 		AB0000010000000000000005 /* CoreStorage in Frameworks */ = {isa = PBXBuildFile; productRef = AB0000010000000000001005 /* CoreStorage */; };
 		AB0000010000000000000006 /* DesignSystem in Frameworks */ = {isa = PBXBuildFile; productRef = AB0000010000000000001006 /* DesignSystem */; };
 		AB0000010000000000000007 /* CoreStreaming in Frameworks */ = {isa = PBXBuildFile; productRef = AB0000010000000000001007 /* CoreStreaming */; };
+		AB0000010000000000000008 /* MovieBoxCore in Frameworks */ = {isa = PBXBuildFile; productRef = AB0000010000000000001008 /* MovieBoxCore */; };
+		AB0000010000000000000009 /* MovieBoxDetail in Frameworks */ = {isa = PBXBuildFile; productRef = AB0000010000000000001009 /* MovieBoxDetail */; };
 		D23E0D542FBB6FA400526BEF /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = D23E0D532FBB6FA400526BEF /* AppIcon.icon */; };
 /* End PBXBuildFile section */
 
@@ -42,6 +44,8 @@
 				AB0000010000000000000005 /* CoreStorage in Frameworks */,
 				AB0000010000000000000006 /* DesignSystem in Frameworks */,
 				AB0000010000000000000007 /* CoreStreaming in Frameworks */,
+				AB0000010000000000000008 /* MovieBoxCore in Frameworks */,
+				AB0000010000000000000009 /* MovieBoxDetail in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -92,6 +96,8 @@
 				AB0000010000000000001005 /* CoreStorage */,
 				AB0000010000000000001006 /* DesignSystem */,
 				AB0000010000000000001007 /* CoreStreaming */,
+				AB0000010000000000001008 /* MovieBoxCore */,
+				AB0000010000000000001009 /* MovieBoxDetail */,
 			);
 			productName = MovieBox;
 			productReference = D2898CB22FB9961F005174CF /* MovieBox.app */;
@@ -129,6 +135,8 @@
 				AB0000010000000000002005 /* XCLocalSwiftPackageReference "CoreStorage" */,
 				AB0000010000000000002006 /* XCLocalSwiftPackageReference "DesignSystem" */,
 				AB0000010000000000002007 /* XCLocalSwiftPackageReference "CoreStreaming" */,
+				AB0000010000000000002008 /* XCLocalSwiftPackageReference "MovieBoxCore" */,
+				AB0000010000000000002009 /* XCLocalSwiftPackageReference "MovieBoxDetail" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = D2898CB32FB9961F005174CF /* Products */;
@@ -398,6 +406,14 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = CoreStreaming;
 		};
+		AB0000010000000000002008 /* XCLocalSwiftPackageReference "MovieBoxCore" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = MovieBoxCore;
+		};
+		AB0000010000000000002009 /* XCLocalSwiftPackageReference "MovieBoxDetail" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = MovieBoxDetail;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -435,6 +451,16 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AB0000010000000000002007 /* XCLocalSwiftPackageReference "CoreStreaming" */;
 			productName = CoreStreaming;
+		};
+		AB0000010000000000001008 /* MovieBoxCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AB0000010000000000002008 /* XCLocalSwiftPackageReference "MovieBoxCore" */;
+			productName = MovieBoxCore;
+		};
+		AB0000010000000000001009 /* MovieBoxDetail */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AB0000010000000000002009 /* XCLocalSwiftPackageReference "MovieBoxDetail" */;
+			productName = MovieBoxDetail;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

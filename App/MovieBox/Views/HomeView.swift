@@ -1,9 +1,10 @@
-import SwiftUI
-import DesignSystem
-import CoreMetadata
 import CoreMLEngine
+import CoreMetadata
 import CoreStorage
+import DesignSystem
+import MovieBoxCore
 import SwiftData
+import SwiftUI
 
 struct HomeView: View {
     @Environment(AppRouter.self) private var router
@@ -49,8 +50,8 @@ struct HomeView: View {
                                   }
 
                             if !continueWatching.isEmpty {
-                                ContinueWatchingRow(records: continueWatching) { movie in
-                                    router.showDetail(id: movie.tmdbId, kind: .movie)
+                                ContinueWatchingRow(records: continueWatching) { record in
+                                    router.showDetail(id: record.tmdbId, kind: record.mediaKindEnum)
                                 }
                             }
 
@@ -144,33 +145,23 @@ struct HomeView: View {
     }
 
     private var metadataMode: MetadataEndpointMode? {
-        settings.first?.metadataMode
+        MetadataSettings.mode(from: settings)
     }
 
     private var settingsKey: String {
-        if let setting = settings.first {
-            return UUID().uuidString // Force reload when settings query updates
-        }
-        return "missing"
+        guard let setting = settings.first else { return "missing" }
+        return "\(setting.proxyBaseURL)|\(setting.tmdbBearerToken)|\(setting.posterSize)|\(setting.backdropSize)|\(setting.requestTimeout)"
     }
 
     private func load(mode: MetadataEndpointMode) async {
         isLoading = true
         errorMessage = nil
-        let client = MetadataClient(mode: mode)
         do {
-            async let trending = client.movies(for: .trending)
-            async let popular = client.movies(for: .popular)
-            async let topRated = client.movies(for: .topRated)
-            async let nowPlaying = client.movies(for: .nowPlaying)
-            rows = [
-                .trending: try await trending,
-                .popular: try await popular,
-                .topRated: try await topRated,
-                .nowPlaying: try await nowPlaying
-            ]
-
-            let allMovies = (try await trending) + (try await popular) + (try await topRated)
+            rows = try await CatalogLoader.loadHomeRows(mode: mode)
+            let trending = rows[.trending] ?? []
+            let popular = rows[.popular] ?? []
+            let topRated = rows[.topRated] ?? []
+            let allMovies = trending + popular + topRated
             let ratingSignals = ratings.map { RatingSignal(tmdbId: $0.tmdbId, rating: $0.rating, genreIds: $0.genres) }
             if !ratingSignals.isEmpty {
                 let engine = GenreAffinityEngine()
@@ -189,9 +180,11 @@ struct HomeView: View {
             if let urlError = error as? URLError, urlError.code == .cancelled {
                 return
             }
-            LogStore.shared.log("Error loading Catalog: \(error)")
-            LogStore.shared.log("Stack Trace:\n\(Thread.callStackSymbols.prefix(8).joined(separator: "\n"))")
-            errorMessage = error.localizedDescription
+            MetadataErrorLogger.record(error, context: "Home catalog load")
+            errorMessage = MetadataErrorLogger.userMessage(
+                for: error,
+                backendURL: settings.first?.proxyBaseURL
+            )
         }
         isLoading = false
     }
@@ -219,9 +212,14 @@ private struct ContinueWatchingRow: View {
                                     .fill(Color(nsColor: .controlBackgroundColor))
                                     .frame(width: 180, height: 100)
                                     .overlay {
-                                        Image(systemName: "film.stack")
-                                            .font(.system(size: 28))
-                                            .foregroundStyle(.secondary)
+                                        CachedImageView(url: MetadataClient().imageURL(path: record.posterPath)) {
+                                            Image(systemName: "film.stack")
+                                                .font(.system(size: 28))
+                                                .foregroundStyle(.secondary)
+                                        } content: { image in
+                                            image.resizable().scaledToFill()
+                                        }
+                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                                     }
                                     .overlay(alignment: .bottom) {
                                         ProgressView(value: record.watchedFraction)

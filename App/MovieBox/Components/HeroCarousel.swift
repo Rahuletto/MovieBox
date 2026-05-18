@@ -2,6 +2,7 @@ import SwiftUI
 import CoreMetadata
 import DesignSystem
 import CoreStorage
+import MovieBoxCore
 import SwiftData
 import Combine
 

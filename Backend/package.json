@@ -1,20 +1,30 @@
 {
-  "name": "Backend",
+  "name": "moviebox-backend",
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy --minify",
+    "deploy": "bash scripts/deploy.sh",
+    "deploy:quick": "wrangler deploy --minify",
     "cf-typegen": "wrangler types --env-interface CloudflareBindings",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "lint": "oxlint .",
+    "lint:fix": "oxlint . --fix",
+    "lint:strict": "oxlint . --deny-warnings",
+    "fmt": "oxfmt .",
+    "fmt:check": "oxfmt --check .",
+    "test": "vitest run --config vitest.unit.config.ts",
+    "test:workers": "vitest run --config vitest.config.ts",
+    "test:watch": "vitest --config vitest.unit.config.ts"
   },
   "dependencies": {
     "@zip.js/zip.js": "^2.8.26",
-    "hono": "^4.12.19"
+    "hono": "^4.12.19",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.16.6",
     "@types/node": "^25.8.0",
+    "oxfmt": "^0.16.0",
+    "oxlint": "^1.16.0",
     "vitest": "^4.1.6",
     "wrangler": "^4.4.0"
   }

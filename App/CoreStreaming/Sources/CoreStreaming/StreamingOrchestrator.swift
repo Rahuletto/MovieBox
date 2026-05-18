@@ -41,6 +41,8 @@ public final class StreamingOrchestrator: @unchecked Sendable {
             throw StreamingOrchestratorError.failedToInitialize
         }
 
+        try TorrentLimits.validateTotalSize(metadata.totalSize)
+
         let target = TorrentStreamTarget.selectPrimary(from: metadata)
         streamTarget = target
         TorrentLog.info("[Streaming] Target file: \(target.file.relativePath) (\(target.byteLength) bytes, piece \(target.firstPieceIndex)+)")

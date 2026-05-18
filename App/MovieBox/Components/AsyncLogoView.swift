@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreMetadata
+import MovieBoxCore
 import CoreStorage
 import SwiftData
 
@@ -34,7 +35,7 @@ struct AsyncLogoView: View {
             logoURL = nil
             loadFailed = false
 
-            guard let mode = resolveMetadataMode(from: settings) else {
+            guard let mode = MetadataSettings.mode(from: settings) else {
                 loadFailed = true
                 return
             }

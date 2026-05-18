@@ -223,7 +223,7 @@ private final class MetadataPeerSession: @unchecked Sendable {
         var reserved = [UInt8](repeating: 0, count: 8)
         reserved[5] |= 0x10
         handshake.append(contentsOf: reserved)
-        handshake.append(contentsOf: hexToData(infoHash))
+        handshake.append(contentsOf: HexEncoding.data(fromHex: infoHash))
         handshake.append(BitTorrentPeerID.data(for: peerId))
         try await send(handshake)
     }
@@ -363,16 +363,6 @@ private final class MetadataPeerSession: @unchecked Sendable {
         return Data(slice)
     }
 
-    private func hexToData(_ hex: String) -> Data {
-        var data = Data()
-        var index = hex.startIndex
-        while index < hex.endIndex {
-            let next = hex.index(index, offsetBy: 2, limitedBy: hex.endIndex) ?? hex.endIndex
-            if let byte = UInt8(hex[index..<next], radix: 16) { data.append(byte) }
-            index = next
-        }
-        return data
-    }
 }
 
 private extension Data {

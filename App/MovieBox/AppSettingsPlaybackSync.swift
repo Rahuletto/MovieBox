@@ -1,5 +1,6 @@
 import CorePlayer
 import CoreStorage
+import MovieBoxCore
 import SwiftData
 import SwiftUI
 

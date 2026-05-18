@@ -305,7 +305,7 @@ public final class PeerConnection: ObservableObject {
         handshake.append(19)
         handshake.append(contentsOf: "BitTorrent protocol".utf8)
         handshake.append(contentsOf: [UInt8](repeating: 0, count: 8))
-        handshake.append(contentsOf: hexToData(infoHash))
+        handshake.append(contentsOf: HexEncoding.data(fromHex: infoHash))
         handshake.append(BitTorrentPeerID.data(for: peerId))
         connection?.send(content: handshake, completion: .contentProcessed { _ in })
     }
@@ -397,6 +397,12 @@ public final class PeerConnection: ObservableObject {
             return .keepAlive
         }
 
+        guard length <= 262_144 else {
+            TorrentLog.warn("[PeerConnection] Dropping oversized message (\(length) bytes)")
+            buffer.removeAll()
+            return nil
+        }
+
         let totalLength = 4 + Int(length)
         guard buffer.count >= totalLength else { return nil }
 
@@ -480,19 +486,6 @@ public final class PeerConnection: ObservableObject {
         await requestPieces()
     }
 
-    private func hexToData(_ hex: String) -> Data {
-        var data = Data()
-        var index = hex.startIndex
-        while index < hex.endIndex {
-            let nextIndex = hex.index(index, offsetBy: 2, limitedBy: hex.endIndex) ?? hex.endIndex
-            let byteString = hex[index..<nextIndex]
-            if let byte = UInt8(byteString, radix: 16) {
-                data.append(byte)
-            }
-            index = nextIndex
-        }
-        return data
-    }
 }
 
 private extension Data {

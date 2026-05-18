@@ -1,9 +1,10 @@
 import AppKit
-import SwiftUI
+import CoreMetadata
 import CorePlayer
 import CoreStorage
-import CoreMetadata
+import MovieBoxCore
 import SwiftData
+import SwiftUI
 import UniformTypeIdentifiers
 
 @main
@@ -12,7 +13,11 @@ struct MovieBoxApp: App {
 
     @State private var router = AppRouter()
     @State private var playerState = PlayerState()
+    @State private var appServices = AppServices()
+    @State private var errorCenter = AppErrorCenter()
     @State private var importErrorMessage: String?
+    @State private var didConfigurePersistence = false
+    @Query private var settings: [AppSettings]
 
     init() {
         do {
@@ -27,7 +32,14 @@ struct MovieBoxApp: App {
             RootView()
                 .environment(router)
                 .environment(playerState)
+                .environment(appServices)
+                .environment(errorCenter)
                 .modelContainer(sharedModelContainer)
+                .onChange(of: playerState.isPresented) { _, presented in
+                    if !presented {
+                        Task { await appServices.cancelActiveStream() }
+                    }
+                }
                 .onOpenURL { url in
                     do {
                         try MagnetImportHandler.handle(url: url, router: router)
@@ -51,32 +63,25 @@ struct MovieBoxApp: App {
         .windowToolbarStyle(.unified(showsTitle: false))
         .defaultSize(width: 1440, height: 900)
         .commands {
-            CommandGroup(replacing: .newItem) {}
-            CommandGroup(after: .newItem) {
-                Button("Open Magnet Link or Torrent File…") {
-                    openMagnetImportPanel()
-                }
-                .keyboardShortcut("o", modifiers: [.command, .shift])
-            }
-            CommandMenu("Navigate") {
-                Button("Home") { router.show(.home) }
-                    .keyboardShortcut("1", modifiers: .command)
-                Button("TV Shows") { router.show(.tvShows) }
-                    .keyboardShortcut("2", modifiers: .command)
-                Button("Movies") { router.show(.movies) }
-                    .keyboardShortcut("3", modifiers: .command)
-                Button("Library") { router.show(.library) }
-                    .keyboardShortcut("4", modifiers: .command)
-                Divider()
-                Button("Search") { router.show(.search) }
-                    .keyboardShortcut("f", modifiers: .command)
-            }
+            AppMenuCommands(
+                router: router,
+                playerState: playerState,
+                openMagnetPanel: openMagnetImportPanel,
+                copyDiagnostics: { copyDiagnosticReportToPasteboard() }
+            )
         }
 
         Settings {
             SettingsView()
                 .modelContainer(sharedModelContainer)
         }
+    }
+
+    private func copyDiagnosticReportToPasteboard() {
+        DiagnosticsReport.copyToPasteboard(
+            userMessage: "User-requested diagnostic copy",
+            settings: settings.first
+        )
     }
 
     private func openMagnetImportPanel() {

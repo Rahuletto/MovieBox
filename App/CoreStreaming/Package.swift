@@ -13,7 +13,7 @@ let package = Package(
     ],
     targets: [
         .target(name: "CoreStreaming", dependencies: ["CoreTorrent", "CoreStorage"]),
-        .testTarget(name: "CoreStreamingTests", dependencies: ["CoreStreaming"])
+        .testTarget(name: "CoreStreamingTests", dependencies: ["CoreStreaming", "CoreStorage"])
     ],
     swiftLanguageModes: [.v6]
 )

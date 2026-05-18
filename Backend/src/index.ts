@@ -10,6 +10,20 @@ import {
   INDEXER_CATALOG,
   DEFAULT_ENABLED_INDEXER_IDS,
 } from './torrent'
+import { assertSafeSubtitleURL, buildSubf2mURL } from './subtitle-guard'
+import {
+  ImageProxyQuerySchema,
+  LogoRouteParamsSchema,
+  SubtitleDownloadQuerySchema,
+  SubtitleSearchQuerySchema,
+  TitleRouteParamsSchema,
+  TorrentMetadataQuerySchema,
+  TorrentSearchQuerySchema,
+  TrailerResolveQuerySchema,
+} from './schemas'
+import { parseParams, parseQuery } from './validate'
+import { resolveTrailerStreamURL } from './trailer-resolve'
+import { buildTMDBUpstreamURL, tmdbPathFromRequest } from './tmdb-upstream'
 
 type Bindings = {
   TMDB_TOKEN: string
@@ -54,7 +68,7 @@ app.use('*', async (c, next) => {
 app.use('/api/*', async (c, next) => {
   const origin = c.env.CORS_ORIGIN || '*'
   const corsHandler = cors({
-    origin: origin === '*' ? '*' : origin.split(',').map(o => o.trim()),
+    origin: origin === '*' ? '*' : origin.split(',').map((o) => o.trim()),
     allowMethods: ['GET', 'POST', 'OPTIONS'],
     allowHeaders: ['Content-Type', 'X-MovieBox-Token'],
     maxAge: 86400,
@@ -83,11 +97,14 @@ app.use('/api/*', async (c, next) => {
     )
   }
 
-  await c.env.MOVIEBOX_CACHE.put(cacheKey, String(count + 1), { expirationTtl: Math.ceil(windowMs / 1000) })
-  c.res.headers.set('X-RateLimit-Limit', String(maxRequests))
-  c.res.headers.set('X-RateLimit-Remaining', String(maxRequests - count - 1))
+  await c.env.MOVIEBOX_CACHE.put(cacheKey, String(count + 1), {
+    expirationTtl: Math.ceil(windowMs / 1000),
+  })
 
   await next()
+
+  c.res.headers.set('X-RateLimit-Limit', String(maxRequests))
+  c.res.headers.set('X-RateLimit-Remaining', String(Math.max(0, maxRequests - count - 1)))
 })
 
 // ----- Image proxy (no auth — public, host-whitelisted) ---------------------
@@ -103,7 +120,7 @@ app.use('/api/*', async (c, next) => {
 const ALLOWED_IMG_HOSTS = new Set(['assets.fanart.tv', 'image.tmdb.org', 'webservice.fanart.tv'])
 const IMG_PROXY_TTL = 60 * 60 * 24 * 30 // 30 days
 const IMG_RATE_WINDOW_MS = 60_000
-const IMG_RATE_MAX = 600  // image grids fetch in bursts
+const IMG_RATE_MAX = 600 // image grids fetch in bursts
 
 app.use('/img', async (c, next) => {
   // Simple CORS for the proxy endpoint.
@@ -127,11 +144,15 @@ app.use('/img', async (c, next) => {
 })
 
 app.get('/img', async (c) => {
-  const raw = c.req.query('u')
-  if (!raw) return new Response('missing u=', { status: 400 })
+  const query = parseQuery(c, ImageProxyQuerySchema, c.req.query())
+  if (query instanceof Response) return query
 
   let parsed: URL
-  try { parsed = new URL(raw) } catch { return new Response('invalid url', { status: 400 }) }
+  try {
+    parsed = new URL(query.u)
+  } catch {
+    return new Response('invalid url', { status: 400 })
+  }
 
   if (!ALLOWED_IMG_HOSTS.has(parsed.hostname)) {
     return new Response(`host not allowed: ${parsed.hostname}`, { status: 403 })
@@ -181,6 +202,9 @@ app.get('/health', (c) => {
     service: 'moviebox-backend',
     timestamp: new Date().toISOString(),
     env: c.env.APP_ENV || 'unknown',
+    tmdbConfigured: Boolean(c.env.TMDB_TOKEN),
+    fanartConfigured: Boolean(c.env.FANART_API_KEY),
+    authConfigured: Boolean(c.env.APP_SECRET),
   })
 })
 
@@ -202,18 +226,25 @@ app.use('/api/*', async (c, next) => {
 // TMDB proxy
 app.all('/api/tmdb/*', async (c) => {
   try {
-    const upstreamPath = c.req.path.replace('/api/tmdb', '')
-    const upstreamURL = new URL(c.req.url)
-    upstreamURL.protocol = 'https:'
-    upstreamURL.hostname = 'api.themoviedb.org'
-    upstreamURL.port = ''
-    upstreamURL.pathname = `/3${upstreamPath}`
+    if (!c.env.TMDB_TOKEN) {
+      return c.json(
+        {
+          error: 'misconfigured',
+          message: 'TMDB_TOKEN is not set on the Worker. Run: wrangler secret put TMDB_TOKEN',
+        },
+        503
+      )
+    }
+
+    const upstreamPath = tmdbPathFromRequest(c.req.path)
+    const upstreamURL = buildTMDBUpstreamURL(c.req.url, upstreamPath)
 
     const headers: Record<string, string> = {
       Authorization: `Bearer ${c.env.TMDB_TOKEN}`,
+      Accept: 'application/json',
     }
 
-    const cacheKey = `tmdb:${upstreamPath}:${upstreamURL.search}`
+    const cacheKey = `tmdb:${upstreamPath}:${new URL(upstreamURL).search}`
     const cached = await c.env.MOVIEBOX_CACHE.get(cacheKey)
 
     if (cached) {
@@ -234,7 +265,7 @@ app.all('/api/tmdb/*', async (c) => {
         cacheTtl: cacheTTLForTMDBPath(upstreamPath),
       }
     }
-    const response = await fetch(upstreamURL.toString(), fetchOptions)
+    const response = await fetch(upstreamURL, fetchOptions)
 
     if (!response.ok) {
       const errorBody = await response.text()
@@ -251,9 +282,13 @@ app.all('/api/tmdb/*', async (c) => {
 
     const data = await response.json()
     const ttl = cacheTTLForTMDBPath(upstreamPath)
-    await c.env.MOVIEBOX_CACHE.put(cacheKey, JSON.stringify({ data, cacheControl: `public, max-age=${ttl}` }), {
-      expirationTtl: ttl,
-    })
+    await c.env.MOVIEBOX_CACHE.put(
+      cacheKey,
+      JSON.stringify({ data, cacheControl: `public, max-age=${ttl}` }),
+      {
+        expirationTtl: ttl,
+      }
+    )
 
     return c.json(data, {
       headers: {
@@ -275,13 +310,18 @@ app.all('/api/tmdb/*', async (c) => {
 
 // ----- Logo resolution (Fanart.tv) -------------------------------------------
 
-const LOGO_TTL_HIT = 60 * 60 * 24 * 7  // 7 days for resolved logo URLs
-const LOGO_TTL_MISS = 60 * 60 * 24     // 1 day for negative results (no logo / 404)
-const EXT_IDS_TTL = 60 * 60 * 24 * 7   // 7 days for TMDB external_ids
-const FANART_TTL = 60 * 60 * 24 * 7    // 7 days for fanart payloads
+const LOGO_TTL_HIT = 60 * 60 * 24 * 7 // 7 days for resolved logo URLs
+const LOGO_TTL_MISS = 60 * 60 * 24 // 1 day for negative results (no logo / 404)
+const EXT_IDS_TTL = 60 * 60 * 24 * 7 // 7 days for TMDB external_ids
+const FANART_TTL = 60 * 60 * 24 * 7 // 7 days for fanart payloads
 
 type FanartLogo = { url: string; lang: string; likes?: string }
-type FanartResponse = { hdmovielogo?: FanartLogo[]; hdtvlogo?: FanartLogo[]; movielogo?: FanartLogo[]; clearlogo?: FanartLogo[] }
+type FanartResponse = {
+  hdmovielogo?: FanartLogo[]
+  hdtvlogo?: FanartLogo[]
+  movielogo?: FanartLogo[]
+  clearlogo?: FanartLogo[]
+}
 type ExternalIds = { imdb_id?: string | null; tvdb_id?: number | null }
 
 function pickBestLogo(payload: FanartResponse): string | null {
@@ -293,9 +333,9 @@ function pickBestLogo(payload: FanartResponse): string | null {
   ]
   for (const bucket of buckets) {
     if (!bucket || bucket.length === 0) continue
-    const english = bucket.filter(l => l.lang === 'en')
+    const english = bucket.filter((l) => l.lang === 'en')
     const pool = english.length > 0 ? english : bucket
-    const sorted = [...pool].sort(
+    const sorted = [...pool].toSorted(
       (a, b) => (parseInt(b.likes || '0') || 0) - (parseInt(a.likes || '0') || 0)
     )
     if (sorted[0]?.url) return sorted[0].url
@@ -333,20 +373,20 @@ type OmdbResponse = {
   Response?: 'True' | 'False'
   Error?: string
   imdbID?: string
-  imdbRating?: string  // "7.8" or "N/A"
-  imdbVotes?: string   // "1,234,567" or "N/A"
-  Metascore?: string   // "74" or "N/A"
-  Runtime?: string      // "142 min" or "N/A"
+  imdbRating?: string // "7.8" or "N/A"
+  imdbVotes?: string // "1,234,567" or "N/A"
+  Metascore?: string // "74" or "N/A"
+  Runtime?: string // "142 min" or "N/A"
   Plot?: string
   Title?: string
   Year?: string
-  Type?: string         // "movie" | "series" | "episode"
+  Type?: string // "movie" | "series" | "episode"
   Director?: string
   Writer?: string
   Actors?: string
   Awards?: string
-  Rated?: string        // "PG-13"
-  Released?: string     // "07 Nov 2014"
+  Rated?: string // "PG-13"
+  Released?: string // "07 Nov 2014"
   Country?: string
   Language?: string
   Production?: string
@@ -354,7 +394,7 @@ type OmdbResponse = {
   DVD?: string
   Website?: string
   Poster?: string
-  Genre?: string        // "Action, Adventure, Drama"
+  Genre?: string // "Action, Adventure, Drama"
   Ratings?: OmdbRating[]
 }
 
@@ -373,7 +413,7 @@ function parseOmdbFloat(value: string | undefined): number | null {
 
 function findOmdbRating(ratings: OmdbRating[] | undefined, source: string): number | null {
   if (!ratings) return null
-  const match = ratings.find(r => r.Source.toLowerCase() === source.toLowerCase())
+  const match = ratings.find((r) => r.Source.toLowerCase() === source.toLowerCase())
   if (!match) return null
   // Handles "91%" → 91, "7.8/10" → 78, "74/100" → 74
   const v = match.Value
@@ -388,7 +428,7 @@ function findOmdbRating(ratings: OmdbRating[] | undefined, source: string): numb
   return null
 }
 
-const OMDB_TTL = 60 * 60 * 24 * 7  // 7 days
+const OMDB_TTL = 60 * 60 * 24 * 7 // 7 days
 const OMDB_MISS_TTL = 60 * 60 * 24 // 1 day for "Not Found"
 
 /// Fetch OMDB by imdb_id, with KV caching (positive + negative).
@@ -487,8 +527,9 @@ async function fetchFanart(
 // supports movies (via imdb_id) and TV (via tvdb_id), and negative-caches misses.
 app.get('/api/logo/:kind/:id', async (c) => {
   try {
-    const kind = c.req.param('kind') as 'movie' | 'tv'
-    const id = c.req.param('id')
+    const params = parseParams(c, LogoRouteParamsSchema, c.req.param())
+    if (params instanceof Response) return params
+    const { kind, id } = params
 
     if (kind !== 'movie' && kind !== 'tv') {
       return c.json({ error: 'bad_request', message: 'kind must be movie or tv' }, 400)
@@ -504,7 +545,9 @@ app.get('/api/logo/:kind/:id', async (c) => {
     const cached = await c.env.MOVIEBOX_CACHE.get(cacheKey)
     if (cached !== null) {
       const parsed = JSON.parse(cached) as { url: string | null }
-      return c.json(parsed, { headers: { 'X-Cache': 'HIT', 'Cache-Control': `public, max-age=${LOGO_TTL_HIT}` } })
+      return c.json(parsed, {
+        headers: { 'X-Cache': 'HIT', 'Cache-Control': `public, max-age=${LOGO_TTL_HIT}` },
+      })
     }
 
     const extIds = await fetchExternalIds(c, kind, id)
@@ -517,10 +560,9 @@ app.get('/api/logo/:kind/:id', async (c) => {
     // the TMDB title/year via OMDB and use the recovered imdb_id for fanart.
     let imdbForFanart: string | null = extIds.imdb_id ?? null
     if (!imdbForFanart && !(kind === 'tv' && extIds.tvdb_id) && c.env.OMDB_API_KEY) {
-      const titleResp = await fetch(
-        `https://api.themoviedb.org/3/${kind}/${id}?language=en-US`,
-        { headers: { Authorization: `Bearer ${c.env.TMDB_TOKEN}` } }
-      )
+      const titleResp = await fetch(`https://api.themoviedb.org/3/${kind}/${id}?language=en-US`, {
+        headers: { Authorization: `Bearer ${c.env.TMDB_TOKEN}` },
+      })
       if (titleResp.ok) {
         const t = (await titleResp.json()) as any
         const title: string | undefined = t?.title ?? t?.name
@@ -544,9 +586,14 @@ app.get('/api/logo/:kind/:id', async (c) => {
     const url = fanart ? pickBestLogo(fanart) : null
     const proxied = url ? proxyImage(c, url) : null
     const ttl = url ? LOGO_TTL_HIT : LOGO_TTL_MISS
-    await c.env.MOVIEBOX_CACHE.put(cacheKey, JSON.stringify({ url: proxied }), { expirationTtl: ttl })
+    await c.env.MOVIEBOX_CACHE.put(cacheKey, JSON.stringify({ url: proxied }), {
+      expirationTtl: ttl,
+    })
 
-    return c.json({ url: proxied }, { headers: { 'X-Cache': 'MISS', 'Cache-Control': `public, max-age=${ttl}` } })
+    return c.json(
+      { url: proxied },
+      { headers: { 'X-Cache': 'MISS', 'Cache-Control': `public, max-age=${ttl}` } }
+    )
   } catch (error) {
     return c.json(
       {
@@ -560,24 +607,16 @@ app.get('/api/logo/:kind/:id', async (c) => {
 
 // All torrent sources (Torrentio, YTS/ytsweb, EZTV, TPB, 1337x) — change indexers here, not in the app.
 app.get('/api/torrent/search', async (c) => {
-  const q = c.req.query('q')
-  if (!q?.trim()) {
-    return c.json({ error: 'bad_request', message: 'q is required' }, 400)
-  }
-
-  const kind = c.req.query('kind') === 'tv' ? 'tv' : 'movie'
-  const yearRaw = c.req.query('year')
-  const year = yearRaw ? parseInt(yearRaw, 10) : null
-  const imdbId = c.req.query('imdbId') ?? null
-  const enabled = c.req.query('enabled') ?? c.req.query('indexers') ?? null
+  const search = parseQuery(c, TorrentSearchQuerySchema, c.req.query())
+  if (search instanceof Response) return search
 
   try {
     const payload = await searchAllTorrents({
-      query: q,
-      year: Number.isFinite(year) ? year : null,
-      imdbId,
-      kind,
-      enabledIndexerIDs: enabled,
+      query: search.q,
+      year: search.year,
+      imdbId: search.imdbId,
+      kind: search.kind,
+      enabledIndexerIDs: search.enabled ?? search.indexers ?? null,
     })
     return c.json(payload, {
       headers: { 'Cache-Control': 'private, max-age=120' },
@@ -595,12 +634,10 @@ app.get('/api/torrent/search', async (c) => {
 
 // Resolve .torrent file bytes for streaming (tries all public caches from the Worker).
 app.get('/api/torrent/metadata', async (c) => {
-  const hash = c.req.query('hash') ?? c.req.query('infoHash')
-  if (!hash?.trim()) {
-    return c.json({ error: 'bad_request', message: 'hash is required' }, 400)
-  }
+  const meta = parseQuery(c, TorrentMetadataQuerySchema, c.req.query())
+  if (meta instanceof Response) return meta
 
-  const data = await fetchTorrentFileBytes(hash)
+  const data = await fetchTorrentFileBytes(meta.hash)
   if (!data) {
     return c.json(
       { error: 'metadata_unavailable', message: 'No .torrent file found for this info hash.' },
@@ -625,6 +662,27 @@ app.get('/api/config', (c) => {
   })
 })
 
+/** Authenticated readiness probe for the macOS app (metadata + KV + secrets). */
+app.get('/api/status', async (c) => {
+  let kvOk = false
+  try {
+    await c.env.MOVIEBOX_CACHE.put('__status_ping', '1', { expirationTtl: 60 })
+    kvOk = (await c.env.MOVIEBOX_CACHE.get('__status_ping')) === '1'
+  } catch {
+    kvOk = false
+  }
+
+  return c.json({
+    ok: Boolean(c.env.TMDB_TOKEN && c.env.APP_SECRET && kvOk),
+    service: 'moviebox-backend',
+    timestamp: new Date().toISOString(),
+    tmdbConfigured: Boolean(c.env.TMDB_TOKEN),
+    fanartConfigured: Boolean(c.env.FANART_API_KEY),
+    omdbConfigured: Boolean(c.env.OMDB_API_KEY),
+    kvOk,
+  })
+})
+
 // Unified title bundle: detail + credits + similar + external_ids + videos + logo
 // in a single client RTT, served from KV when warm.
 //
@@ -632,15 +690,9 @@ app.get('/api/config', (c) => {
 // external_ids call + 1 fanart call with one cached backend round-trip.
 app.get('/api/title/:kind/:id', async (c) => {
   try {
-    const kind = c.req.param('kind') as 'movie' | 'tv'
-    const id = c.req.param('id')
-
-    if (kind !== 'movie' && kind !== 'tv') {
-      return c.json({ error: 'bad_request', message: 'kind must be movie or tv' }, 400)
-    }
-    if (!id || !/^\d+$/.test(id)) {
-      return c.json({ error: 'bad_request', message: 'id must be a numeric TMDB id' }, 400)
-    }
+    const route = parseParams(c, TitleRouteParamsSchema, c.req.param())
+    if (route instanceof Response) return route
+    const { kind, id } = route
 
     const cacheKey = `title:${kind}:${id}`
     const cached = await c.env.MOVIEBOX_CACHE.get(cacheKey)
@@ -658,7 +710,12 @@ app.get('/api/title/:kind/:id', async (c) => {
     if (!response.ok) {
       const body = await response.text()
       return c.json(
-        { error: 'upstream_error', message: `TMDB returned ${response.status}`, status: response.status, body },
+        {
+          error: 'upstream_error',
+          message: `TMDB returned ${response.status}`,
+          status: response.status,
+          body,
+        },
         response.status
       )
     }
@@ -705,8 +762,7 @@ app.get('/api/title/:kind/:id', async (c) => {
     })()
 
     const [omdb, fanart] = await Promise.all([omdbTask, fanartTask])
-    const omdbImdbId =
-      extIds.imdb_id ?? (omdb?.Response === 'True' ? omdb.imdbID ?? null : null)
+    const omdbImdbId = extIds.imdb_id ?? (omdb?.Response === 'True' ? (omdb.imdbID ?? null) : null)
 
     const logoUrl = fanart ? pickBestLogo(fanart) : null
 
@@ -715,11 +771,9 @@ app.get('/api/title/:kind/:id', async (c) => {
     const proxiedLogo = proxyImage(c, logoUrl)
 
     // Seed the standalone logo cache so /api/logo/:kind/:id is instant.
-    await c.env.MOVIEBOX_CACHE.put(
-      `logo:${kind}:${id}`,
-      JSON.stringify({ url: proxiedLogo }),
-      { expirationTtl: logoUrl ? LOGO_TTL_HIT : LOGO_TTL_MISS }
-    )
+    await c.env.MOVIEBOX_CACHE.put(`logo:${kind}:${id}`, JSON.stringify({ url: proxiedLogo }), {
+      expirationTtl: logoUrl ? LOGO_TTL_HIT : LOGO_TTL_MISS,
+    })
 
     detail.moviebox_logo = proxiedLogo
 
@@ -756,7 +810,7 @@ app.get('/api/title/:kind/:id', async (c) => {
       // If TMDB external_ids was empty but OMDB found the id, expose it inline
       // so the iOS client picks it up via the existing external_ids path.
       if (!extIds.imdb_id && omdbImdbId) {
-        detail.external_ids = { ...(detail.external_ids ?? {}), imdb_id: omdbImdbId }
+        detail.external_ids = { ...detail.external_ids, imdb_id: omdbImdbId }
       }
     }
 
@@ -850,24 +904,25 @@ app.get('/api/omdb', async (c) => {
 // Subf2m subtitle search and download
 app.get('/api/subtitles/search', async (c) => {
   try {
-    const title = c.req.query('title')
-    const year = c.req.query('year')
-    const language = c.req.query('language') || 'english'
-    const type = c.req.query('type') || 'movie'
-    const imdbId = c.req.query('imdb_id')
+    const sub = parseQuery(c, SubtitleSearchQuerySchema, c.req.query())
+    if (sub instanceof Response) return sub
 
-    if (!title && !imdbId) {
-      return c.json({ error: 'bad_request', message: 'Missing title or imdb_id parameter.' }, 400)
-    }
+    const title = sub.title
+    const year = sub.year
+    const language = sub.language
+    const type = sub.type
+    const imdbId = sub.imdb_id
 
-    const cacheKey = `subf2m:search:${title}:${year}:${language}:${type}`
+    const cacheKey = `subf2m:search:${title ?? ''}:${imdbId ?? ''}:${year ?? ''}:${language}:${type}`
     const cached = await c.env.MOVIEBOX_CACHE.get(cacheKey)
     if (cached) {
       return c.json(JSON.parse(cached), { headers: { 'X-Cache': 'HIT' } })
     }
 
-    const searchQuery = title || ''
-    const searchUrl = `https://subf2m.co/subtitles/searchbytitle?query=${encodeURIComponent(searchQuery)}&l=`
+    const searchQuery = imdbId ? `tt${imdbId.replace(/^tt/i, '')}` : title || ''
+    const searchUrl = buildSubf2mURL(
+      `/subtitles/searchbytitle?query=${encodeURIComponent(searchQuery)}&l=`
+    ).toString()
     const searchHtml = await fetchWithTimeout(searchUrl)
 
     if (!searchHtml) {
@@ -881,7 +936,9 @@ app.get('/api/subtitles/search', async (c) => {
 
     const subtitles: SubtitleResult[] = []
     for (const result of results.slice(0, 3)) {
-      const detailUrl = `https://subf2m.co${result.path}/${normalizeLanguageCode(language)}`
+      const detailUrl = buildSubf2mURL(
+        `${result.path}/${normalizeLanguageCode(language)}`
+      ).toString()
       const detailHtml = await fetchWithTimeout(detailUrl)
       if (detailHtml) {
         const items = parseSubf2mDetailPage(detailHtml, result.path, language)
@@ -890,7 +947,9 @@ app.get('/api/subtitles/search', async (c) => {
     }
 
     const response = { subtitles }
-    await c.env.MOVIEBOX_CACHE.put(cacheKey, JSON.stringify(response), { expirationTtl: 60 * 60 * 6 })
+    await c.env.MOVIEBOX_CACHE.put(cacheKey, JSON.stringify(response), {
+      expirationTtl: 60 * 60 * 6,
+    })
     return c.json(response, { headers: { 'X-Cache': 'MISS' } })
   } catch (error) {
     return c.json(
@@ -905,10 +964,9 @@ app.get('/api/subtitles/search', async (c) => {
 
 app.get('/api/subtitles/download', async (c) => {
   try {
-    const subtitleUrl = c.req.query('url')
-    if (!subtitleUrl) {
-      return c.json({ error: 'bad_request', message: 'Missing url parameter.' }, 400)
-    }
+    const dl = parseQuery(c, SubtitleDownloadQuerySchema, c.req.query())
+    if (dl instanceof Response) return dl
+    const subtitleUrl = dl.url
 
     const cacheKey = `subf2m:dl:${btoa(subtitleUrl)}`
     const cached = await c.env.MOVIEBOX_CACHE.get(cacheKey, 'arrayBuffer')
@@ -921,7 +979,12 @@ app.get('/api/subtitles/download', async (c) => {
       })
     }
 
-    const fullUrl = subtitleUrl.startsWith('http') ? subtitleUrl : `https://subf2m.co${subtitleUrl}`
+    let fullUrl: string
+    try {
+      fullUrl = buildSubf2mURL(subtitleUrl).toString()
+    } catch {
+      return c.json({ error: 'bad_request', message: 'Subtitle URL is not allowed.' }, 400)
+    }
     const html = await fetchWithTimeout(fullUrl)
     if (!html) {
       return c.json({ error: 'not_found', message: 'Could not fetch subtitle page.' }, 404)
@@ -932,7 +995,14 @@ app.get('/api/subtitles/download', async (c) => {
       return c.json({ error: 'not_found', message: 'No download link found.' }, 404)
     }
 
-    const dlUrl = downloadLink.startsWith('http') ? downloadLink : `https://subf2m.co${downloadLink}`
+    let dlUrl: string
+    try {
+      dlUrl = downloadLink.startsWith('http')
+        ? assertSafeSubtitleURL(downloadLink).toString()
+        : buildSubf2mURL(downloadLink).toString()
+    } catch {
+      return c.json({ error: 'bad_request', message: 'Subtitle download URL is not allowed.' }, 400)
+    }
     const zipResponse = await fetchWithTimeout(dlUrl, { returnType: 'arrayBuffer' })
     if (!zipResponse) {
       return c.json({ error: 'download_failed', message: 'Failed to download subtitle ZIP.' }, 502)
@@ -963,18 +1033,26 @@ app.get('/api/subtitles/download', async (c) => {
 
 app.get('/api/trailer/resolve', async (c) => {
   try {
-    const key = c.req.query('key')
-    if (!key) {
-      return c.json({ error: 'bad_request', message: 'Missing key parameter.' }, 400)
+    const trailer = parseQuery(c, TrailerResolveQuerySchema, c.req.query())
+    if (trailer instanceof Response) return trailer
+
+    const streamURL = await resolveTrailerStreamURL(trailer.key)
+    if (!streamURL) {
+      return c.json(
+        { error: 'trailer_unavailable', message: 'No playable stream found for this trailer key.' },
+        404
+      )
     }
 
-    // Return a high-definition, ultra-high-speed direct video stream (Tears of Steel)
-    // instantly (1ms RTT) so the client custom glass player can display its peak performance immediately,
-    // and the backend never hangs or blocks waiting for blocked YouTube scrapers!
-    const directTrailerURL = "https://vjs.zencdn.net/v/oceans.mp4"
-    return c.json({ url: directTrailerURL })
+    return c.json({ url: streamURL })
   } catch (error) {
-    return c.json({ error: 'internal_error', message: error instanceof Error ? error.message : 'Unknown error' }, 500)
+    return c.json(
+      {
+        error: 'internal_error',
+        message: error instanceof Error ? error.message : 'Unknown error',
+      },
+      500
+    )
   }
 })
 
@@ -1086,7 +1164,9 @@ function parseSubf2mSearchResults(html: string, targetYear?: string | null): Sub
 
   const afterStart = html.substring(searchResultStart)
 
-  const ulMatch = afterStart.match(/<h2 class="(exact|close|popular)">[\s\S]*?<ul>([\s\S]*?)<\/ul>/i)
+  const ulMatch = afterStart.match(
+    /<h2 class="(exact|close|popular)">[\s\S]*?<ul>([\s\S]*?)<\/ul>/i
+  )
   if (!ulMatch) return results
 
   const listHtml = ulMatch[2]
@@ -1162,10 +1242,11 @@ async function extractSrtFromZip(zipBuffer: ArrayBuffer): Promise<string | null>
     const zipReader = new ZipReader(new BlobReader(blob))
     const entries = await zipReader.getEntries()
 
-    const srtEntry = entries.find(e => e.filename.toLowerCase().endsWith('.srt')) ||
-                     entries.find(e => e.filename.toLowerCase().endsWith('.sub')) ||
-                     entries.find(e => e.filename.toLowerCase().includes('utf')) ||
-                     entries[0]
+    const srtEntry =
+      entries.find((e) => e.filename.toLowerCase().endsWith('.srt')) ||
+      entries.find((e) => e.filename.toLowerCase().endsWith('.sub')) ||
+      entries.find((e) => e.filename.toLowerCase().includes('utf')) ||
+      entries[0]
 
     if (!srtEntry || !srtEntry.getData) return null
 
@@ -1210,7 +1291,10 @@ async function fetchWithTimeout(
 
 // 404 handler
 app.notFound((c) => {
-  return c.json({ error: 'not_found', message: `Route ${c.req.method} ${c.req.path} not found.` }, 404)
+  return c.json(
+    { error: 'not_found', message: `Route ${c.req.method} ${c.req.path} not found.` },
+    404
+  )
 })
 
 // Error handler
@@ -1230,7 +1314,8 @@ app.onError((error, c) => {
 
 function cacheTTLForTMDBPath(path: string): number {
   if (path.startsWith('/genre/')) return 60 * 60 * 24
-  if (path.includes('/credits') || path.includes('/images') || path.includes('/videos')) return 60 * 60 * 6
+  if (path.includes('/credits') || path.includes('/images') || path.includes('/videos'))
+    return 60 * 60 * 6
   if (path.startsWith('/movie/top_rated')) return 60 * 60
   if (path.startsWith('/movie/now_playing')) return 60 * 15
   if (path.startsWith('/search/')) return 60 * 30

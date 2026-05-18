@@ -1,12 +1,9 @@
 import CoreMetadata
 import CoreStorage
 import DesignSystem
+import MovieBoxCore
 import SwiftData
 import SwiftUI
-
-func resolveMetadataMode(from settings: [AppSettings]) -> MetadataEndpointMode? {
-    settings.first?.metadataMode
-}
 
 struct GenreResultsView: View {
     @Environment(AppRouter.self) private var router
@@ -87,7 +84,7 @@ struct GenreResultsView: View {
     }
 
     private func load() async {
-        guard let mode = resolveMetadataMode(from: settings) else {
+        guard let mode = MetadataSettings.mode(from: settings) else {
             errorMessage = "Configure metadata access in Settings first."
             return
         }
@@ -106,8 +103,7 @@ struct GenreResultsView: View {
             if let urlError = error as? URLError, urlError.code == .cancelled {
                 return
             }
-            LogStore.shared.log("Error loading GenreResults: \(error)")
-            LogStore.shared.log("Stack Trace:\n\(Thread.callStackSymbols.prefix(8).joined(separator: "\n"))")
+            MetadataErrorLogger.record(error, context: "Genre results")
             if movies.isEmpty && shows.isEmpty {
                 errorMessage = error.localizedDescription
             }

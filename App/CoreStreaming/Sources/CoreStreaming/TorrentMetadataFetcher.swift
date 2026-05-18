@@ -12,21 +12,15 @@ public enum TorrentMetadataFetcher {
         }
     }
 
-    /// Optional MovieBox backend — tried first (Worker can reach more mirrors than some clients).
-    nonisolated(unsafe) private static var backend: BackendConfig?
-
     public static func configureBackend(baseURL: URL?, appToken: String?) {
-        if let baseURL, let appToken, !appToken.isEmpty {
-            backend = BackendConfig(
-                baseURL: BackendURLSession.normalizeBaseURL(baseURL),
-                appToken: appToken
-            )
-        } else {
-            backend = nil
+        Task {
+            await TorrentMetadataBackend.shared.configure(baseURL: baseURL, appToken: appToken)
         }
     }
 
-    public static var hasBackend: Bool { backend != nil }
+    public static var hasBackend: Bool {
+        get async { await TorrentMetadataBackend.shared.currentConfig() != nil }
+    }
 
     public enum FetchError: LocalizedError {
         case invalidInfoHash
@@ -98,6 +92,7 @@ public enum TorrentMetadataFetcher {
             trackers = [defaultTrackers[0]]
         }
 
+        let backend = await TorrentMetadataBackend.shared.currentConfig()
         let useBackendOnly = backend != nil
 
         if let backend {

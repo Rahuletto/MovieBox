@@ -189,7 +189,12 @@ public final class HTTPRangeServer {
                         return HTTPResponse(status: 416, body: "Range Not Satisfiable")
                     }
 
-                    var length = Int(mediaEnd - mediaStart + 1)
+                    let span = mediaEnd &- mediaStart
+                    let spanPlusOne = span &+ 1
+                    guard spanPlusOne > 0, spanPlusOne <= Int64(Self.maxRangeBytes) else {
+                        return HTTPResponse(status: 416, body: "Range Not Satisfiable")
+                    }
+                    var length = Int(spanPlusOne)
                     length = min(length, Self.maxRangeBytes)
                     let torrentOffset = streamByteOffset + mediaStart
 
@@ -232,8 +237,11 @@ public final class HTTPRangeServer {
         }
 
         let headerString = headers.joined(separator: "\r\n") + "\r\n\r\n"
+        guard let headerData = headerString.data(using: .utf8) else {
+            return HTTPResponse(status: 500, body: "Internal Server Error")
+        }
         var response = Data()
-        response.append(headerString.data(using: .utf8)!)
+        response.append(headerData)
         response.append(bodyData)
 
         return HTTPResponse(status: statusCode, data: response)
@@ -252,7 +260,8 @@ struct HTTPResponse {
 
     init(status: Int, body: String) {
         self.status = status
-        self.data = "HTTP/1.1 \(status) \(HTTPResponse.statusMessage(for: status))\r\nContent-Length: \(body.count)\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n\(body)".data(using: .utf8)!
+        let raw = "HTTP/1.1 \(status) \(HTTPResponse.statusMessage(for: status))\r\nContent-Length: \(body.count)\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n\(body)"
+        self.data = raw.data(using: .utf8) ?? Data()
     }
 
     init(status: Int, data: Data) {

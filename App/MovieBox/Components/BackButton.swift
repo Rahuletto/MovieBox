@@ -26,11 +26,3 @@ struct BackButton: View {
         }
     }
 }
-
-#Preview {
-    VStack(spacing: 20) {
-        BackButton(action: {}, title: "Adventure")
-        BackButton(action: {}, title: nil)
-    }
-    .padding()
-}

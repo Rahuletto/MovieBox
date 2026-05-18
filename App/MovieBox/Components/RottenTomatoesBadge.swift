@@ -61,13 +61,3 @@ struct RottenTomatoesBadge: View {
         .accessibilityLabel("\(verdict.accessibilityPrefix), \(score) percent on Rotten Tomatoes")
     }
 }
-
-#Preview {
-    HStack(spacing: 12) {
-        RottenTomatoesBadge(score: 94)
-        RottenTomatoesBadge(score: 68)
-        RottenTomatoesBadge(score: 32)
-    }
-    .padding(40)
-    .background(Color.black)
-}

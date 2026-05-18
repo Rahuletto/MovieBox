@@ -3,7 +3,11 @@ import { isTorrentFileBytes } from './metadata'
 
 describe('isTorrentFileBytes', () => {
   it('accepts bencode dictionary prefix', () => {
-    const torrent = new Uint8Array([0x64, 0x38, 0x3a, 0x61, 0x6e, 0x6e, 0x6f, 0x75, 0x6e, 0x63, 0x65])
+    const header = new Uint8Array([
+      0x64, 0x38, 0x3a, 0x61, 0x6e, 0x6e, 0x6f, 0x75, 0x6e, 0x63, 0x65,
+    ])
+    const torrent = new Uint8Array(64)
+    torrent.set(header)
     expect(isTorrentFileBytes(torrent)).toBe(true)
   })
 

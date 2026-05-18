@@ -1,15 +1,17 @@
 import AppKit
-import SwiftData
-import SwiftUI
+import CoreMetadata
+import CorePlayer
 import CoreStorage
 import CoreStreaming
-import CoreMetadata
 import CoreTorrent
 import DesignSystem
-import CorePlayer
+import MovieBoxCore
+import SwiftData
+import SwiftUI
 
 struct TorrentSection: View {
     @Environment(PlayerState.self) private var playerState
+    @Environment(AppServices.self) private var appServices
     @Query private var settings: [AppSettings]
 
     let movie: Movie
@@ -17,18 +19,16 @@ struct TorrentSection: View {
     let searchDiagnostics: TorrentSearchDiagnostics?
     let isTV: Bool
     var episodeLabel: String? = nil
-    let orchestrator: StreamingOrchestrator
     let subtitleURL: URL?
     var subtitleAppearance: SubtitleAppearance = .cinematic
     var subtitleFontSize: CGFloat = 20
 
-    @StateObject private var downloadManager = DownloadManager()
+    private var orchestrator: StreamingOrchestrator { appServices.streamingOrchestrator }
+    private var downloadManager: DownloadManager { appServices.downloadManager }
     @State private var currentPage = 0
     @State private var busyTorrentID: UUID?
     @State private var cardErrors: [UUID: String] = [:]
     @State private var errorDismissTasks: [UUID: Task<Void, Never>] = [:]
-    @State private var streamSession: TorrentStreamSession?
-    @State private var playbackCoordinator: TorrentPlaybackCoordinator?
     @State private var downloadWatchTask: Task<Void, Never>?
     @State private var visibleCardModels: [TorrentCardModel] = []
 
@@ -95,7 +95,7 @@ struct TorrentSection: View {
             }
         }
         .onAppear {
-            syncTorrentBackend()
+            TorrentBackendSync.apply(from: settings.first)
             rebuildVisibleCardModels()
         }
         .onChange(of: movie.id) { _, _ in
@@ -107,8 +107,12 @@ struct TorrentSection: View {
             rebuildVisibleCardModels()
         }
         .onChange(of: clampedPage) { _, _ in rebuildVisibleCardModels() }
-        .onChange(of: settings.first?.proxyBaseURL) { _, _ in syncTorrentBackend() }
-        .onChange(of: settings.first?.appToken) { _, _ in syncTorrentBackend() }
+        .onChange(of: settings.first?.proxyBaseURL) { _, _ in
+            TorrentBackendSync.apply(from: settings.first)
+        }
+        .onChange(of: settings.first?.appToken) { _, _ in
+            TorrentBackendSync.apply(from: settings.first)
+        }
     }
 
     private func rebuildVisibleCardModels() {
@@ -123,14 +127,6 @@ struct TorrentSection: View {
     private func startDownload(for id: UUID) {
         guard let torrent = visibleTorrents.first(where: { $0.id == id }) else { return }
         startDownload(torrent)
-    }
-
-    private func syncTorrentBackend() {
-        let config = settings.first?.backendTorrentConfig
-        TorrentMetadataFetcher.configureBackend(
-            baseURL: config?.baseURL,
-            appToken: config?.appToken
-        )
     }
 
     private var header: some View {
@@ -199,38 +195,29 @@ struct TorrentSection: View {
         busyTorrentID = torrent.id
         clearError(for: torrent.id)
 
-        let coordinator = TorrentPlaybackCoordinator(orchestrator: orchestrator)
-        playbackCoordinator = coordinator
+        let playback = PlaybackSettings(
+            appearance: subtitleAppearance,
+            fontSize: subtitleFontSize
+        )
 
         Task { @MainActor in
-            let session = await coordinator.startSession(for: torrent)
-            streamSession = session
-            await session.waitForPlayback(timeout: 180)
-
-            withAnimation(MovieBoxMotion.player) {
-                busyTorrentID = nil
+            defer {
+                withAnimation(MovieBoxMotion.player) {
+                    busyTorrentID = nil
+                }
             }
-
-            if case .failed(let message) = session.state {
-                presentError(message, for: torrent.id)
-                return
-            }
-
-            guard case .ready = session.state else {
-                presentError("Stream did not become ready.", for: torrent.id)
-                return
-            }
-
             do {
-                try coordinator.finishPlayback(
-                    torrent: torrent,
-                    allTorrents: torrents,
-                    session: session,
-                    playerState: playerState,
-                    movieId: movie.id,
-                    subtitleURL: subtitleURL,
-                    subtitleAppearance: subtitleAppearance,
-                    subtitleFontSize: subtitleFontSize
+                try await TorrentPlaybackService.play(
+                    request: TorrentPlaybackService.Request(
+                        torrent: torrent,
+                        allTorrents: torrents,
+                        movieId: movie.id,
+                        subtitleURL: subtitleURL,
+                        playback: playback,
+                        episodeTitle: episodeLabel
+                    ),
+                    appServices: appServices,
+                    playerState: playerState
                 )
             } catch {
                 presentError(error.localizedDescription, for: torrent.id)
@@ -244,6 +231,7 @@ struct TorrentSection: View {
 
         let taskId = downloadManager.startDownload(
             tmdbId: movie.id,
+            mediaKind: (isTV ? MediaKind.tv : .movie).storageValue,
             title: torrent.title,
             magnetURI: torrent.magnetURI,
             quality: torrent.quality.rawValue,

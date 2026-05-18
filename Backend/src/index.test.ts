@@ -86,9 +86,12 @@ describe('Subtitles endpoint', () => {
   })
 
   it('searches subtitles with title', async () => {
-    const res = await SELF.fetch('http://localhost/api/subtitles/search?title=Fight+Club&year=1999&language=en', {
-      headers: { 'X-MovieBox-Token': 'test-secret' },
-    })
+    const res = await SELF.fetch(
+      'http://localhost/api/subtitles/search?title=Fight+Club&year=1999&language=en',
+      {
+        headers: { 'X-MovieBox-Token': 'test-secret' },
+      }
+    )
     expect(res.status).toBe(200)
     const data = await res.json()
     expect(data.subtitles).toBeDefined()
@@ -96,9 +99,12 @@ describe('Subtitles endpoint', () => {
   })
 
   it('returns empty array when no subtitles found', async () => {
-    const res = await SELF.fetch('http://localhost/api/subtitles/search?title=xyznonexistentmovie123&language=en', {
-      headers: { 'X-MovieBox-Token': 'test-secret' },
-    })
+    const res = await SELF.fetch(
+      'http://localhost/api/subtitles/search?title=xyznonexistentmovie123&language=en',
+      {
+        headers: { 'X-MovieBox-Token': 'test-secret' },
+      }
+    )
     expect(res.status).toBe(200)
     const data = await res.json()
     expect(data.subtitles).toBeDefined()

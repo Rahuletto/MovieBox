@@ -25,7 +25,9 @@ public actor PieceStore {
         totalSize: Int64? = nil,
         streamFirstPiece: Int = 0,
         streamMediaByteOffset: Int64 = 0,
-        storageDirectory: URL = FileManager.default.temporaryDirectory
+        storageDirectory: URL = FileManager.default.temporaryDirectory,
+        existingBitmap: Data? = nil,
+        recreateFile: Bool = true
     ) async throws {
         self.infoHash = infoHash
         self.pieceCount = pieceCount
@@ -35,18 +37,68 @@ public actor PieceStore {
         let resolvedTotalSize = totalSize ?? Int64(pieceCount) * pieceSize
         self.totalSize = resolvedTotalSize
         self.storageURL = storageDirectory.appendingPathComponent("moviebox_\(infoHash).stream")
-        self.bitmap = Array(repeating: false, count: pieceCount)
+
+        if let existingBitmap, !existingBitmap.isEmpty {
+            self.bitmap = Self.decodeBitmap(existingBitmap, pieceCount: pieceCount)
+        } else {
+            self.bitmap = Array(repeating: false, count: pieceCount)
+        }
 
         try FileManager.default.createDirectory(at: storageDirectory, withIntermediateDirectories: true)
 
-        if FileManager.default.fileExists(atPath: storageURL.path) {
-            try FileManager.default.removeItem(at: storageURL)
+        let fileExists = FileManager.default.fileExists(atPath: storageURL.path)
+        if recreateFile || !fileExists {
+            if fileExists {
+                try FileManager.default.removeItem(at: storageURL)
+            }
+            FileManager.default.createFile(atPath: storageURL.path, contents: nil)
+            let handle = try FileHandle(forWritingTo: storageURL)
+            try handle.truncate(atOffset: UInt64(resolvedTotalSize))
+            try handle.close()
         }
-        FileManager.default.createFile(atPath: storageURL.path, contents: nil)
-        let handle = try FileHandle(forWritingTo: storageURL)
-        try handle.truncate(atOffset: UInt64(resolvedTotalSize))
-        self.writeHandle = handle
+
+        self.writeHandle = try FileHandle(forWritingTo: storageURL)
         self.readHandle = try FileHandle(forReadingFrom: storageURL)
+    }
+
+    public func encodedBitmap() -> Data {
+        Self.encodeBitmap(bitmap)
+    }
+
+    public static func encodeBitmap(_ bitmap: [Bool]) -> Data {
+        var bytes = [UInt8]()
+        bytes.reserveCapacity((bitmap.count + 7) / 8)
+        var current: UInt8 = 0
+        var bitIndex = 0
+        for piece in bitmap {
+            if piece {
+                current |= 1 << (7 - bitIndex)
+            }
+            bitIndex += 1
+            if bitIndex == 8 {
+                bytes.append(current)
+                current = 0
+                bitIndex = 0
+            }
+        }
+        if bitIndex > 0 {
+            bytes.append(current)
+        }
+        return Data(bytes)
+    }
+
+    public static func decodeBitmap(_ data: Data, pieceCount: Int) -> [Bool] {
+        var result = [Bool]()
+        result.reserveCapacity(pieceCount)
+        for byte in data {
+            for bit in 0..<8 where result.count < pieceCount {
+                result.append((byte >> (7 - bit)) & 1 != 0)
+            }
+        }
+        while result.count < pieceCount {
+            result.append(false)
+        }
+        return result
     }
 
     /// Writes a block to disk immediately for progressive playback (before hash verification).

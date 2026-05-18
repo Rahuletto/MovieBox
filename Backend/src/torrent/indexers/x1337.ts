@@ -1,5 +1,11 @@
 import type { SearchContext, TorrentIndexer, TorrentSearchHit } from '../types'
-import { decodeHtml, fetchHTML, hashFromMagnet, parseSizeBytes, resolveQualityLabel } from '../utils'
+import {
+  decodeHtml,
+  fetchHTML,
+  hashFromMagnet,
+  parseSizeBytes,
+  resolveQualityLabel,
+} from '../utils'
 
 export interface Row1337x {
   path: string
@@ -45,7 +51,10 @@ export function parse1337xDetailPaths(html: string): string[] {
   return paths.slice(0, 20)
 }
 
-async function fetch1337xMagnet(base: string, path: string): Promise<{ magnet: string; hash: string } | null> {
+async function fetch1337xMagnet(
+  base: string,
+  path: string
+): Promise<{ magnet: string; hash: string } | null> {
   const html = await fetchHTML(`${base}${path}`)
   if (!html) return null
 
@@ -59,14 +68,15 @@ async function fetch1337xMagnet(base: string, path: string): Promise<{ magnet: s
   return { magnet, hash }
 }
 
-async function search1337xHost(base: string, query: string, category?: 'Movies' | 'TV'): Promise<TorrentSearchHit[]> {
+async function search1337xHost(
+  base: string,
+  query: string,
+  category?: 'Movies' | 'TV'
+): Promise<TorrentSearchHit[]> {
   const slug = encodeURIComponent(query.trim()).replace(/%20/g, '+')
   const searchUrls = category
     ? [`${base}/category-search/${slug}/${category}/1/`]
-    : [
-        `${base}/sort-search/${slug}/seeders/desc/1/`,
-        `${base}/search/${slug}/1/`,
-      ]
+    : [`${base}/sort-search/${slug}/seeders/desc/1/`, `${base}/search/${slug}/1/`]
 
   for (const searchUrl of searchUrls) {
     const html = await fetchHTML(searchUrl)
@@ -75,8 +85,20 @@ async function search1337xHost(base: string, query: string, category?: 'Movies' 
     const parsed = parse1337xSearchRows(html)
     const paths =
       parsed.length > 0
-        ? parsed.map((r) => ({ path: r.path, title: r.title, seeders: r.seeders, leechers: r.leechers, sizeText: r.sizeText }))
-        : parse1337xDetailPaths(html).map((path) => ({ path, title: query, seeders: 0, leechers: 0, sizeText: '' }))
+        ? parsed.map((r) => ({
+            path: r.path,
+            title: r.title,
+            seeders: r.seeders,
+            leechers: r.leechers,
+            sizeText: r.sizeText,
+          }))
+        : parse1337xDetailPaths(html).map((path) => ({
+            path,
+            title: query,
+            seeders: 0,
+            leechers: 0,
+            sizeText: '',
+          }))
 
     if (!paths.length) continue
 

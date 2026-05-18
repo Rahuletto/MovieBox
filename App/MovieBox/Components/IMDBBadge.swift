@@ -28,11 +28,3 @@ struct IMDBBadge: View {
         .accessibilityLabel("IMDb rating \(String(format: "%.1f", rating))")
     }
 }
-
-#Preview {
-    HStack {
-        IMDBBadge(rating: 8.4)
-    }
-    .padding(40)
-    .background(Color.gray)
-}

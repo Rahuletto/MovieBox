@@ -47,7 +47,9 @@ export const INDEXER_CATALOG: IndexerCatalogEntry[] = [
   },
 ]
 
-export const DEFAULT_ENABLED_INDEXER_IDS = INDEXER_CATALOG.filter((e) => e.defaultEnabled).map((e) => e.id)
+export const DEFAULT_ENABLED_INDEXER_IDS = INDEXER_CATALOG.filter((e) => e.defaultEnabled).map(
+  (e) => e.id
+)
 
 export function parseEnabledIndexerIDs(raw: string | null | undefined): Set<string> {
   const known = new Set(INDEXER_CATALOG.map((e) => e.id))

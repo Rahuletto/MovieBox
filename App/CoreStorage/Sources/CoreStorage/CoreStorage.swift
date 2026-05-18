@@ -4,6 +4,7 @@ import SwiftData
 @Model
 public final class MovieRecord {
     @Attribute(.unique) public var tmdbId: Int
+    public var mediaKind: String
     public var title: String
     public var posterPath: String?
     public var genres: [Int]
@@ -14,6 +15,7 @@ public final class MovieRecord {
 
     public init(
         tmdbId: Int,
+        mediaKind: String = "movie",
         title: String,
         posterPath: String? = nil,
         genres: [Int] = [],
@@ -23,6 +25,7 @@ public final class MovieRecord {
         watchedFraction: Double = 0
     ) {
         self.tmdbId = tmdbId
+        self.mediaKind = mediaKind
         self.title = title
         self.posterPath = posterPath
         self.genres = genres
@@ -50,12 +53,15 @@ public final class RatingRecord {
 
 @Model
 public final class DownloadRecord {
-    @Attribute(.unique) public var tmdbId: Int
+    @Attribute(.unique) public var infoHash: String
+    public var tmdbId: Int
+    public var mediaKind: String
+    public var title: String
     public var magnetURI: String
-    public var infoHash: String
     public var quality: String
     public var hdrType: String?
     public var localFilePath: String?
+    public var storageDirectory: String?
     public var state: String
     public var progressFraction: Double
     public var totalBytes: Int64
@@ -64,12 +70,15 @@ public final class DownloadRecord {
     public var createdAt: Date
 
     public init(
-        tmdbId: Int,
-        magnetURI: String,
         infoHash: String,
+        tmdbId: Int,
+        mediaKind: String = "movie",
+        title: String,
+        magnetURI: String,
         quality: String,
         hdrType: String? = nil,
         localFilePath: String? = nil,
+        storageDirectory: String? = nil,
         state: DownloadState = .queued,
         progressFraction: Double = 0,
         totalBytes: Int64 = 0,
@@ -77,12 +86,15 @@ public final class DownloadRecord {
         pieceBitmap: Data = Data(),
         createdAt: Date = Date()
     ) {
-        self.tmdbId = tmdbId
-        self.magnetURI = magnetURI
         self.infoHash = infoHash
+        self.tmdbId = tmdbId
+        self.mediaKind = mediaKind
+        self.title = title
+        self.magnetURI = magnetURI
         self.quality = quality
         self.hdrType = hdrType
         self.localFilePath = localFilePath
+        self.storageDirectory = storageDirectory
         self.state = state.rawValue
         self.progressFraction = progressFraction
         self.totalBytes = totalBytes
@@ -249,7 +261,7 @@ public enum MovieBoxModelContainer {
     /// Opens the shared SwiftData store, recreating it once if the on-disk schema is incompatible.
     public static func make(inMemoryOnly: Bool = false) throws -> ModelContainer {
         let schema = Schema(MovieBoxSchema.models)
-        let storeURL = persistentStoreURL()
+        let storeURL = try persistentStoreURL()
         let config = ModelConfiguration(
             storeName,
             schema: schema,
@@ -267,8 +279,12 @@ public enum MovieBoxModelContainer {
         }
     }
 
-    private static func persistentStoreURL() -> URL {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+    private static func persistentStoreURL() throws -> URL {
+        guard let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            throw MovieBoxError.storage(NSError(domain: "MovieBox", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Application Support directory unavailable",
+            ]))
+        }
         let folder = support.appendingPathComponent("MovieBox", isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         return folder.appendingPathComponent("\(storeName).store", isDirectory: false)

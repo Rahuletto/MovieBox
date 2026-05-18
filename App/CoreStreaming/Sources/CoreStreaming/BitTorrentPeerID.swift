@@ -6,7 +6,7 @@ enum BitTorrentPeerID {
         var id = prefix
         let alphabet = Array("abcdefghijklmnopqrstuvwxyz0123456789")
         while id.utf8.count < 20 {
-            id.append(alphabet.randomElement()!)
+            id.append(alphabet.randomElement() ?? "a")
         }
         if id.utf8.count > 20 {
             id = String(id.prefix(20))
