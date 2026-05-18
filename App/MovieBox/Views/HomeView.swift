@@ -139,7 +139,8 @@ struct HomeView: View {
             }
         }
         .task(id: settingsKey) {
-            guard let mode = metadataMode else { return }
+            guard metadataMode != nil else { return }
+            guard let mode = await MetadataSettings.resolveMode(from: settings) else { return }
             await load(mode: mode)
         }
     }

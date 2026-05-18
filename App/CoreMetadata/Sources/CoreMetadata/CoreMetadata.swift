@@ -230,10 +230,16 @@ public actor MetadataClient {
     private let decoder: JSONDecoder
     private let tmdbToken: String?
 
-    public init(mode: MetadataEndpointMode? = nil, session: URLSession = .shared, tmdbToken: String? = nil) {
+    public init(mode: MetadataEndpointMode? = nil, session: URLSession? = nil, tmdbToken: String? = nil) {
         self.mode = mode
-        self.session = session
         self.tmdbToken = tmdbToken
+        if let session {
+            self.session = session
+        } else if case .backend = mode {
+            self.session = BackendURLSession.urlSession
+        } else {
+            self.session = .shared
+        }
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         self.decoder = decoder
