@@ -24,6 +24,7 @@ import {
 import { parseParams, parseQuery } from './validate'
 import { resolveTrailerStreamURL } from './trailer-resolve'
 import { buildTMDBUpstreamURL, tmdbPathFromRequest } from './tmdb-upstream'
+import { kvGet, kvGetBuffer, kvPut } from './kv-cache'
 
 type Bindings = {
   TMDB_TOKEN: string
@@ -83,7 +84,7 @@ app.use('/api/*', async (c, next) => {
   const clientIp = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || 'unknown'
   const cacheKey = `rate_limit:${clientIp}:${Math.floor(Date.now() / windowMs)}`
 
-  const current = await c.env.MOVIEBOX_CACHE.get(cacheKey)
+  const current = await kvGet(c.env.MOVIEBOX_CACHE, cacheKey)
   const count = current ? parseInt(current) : 0
 
   if (count >= maxRequests) {
@@ -97,7 +98,7 @@ app.use('/api/*', async (c, next) => {
     )
   }
 
-  await c.env.MOVIEBOX_CACHE.put(cacheKey, String(count + 1), {
+  await kvPut(c.env.MOVIEBOX_CACHE, cacheKey, String(count + 1), {
     expirationTtl: Math.ceil(windowMs / 1000),
   })
 
@@ -134,12 +135,12 @@ app.use('/img', async (c, next) => {
   // doesn't starve API quota and vice versa).
   const clientIp = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || 'unknown'
   const cacheKey = `img_rate:${clientIp}:${Math.floor(Date.now() / IMG_RATE_WINDOW_MS)}`
-  const current = await c.env.MOVIEBOX_CACHE.get(cacheKey)
+  const current = await kvGet(c.env.MOVIEBOX_CACHE, cacheKey)
   const count = current ? parseInt(current) : 0
   if (count >= IMG_RATE_MAX) {
     return new Response('rate limit exceeded', { status: 429 })
   }
-  await c.env.MOVIEBOX_CACHE.put(cacheKey, String(count + 1), { expirationTtl: 60 })
+  await kvPut(c.env.MOVIEBOX_CACHE, cacheKey, String(count + 1), { expirationTtl: 60 })
   await next()
 })
 
@@ -245,7 +246,7 @@ app.all('/api/tmdb/*', async (c) => {
     }
 
     const cacheKey = `tmdb:${upstreamPath}:${new URL(upstreamURL).search}`
-    const cached = await c.env.MOVIEBOX_CACHE.get(cacheKey)
+    const cached = await kvGet(c.env.MOVIEBOX_CACHE,cacheKey)
 
     if (cached) {
       const parsed = JSON.parse(cached)
@@ -282,7 +283,7 @@ app.all('/api/tmdb/*', async (c) => {
 
     const data = await response.json()
     const ttl = cacheTTLForTMDBPath(upstreamPath)
-    await c.env.MOVIEBOX_CACHE.put(
+    await kvPut(c.env.MOVIEBOX_CACHE,
       cacheKey,
       JSON.stringify({ data, cacheControl: `public, max-age=${ttl}` }),
       {
@@ -349,7 +350,7 @@ async function fetchExternalIds(
   id: string
 ): Promise<ExternalIds | null> {
   const cacheKey = `extids:${kind}:${id}`
-  const cached = await c.env.MOVIEBOX_CACHE.get(cacheKey)
+  const cached = await kvGet(c.env.MOVIEBOX_CACHE,cacheKey)
   if (cached) return JSON.parse(cached) as ExternalIds
 
   const url = `https://api.themoviedb.org/3/${kind}/${id}/external_ids`
@@ -358,13 +359,13 @@ async function fetchExternalIds(
   })
 
   if (response.status === 404) {
-    await c.env.MOVIEBOX_CACHE.put(cacheKey, JSON.stringify({}), { expirationTtl: LOGO_TTL_MISS })
+    await kvPut(c.env.MOVIEBOX_CACHE,cacheKey, JSON.stringify({}), { expirationTtl: LOGO_TTL_MISS })
     return {}
   }
   if (!response.ok) return null
 
   const data = (await response.json()) as ExternalIds
-  await c.env.MOVIEBOX_CACHE.put(cacheKey, JSON.stringify(data), { expirationTtl: EXT_IDS_TTL })
+  await kvPut(c.env.MOVIEBOX_CACHE,cacheKey, JSON.stringify(data), { expirationTtl: EXT_IDS_TTL })
   return data
 }
 
@@ -435,7 +436,7 @@ const OMDB_MISS_TTL = 60 * 60 * 24 // 1 day for "Not Found"
 async function fetchOmdbById(c: any, imdbId: string): Promise<OmdbResponse | null> {
   if (!c.env.OMDB_API_KEY) return null
   const cacheKey = `omdb:id:${imdbId}`
-  const cached = await c.env.MOVIEBOX_CACHE.get(cacheKey)
+  const cached = await kvGet(c.env.MOVIEBOX_CACHE,cacheKey)
   if (cached) return JSON.parse(cached) as OmdbResponse
 
   const url = new URL('https://www.omdbapi.com/')
@@ -446,7 +447,7 @@ async function fetchOmdbById(c: any, imdbId: string): Promise<OmdbResponse | nul
 
   const data = (await response.json()) as OmdbResponse
   const ttl = data.Response === 'True' ? OMDB_TTL : OMDB_MISS_TTL
-  await c.env.MOVIEBOX_CACHE.put(cacheKey, JSON.stringify(data), { expirationTtl: ttl })
+  await kvPut(c.env.MOVIEBOX_CACHE,cacheKey, JSON.stringify(data), { expirationTtl: ttl })
   return data
 }
 
@@ -461,7 +462,7 @@ async function fetchOmdbByTitle(
   if (!c.env.OMDB_API_KEY) return null
   const normTitle = title.trim().toLowerCase()
   const cacheKey = `omdb:t:${normTitle}:${year ?? ''}:${type ?? ''}`
-  const cached = await c.env.MOVIEBOX_CACHE.get(cacheKey)
+  const cached = await kvGet(c.env.MOVIEBOX_CACHE,cacheKey)
   if (cached) return JSON.parse(cached) as OmdbResponse
 
   const url = new URL('https://www.omdbapi.com/')
@@ -474,7 +475,7 @@ async function fetchOmdbByTitle(
 
   const data = (await response.json()) as OmdbResponse
   const ttl = data.Response === 'True' ? OMDB_TTL : OMDB_MISS_TTL
-  await c.env.MOVIEBOX_CACHE.put(cacheKey, JSON.stringify(data), { expirationTtl: ttl })
+  await kvPut(c.env.MOVIEBOX_CACHE,cacheKey, JSON.stringify(data), { expirationTtl: ttl })
   return data
 }
 
@@ -505,20 +506,20 @@ async function fetchFanart(
   externalId: string | number
 ): Promise<FanartResponse | null> {
   const cacheKey = `fanart:${kind}:${externalId}`
-  const cached = await c.env.MOVIEBOX_CACHE.get(cacheKey)
+  const cached = await kvGet(c.env.MOVIEBOX_CACHE,cacheKey)
   if (cached) return JSON.parse(cached) as FanartResponse
 
   const url = `https://webservice.fanart.tv/v3/${kind}/${externalId}?api_key=${c.env.FANART_API_KEY}`
   const response = await fetch(url)
 
   if (response.status === 404) {
-    await c.env.MOVIEBOX_CACHE.put(cacheKey, JSON.stringify({}), { expirationTtl: LOGO_TTL_MISS })
+    await kvPut(c.env.MOVIEBOX_CACHE,cacheKey, JSON.stringify({}), { expirationTtl: LOGO_TTL_MISS })
     return {}
   }
   if (!response.ok) return null
 
   const data = (await response.json()) as FanartResponse
-  await c.env.MOVIEBOX_CACHE.put(cacheKey, JSON.stringify(data), { expirationTtl: FANART_TTL })
+  await kvPut(c.env.MOVIEBOX_CACHE,cacheKey, JSON.stringify(data), { expirationTtl: FANART_TTL })
   return data
 }
 
@@ -542,7 +543,7 @@ app.get('/api/logo/:kind/:id', async (c) => {
     }
 
     const cacheKey = `logo:${kind}:${id}`
-    const cached = await c.env.MOVIEBOX_CACHE.get(cacheKey)
+    const cached = await kvGet(c.env.MOVIEBOX_CACHE,cacheKey)
     if (cached !== null) {
       const parsed = JSON.parse(cached) as { url: string | null }
       return c.json(parsed, {
@@ -586,7 +587,7 @@ app.get('/api/logo/:kind/:id', async (c) => {
     const url = fanart ? pickBestLogo(fanart) : null
     const proxied = url ? proxyImage(c, url) : null
     const ttl = url ? LOGO_TTL_HIT : LOGO_TTL_MISS
-    await c.env.MOVIEBOX_CACHE.put(cacheKey, JSON.stringify({ url: proxied }), {
+    await kvPut(c.env.MOVIEBOX_CACHE,cacheKey, JSON.stringify({ url: proxied }), {
       expirationTtl: ttl,
     })
 
@@ -666,8 +667,8 @@ app.get('/api/config', (c) => {
 app.get('/api/status', async (c) => {
   let kvOk = false
   try {
-    await c.env.MOVIEBOX_CACHE.put('__status_ping', '1', { expirationTtl: 60 })
-    kvOk = (await c.env.MOVIEBOX_CACHE.get('__status_ping')) === '1'
+    await kvPut(c.env.MOVIEBOX_CACHE,'__status_ping', '1', { expirationTtl: 60 })
+    kvOk = (await kvGet(c.env.MOVIEBOX_CACHE,'__status_ping')) === '1'
   } catch {
     kvOk = false
   }
@@ -695,7 +696,7 @@ app.get('/api/title/:kind/:id', async (c) => {
     const { kind, id } = route
 
     const cacheKey = `title:${kind}:${id}`
-    const cached = await c.env.MOVIEBOX_CACHE.get(cacheKey)
+    const cached = await kvGet(c.env.MOVIEBOX_CACHE,cacheKey)
     if (cached) {
       return c.json(JSON.parse(cached), {
         headers: { 'X-Cache': 'HIT', 'Cache-Control': 'public, max-age=21600' },
@@ -771,7 +772,7 @@ app.get('/api/title/:kind/:id', async (c) => {
     const proxiedLogo = proxyImage(c, logoUrl)
 
     // Seed the standalone logo cache so /api/logo/:kind/:id is instant.
-    await c.env.MOVIEBOX_CACHE.put(`logo:${kind}:${id}`, JSON.stringify({ url: proxiedLogo }), {
+    await kvPut(c.env.MOVIEBOX_CACHE,`logo:${kind}:${id}`, JSON.stringify({ url: proxiedLogo }), {
       expirationTtl: logoUrl ? LOGO_TTL_HIT : LOGO_TTL_MISS,
     })
 
@@ -816,7 +817,7 @@ app.get('/api/title/:kind/:id', async (c) => {
 
     // Cache the full bundle for 6h (TMDB rarely changes for the lifetime of a session).
     const bundleTTL = 60 * 60 * 6
-    await c.env.MOVIEBOX_CACHE.put(cacheKey, JSON.stringify(detail), { expirationTtl: bundleTTL })
+    await kvPut(c.env.MOVIEBOX_CACHE,cacheKey, JSON.stringify(detail), { expirationTtl: bundleTTL })
 
     return c.json(detail, {
       headers: { 'X-Cache': 'MISS', 'Cache-Control': `public, max-age=${bundleTTL}` },
@@ -873,7 +874,7 @@ app.get('/api/omdb', async (c) => {
     url.searchParams.set('apikey', c.env.OMDB_API_KEY)
 
     const cacheKey = `omdb:${imdbId}`
-    const cached = await c.env.MOVIEBOX_CACHE.get(cacheKey)
+    const cached = await kvGet(c.env.MOVIEBOX_CACHE,cacheKey)
 
     if (cached) {
       return c.json(JSON.parse(cached), { headers: { 'X-Cache': 'HIT' } })
@@ -887,7 +888,7 @@ app.get('/api/omdb', async (c) => {
     const response = await fetch(url.toString(), fetchOptions)
 
     const data = await response.json()
-    await c.env.MOVIEBOX_CACHE.put(cacheKey, JSON.stringify(data), { expirationTtl: 60 * 60 * 24 })
+    await kvPut(c.env.MOVIEBOX_CACHE,cacheKey, JSON.stringify(data), { expirationTtl: 60 * 60 * 24 })
 
     return c.json(data, { headers: { 'X-Cache': 'MISS' } })
   } catch (error) {
@@ -914,7 +915,7 @@ app.get('/api/subtitles/search', async (c) => {
     const imdbId = sub.imdb_id
 
     const cacheKey = `subf2m:search:${title ?? ''}:${imdbId ?? ''}:${year ?? ''}:${language}:${type}`
-    const cached = await c.env.MOVIEBOX_CACHE.get(cacheKey)
+    const cached = await kvGet(c.env.MOVIEBOX_CACHE,cacheKey)
     if (cached) {
       return c.json(JSON.parse(cached), { headers: { 'X-Cache': 'HIT' } })
     }
@@ -947,7 +948,7 @@ app.get('/api/subtitles/search', async (c) => {
     }
 
     const response = { subtitles }
-    await c.env.MOVIEBOX_CACHE.put(cacheKey, JSON.stringify(response), {
+    await kvPut(c.env.MOVIEBOX_CACHE,cacheKey, JSON.stringify(response), {
       expirationTtl: 60 * 60 * 6,
     })
     return c.json(response, { headers: { 'X-Cache': 'MISS' } })
@@ -969,7 +970,7 @@ app.get('/api/subtitles/download', async (c) => {
     const subtitleUrl = dl.url
 
     const cacheKey = `subf2m:dl:${btoa(subtitleUrl)}`
-    const cached = await c.env.MOVIEBOX_CACHE.get(cacheKey, 'arrayBuffer')
+    const cached = await kvGetBuffer(c.env.MOVIEBOX_CACHE, cacheKey)
     if (cached) {
       return c.body(cached, {
         headers: {
@@ -1013,7 +1014,7 @@ app.get('/api/subtitles/download', async (c) => {
       return c.json({ error: 'extract_failed', message: 'No SRT file found in ZIP.' }, 502)
     }
 
-    await c.env.MOVIEBOX_CACHE.put(cacheKey, srtContent, { expirationTtl: 60 * 60 * 24 })
+    await kvPut(c.env.MOVIEBOX_CACHE,cacheKey, srtContent, { expirationTtl: 60 * 60 * 24 })
     return c.body(srtContent, {
       headers: {
         'Content-Type': 'application/x-subrip',

@@ -16,10 +16,10 @@
 		"RATE_LIMIT_MAX_REQUESTS": "100"
 	},
 	"kv_namespaces": [
-    {
+		{
 			"binding": "MOVIEBOX_CACHE",
 			"id": "9d0abba9696e4a58954dd858e896b1d7",
-			"remote": true
+			"preview_id": "9d0abba9696e4a58954dd858e896b1d7"
 		}
 	]
 }

@@ -2,7 +2,8 @@
   "name": "moviebox-backend",
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
+    "dev": "wrangler dev --port 8787 --var APP_ENV:development",
+    "dev:remote": "wrangler dev --remote --port 8787 --var APP_ENV:development",
     "deploy": "bash scripts/deploy.sh",
     "deploy:quick": "wrangler deploy --minify",
     "cf-typegen": "wrangler types --env-interface CloudflareBindings",
@@ -13,7 +14,11 @@
     "fmt:check": "oxfmt --check .",
     "test": "vitest run --config vitest.unit.config.ts",
     "test:workers": "vitest run --config vitest.config.ts",
-    "test:watch": "vitest --config vitest.unit.config.ts"
+    "test:watch": "vitest --config vitest.unit.config.ts",
+    "smoke": "node scripts/smoke-worker.mjs",
+    "smoke:dev": "MOVIEBOX_WORKER_URL=http://127.0.0.1:8787 node scripts/smoke-worker.mjs",
+    "smoke:prod": "MOVIEBOX_WORKER_URL=https://moviebox-backend.rahulmarban.workers.dev node scripts/smoke-worker.mjs",
+    "smoke:local": "MOVIEBOX_WORKER_URL=http://127.0.0.1:8787 node scripts/smoke-worker.mjs"
   },
   "dependencies": {
     "@zip.js/zip.js": "^2.8.26",

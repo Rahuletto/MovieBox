@@ -59,4 +59,13 @@ echo "✓ /api/config OK"
 echo "✓ /api/tmdb/movie/popular OK"
 echo ""
 echo "Deployed: ${WORKER_URL}"
+echo "Version: $(pnpm exec wrangler deployments list 2>/dev/null | head -5 || echo 'see Cloudflare dashboard')"
+echo ""
+echo "→ Full endpoint smoke (all /api routes the app uses) …"
+if MOVIEBOX_WORKER_URL="${WORKER_URL}" pnpm smoke; then
+  echo "✓ Full smoke passed"
+else
+  echo "⚠ Smoke failed from this shell (TLS/proxy?). Run locally: cd Backend && pnpm smoke:prod"
+fi
+echo ""
 echo "Use this URL + APP_SECRET from .dev.vars in MovieBox → Settings → Backend Proxy."
