@@ -124,6 +124,50 @@ public struct MovieDetail: Sendable, Codable, Identifiable, Hashable {
     }
 }
 
+public struct TVSeasonSummary: Sendable, Identifiable, Hashable, Codable {
+    public let seasonNumber: Int
+    public let name: String
+    public let episodeCount: Int
+    public let posterPath: String?
+
+    public var id: Int { seasonNumber }
+
+    public init(seasonNumber: Int, name: String, episodeCount: Int, posterPath: String?) {
+        self.seasonNumber = seasonNumber
+        self.name = name
+        self.episodeCount = episodeCount
+        self.posterPath = posterPath
+    }
+}
+
+public struct TVEpisode: Sendable, Identifiable, Hashable, Codable {
+    public let id: Int
+    public let seasonNumber: Int
+    public let episodeNumber: Int
+    public let name: String
+    public let overview: String
+    public let stillPath: String?
+    public let runtime: Int?
+
+    public init(
+        id: Int,
+        seasonNumber: Int,
+        episodeNumber: Int,
+        name: String,
+        overview: String,
+        stillPath: String?,
+        runtime: Int?
+    ) {
+        self.id = id
+        self.seasonNumber = seasonNumber
+        self.episodeNumber = episodeNumber
+        self.name = name
+        self.overview = overview
+        self.stillPath = stillPath
+        self.runtime = runtime
+    }
+}
+
 public enum MetadataEndpointMode: Sendable, Equatable {
     case direct(tmdbBearerToken: String, omdbAPIKey: String?)
     case backend(baseURL: URL, appToken: String)
@@ -262,6 +306,39 @@ public actor MetadataClient {
         let credits = try await creditsResponse.cast.prefix(16).map(\.castMember)
         let similar = try await similarResponse.results.map(\.movie)
         return MovieDetail(movie: movie, genres: try await movieResponse.genres ?? [], cast: Array(credits), similar: similar)
+    }
+
+    /// Season list for a TV show (excludes specials / season 0).
+    public func tvSeasonSummaries(showId: Int) async throws -> [TVSeasonSummary] {
+        let response: TVShowSeasonsDTO = try await request(path: "/tv/\(showId)")
+        return (response.seasons ?? [])
+            .filter { $0.seasonNumber > 0 }
+            .sorted { $0.seasonNumber < $1.seasonNumber }
+            .map {
+                TVSeasonSummary(
+                    seasonNumber: $0.seasonNumber,
+                    name: $0.name ?? "Season \($0.seasonNumber)",
+                    episodeCount: $0.episodeCount ?? 0,
+                    posterPath: $0.posterPath
+                )
+            }
+    }
+
+    public func tvSeasonEpisodes(showId: Int, season: Int) async throws -> [TVEpisode] {
+        let response: TVSeasonDetailDTO = try await request(path: "/tv/\(showId)/season/\(season)")
+        return (response.episodes ?? [])
+            .sorted { $0.episodeNumber < $1.episodeNumber }
+            .map {
+                TVEpisode(
+                    id: $0.id,
+                    seasonNumber: season,
+                    episodeNumber: $0.episodeNumber,
+                    name: $0.name ?? "Episode \($0.episodeNumber)",
+                    overview: $0.overview ?? "",
+                    stillPath: $0.stillPath,
+                    runtime: $0.runtime
+                )
+            }
     }
 
     public func resolveTrailer(key: String) async throws -> URL {
@@ -754,6 +831,46 @@ private struct TMDBImageDTO: Decodable, Sendable {
     let filePath: String
     enum CodingKeys: String, CodingKey {
         case filePath = "file_path"
+    }
+}
+
+private struct TVShowSeasonsDTO: Decodable, Sendable {
+    let seasons: [TVSeasonListItemDTO]?
+}
+
+private struct TVSeasonListItemDTO: Decodable, Sendable {
+    let seasonNumber: Int
+    let name: String?
+    let episodeCount: Int?
+    let posterPath: String?
+
+    enum CodingKeys: String, CodingKey {
+        case seasonNumber = "season_number"
+        case name
+        case episodeCount = "episode_count"
+        case posterPath = "poster_path"
+    }
+}
+
+private struct TVSeasonDetailDTO: Decodable, Sendable {
+    let episodes: [TVEpisodeDTO]?
+}
+
+private struct TVEpisodeDTO: Decodable, Sendable {
+    let id: Int
+    let episodeNumber: Int
+    let name: String?
+    let overview: String?
+    let stillPath: String?
+    let runtime: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case episodeNumber = "episode_number"
+        case name
+        case overview
+        case stillPath = "still_path"
+        case runtime
     }
 }
 

@@ -20,7 +20,7 @@ public final class StreamingOrchestrator {
         torrent: TorrentResult,
         progressHandler: @escaping @Sendable (Double, Double, Int) -> Void
     ) async throws -> URL {
-        peerId = Self.generatePeerId()
+        peerId = BitTorrentPeerID.make()
 
         let magnet = MagnetURI(from: torrent.magnetURI)
         let infoHash = torrent.infoHash ?? magnet?.infoHash
@@ -97,10 +97,6 @@ public final class StreamingOrchestrator {
         await torrentEngine?.activePeerCount ?? 0
     }
 
-    private static func generatePeerId() -> String {
-        let id = "-MB0001-" + (0..<12).map { _ in "abcdefghijklmnopqrstuvwxyz0123456789".randomElement()! }
-        return String(id)
-    }
 }
 
 public enum StreamingOrchestratorError: Error, LocalizedError {

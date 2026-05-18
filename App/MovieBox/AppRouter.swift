@@ -43,7 +43,15 @@ final class AppRouter {
     }
 
     func show(_ route: Route) {
-        withAnimation(MovieBoxMotion.navigation) {
+        let animation: Animation = switch route {
+        case .home, .movies, .tvShows, .library, .downloads:
+            MovieBoxMotion.tabHighlight
+        case .search:
+            MovieBoxMotion.chrome
+        default:
+            MovieBoxMotion.navigation
+        }
+        withAnimation(animation) {
             if route != .search {
                 selectedGenre = nil
             }

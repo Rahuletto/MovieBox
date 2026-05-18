@@ -34,7 +34,7 @@ public final class StreamSession: ObservableObject {
     private var streamURL: URL?
     private var isReady = false
 
-    private static let bufferThresholdPieces = 10
+    private static let bufferThresholdPieces = 4
     private static let bufferThresholdSeconds = 5.0
 
     public init(orchestrator: StreamingOrchestrator) {
@@ -90,7 +90,12 @@ public final class StreamSession: ObservableObject {
             switch state {
             case .preparing, .buffering:
                 await orchestrator.stop()
-                state = .failed(error: "Buffering timed out. Try a better-seeded release.")
+                let peers = await orchestrator.peerCount()
+                state = .failed(
+                    error: peers == 0
+                        ? "No peers found — trackers may be unreachable or this release is dead. Try another version."
+                        : "Buffering timed out (\(peers) peers connected). Try a release with more seeders."
+                )
             default:
                 break
             }

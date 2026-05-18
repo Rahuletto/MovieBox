@@ -40,6 +40,8 @@ public final class PlayerState {
     public var videoGravity: AVLayerVideoGravity = .resizeAspect
     public var movieId: Int
     public var isPresented: Bool
+    /// Fades the player layer in after app chrome has faded out.
+    public var isPlayerRevealed: Bool
     public var isPlaying: Bool
     public var currentTime: Double = 0
     public var duration: Double = 0
@@ -99,6 +101,7 @@ public final class PlayerState {
 
     private var previousWindowFrame: NSRect? = nil
     private var hasResizedForCurrentVideo = false
+    private var presentationTransitionTask: Task<Void, Never>?
 
     private static let positionReportInterval: TimeInterval = 5
     private static let positionReportMinimumDelta: Double = 8
@@ -110,6 +113,7 @@ public final class PlayerState {
         self.title = title
         self.movieId = movieId
         self.isPresented = isPresented
+        self.isPlayerRevealed = false
         self.isPlaying = false
         self.currentTime = 0
         self.duration = 0
@@ -193,7 +197,6 @@ public final class PlayerState {
             disableEmbeddedCaptions(on: playerItem, asset: asset)
         }
 
-        isPresented = true
         showsControls = true
         setupObservers()
 
@@ -203,9 +206,32 @@ public final class PlayerState {
             cancelSubtitleWork()
         }
 
-        player.play()
-        player.rate = Float(playbackRate)
-        isPlaying = true
+        if isPresented && isPlayerRevealed {
+            player.play()
+            player.rate = Float(playbackRate)
+            isPlaying = true
+            return
+        }
+
+        revealPlayerWithTransition()
+    }
+
+    private func revealPlayerWithTransition() {
+        presentationTransitionTask?.cancel()
+        isPresented = true
+        isPlayerRevealed = false
+
+        presentationTransitionTask = Task { @MainActor in
+            withAnimation(.easeInOut(duration: 0.38)) {}
+            try? await Task.sleep(for: .milliseconds(220))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeInOut(duration: 0.38)) {
+                isPlayerRevealed = true
+            }
+            player.play()
+            player.rate = Float(playbackRate)
+            isPlaying = true
+        }
     }
 
     public static func parseTVShowMetadata(from rawTitle: String) -> (seriesName: String, episodeName: String?) {
@@ -403,9 +429,30 @@ public final class PlayerState {
             previousWindowFrame = nil
         }
 
-        stopPlaybackResources()
-        isPresented = false
+        guard isPresented else { return }
+
+        presentationTransitionTask?.cancel()
         isPlaying = false
+        player.pause()
+
+        withAnimation(.easeInOut(duration: 0.38)) {
+            isPlayerRevealed = false
+        }
+
+        presentationTransitionTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(380))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeInOut(duration: 0.38)) {
+                isPresented = false
+            }
+            finalizeDismissal()
+        }
+    }
+
+    private func finalizeDismissal() {
+        stopPlaybackResources()
+        isPlayerRevealed = false
+        isPresented = false
         currentTime = 0
         duration = 0
         errorMessage = nil

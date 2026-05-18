@@ -1,4 +1,5 @@
 import AppKit
+import SwiftData
 import SwiftUI
 import CoreStorage
 import CoreStreaming
@@ -9,18 +10,19 @@ import CorePlayer
 
 struct TorrentSection: View {
     @Environment(PlayerState.self) private var playerState
+    @Query private var settings: [AppSettings]
 
     let movie: Movie
     let torrents: [TorrentResult]
     let searchDiagnostics: TorrentSearchDiagnostics?
     let isTV: Bool
+    var episodeLabel: String? = nil
     let orchestrator: StreamingOrchestrator
     let subtitleURL: URL?
     var subtitleAppearance: SubtitleAppearance = .cinematic
     var subtitleFontSize: CGFloat = 20
 
     @StateObject private var downloadManager = DownloadManager()
-    @State private var showUnseeded = false
     @State private var currentPage = 0
     @State private var busyTorrentID: UUID?
     @State private var cardErrors: [UUID: String] = [:]
@@ -28,15 +30,15 @@ struct TorrentSection: View {
     @State private var streamSession: StreamSession?
     @State private var playbackCoordinator: TorrentPlaybackCoordinator?
     @State private var downloadWatchTask: Task<Void, Never>?
+    @State private var visibleCardModels: [TorrentCardModel] = []
 
-    private let pageSize = 12
-    private let gridColumns = [GridItem(.adaptive(minimum: 280, maximum: 360), spacing: 10)]
+    private let pageSize = 10
 
     private var seededTorrents: [TorrentResult] { torrents.filter { $0.seeders > 0 } }
     private var unseededTorrents: [TorrentResult] { torrents.filter { $0.seeders <= 0 } }
+    /// Seeded releases only; if none exist, show everything so the section is not empty.
     private var displayedTorrents: [TorrentResult] {
-        if showUnseeded || seededTorrents.isEmpty { return torrents }
-        return seededTorrents
+        seededTorrents.isEmpty ? torrents : seededTorrents
     }
 
     private var pageCount: Int {
@@ -78,92 +80,110 @@ struct TorrentSection: View {
                         .foregroundStyle(.secondary)
                 }
 
-                LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 10) {
-                    ForEach(visibleTorrents) { torrent in
-                        TorrentVersionCard(
-                            model: TorrentCardModel(torrent: torrent),
-                            isBusy: busyTorrentID == torrent.id,
-                            errorMessage: cardErrors[torrent.id],
-                            onStream: { startStream(torrent) },
-                            onDownload: { startDownload(torrent) },
-                            onCopyError: { copyError(for: torrent.id) }
-                        )
-                    }
-                }
+                TorrentVersionList(
+                    models: visibleCardModels,
+                    busyTorrentID: busyTorrentID,
+                    cardErrors: cardErrors,
+                    onStream: { startStream(for: $0) },
+                    onDownload: { startDownload(for: $0) },
+                    onCopyError: copyError
+                )
 
-                footerControls
+                paginationBar
             }
         }
-        .onChange(of: movie.id) { _, _ in currentPage = 0 }
+        .onAppear {
+            syncTorrentBackend()
+            rebuildVisibleCardModels()
+        }
+        .onChange(of: movie.id) { _, _ in
+            currentPage = 0
+            rebuildVisibleCardModels()
+        }
         .onChange(of: torrents.count) { _, _ in
             currentPage = min(currentPage, max(0, pageCount - 1))
+            rebuildVisibleCardModels()
         }
+        .onChange(of: clampedPage) { _, _ in rebuildVisibleCardModels() }
+        .onChange(of: settings.first?.proxyBaseURL) { _, _ in syncTorrentBackend() }
+        .onChange(of: settings.first?.appToken) { _, _ in syncTorrentBackend() }
+    }
+
+    private func rebuildVisibleCardModels() {
+        visibleCardModels = visibleTorrents.map(TorrentCardModel.init(torrent:))
+    }
+
+    private func startStream(for id: UUID) {
+        guard let torrent = visibleTorrents.first(where: { $0.id == id }) else { return }
+        startStream(torrent)
+    }
+
+    private func startDownload(for id: UUID) {
+        guard let torrent = visibleTorrents.first(where: { $0.id == id }) else { return }
+        startDownload(torrent)
+    }
+
+    private func syncTorrentBackend() {
+        let config = settings.first?.backendTorrentConfig
+        TorrentMetadataFetcher.configureBackend(
+            baseURL: config?.baseURL,
+            appToken: config?.appToken
+        )
     }
 
     private var header: some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text("Available Versions")
-                .font(MovieBoxTypography.title)
-            Spacer()
-            if !displayedTorrents.isEmpty {
-                Text(pageRangeLabel)
-                    .font(.caption)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("How to Watch")
+                    .font(.headline)
+                Spacer()
+                if !displayedTorrents.isEmpty {
+                    Text(pageRangeLabel)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if let episodeLabel {
+                Text(episodeLabel)
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
         }
     }
 
-    @ViewBuilder
-    private var footerControls: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if pageCount > 1 {
-                HStack(spacing: 12) {
-                    Button {
-                        currentPage = max(0, clampedPage - 1)
-                    } label: {
-                        Label("Previous", systemImage: "chevron.left")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .disabled(clampedPage == 0)
-
-                    Spacer(minLength: 0)
-
-                    Text("Page \(clampedPage + 1) of \(pageCount)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    Spacer(minLength: 0)
-
-                    Button {
-                        currentPage = min(pageCount - 1, clampedPage + 1)
-                    } label: {
-                        Label("Next", systemImage: "chevron.right")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .disabled(clampedPage >= pageCount - 1)
-                }
+    private var paginationBar: some View {
+        HStack(spacing: 12) {
+            Button {
+                currentPage = max(0, clampedPage - 1)
+            } label: {
+                Label("Previous", systemImage: "chevron.left")
             }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(clampedPage == 0 || pageCount <= 1)
 
-            if !unseededTorrents.isEmpty {
-                Button {
-                    showUnseeded.toggle()
-                    currentPage = 0
-                } label: {
-                    Label(
-                        showUnseeded
-                            ? "Show seeded only"
-                            : "View all (\(unseededTorrents.count) unseeded)",
-                        systemImage: showUnseeded ? "chevron.up" : "chevron.down"
-                    )
-                    .font(.subheadline.weight(.medium))
-                }
-                .buttonStyle(.plain)
+            Spacer(minLength: 0)
+
+            Text(pageCount > 1 ? "Page \(clampedPage + 1) of \(pageCount)" : " ")
+                .font(.caption)
                 .foregroundStyle(.secondary)
+                .frame(minWidth: 100)
+
+            Spacer(minLength: 0)
+
+            Button {
+                currentPage = min(pageCount - 1, clampedPage + 1)
+            } label: {
+                Label("Next", systemImage: "chevron.right")
             }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(clampedPage >= pageCount - 1 || pageCount <= 1)
         }
+        .frame(height: 36)
         .padding(.top, 4)
+        .opacity(pageCount > 1 ? 1 : 0)
+        .allowsHitTesting(pageCount > 1)
     }
 
     private var emptyDescription: String {
@@ -186,7 +206,9 @@ struct TorrentSection: View {
             await session.waitUntilSettled(timeout: 120)
 
             await MainActor.run {
-                busyTorrentID = nil
+                withAnimation(MovieBoxMotion.player) {
+                    busyTorrentID = nil
+                }
 
                 if case .failed(let message) = session.state {
                     presentError(message, for: torrent.id)
@@ -292,7 +314,7 @@ private struct TorrentCardModel: Identifiable, Hashable {
     let id: UUID
     let source: String
     let quality: String
-    let qualityColor: Color
+    let techKinds: [MediaTechKind]
     let title: String
     let detailLine: String
     let seeders: Int
@@ -302,11 +324,7 @@ private struct TorrentCardModel: Identifiable, Hashable {
         id = torrent.id
         source = torrent.trackerSource.label
         quality = torrent.quality.rawValue
-        qualityColor = switch torrent.quality {
-        case .p2160: Color.purple
-        case .p1080: Color.blue
-        case .p720: Color.teal
-        }
+        techKinds = torrentTechKinds(for: torrent)
         title = torrent.title
 
         var parts: [String] = []
@@ -314,9 +332,9 @@ private struct TorrentCardModel: Identifiable, Hashable {
             parts.append(ByteCountFormatter.string(fromByteCount: torrent.sizeBytes, countStyle: .file))
         }
         parts.append(torrent.codec.rawValue)
-        parts.append(torrent.source.rawValue)
-        if let hdr = torrent.hdrType { parts.append(hdr.rawValue) }
-        if let audio = torrent.audioFormat { parts.append(audio.rawValue) }
+        if torrent.source != .unknown {
+            parts.append(torrent.source.rawValue)
+        }
         detailLine = parts.joined(separator: " · ")
 
         seeders = torrent.seeders
@@ -324,106 +342,184 @@ private struct TorrentCardModel: Identifiable, Hashable {
     }
 }
 
-// MARK: - Flat card (no glass, no blur)
+// MARK: - macOS inset list (Settings / TV–style rows)
 
-private struct TorrentVersionCard: View, Equatable {
+private struct TorrentVersionList: View {
+    let models: [TorrentCardModel]
+    let busyTorrentID: UUID?
+    let cardErrors: [UUID: String]
+    let onStream: (UUID) -> Void
+    let onDownload: (UUID) -> Void
+    let onCopyError: (UUID) -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(models.enumerated()), id: \.element.id) { index, model in
+                TorrentVersionRow(
+                    model: model,
+                    rowIndex: index,
+                    isBusy: busyTorrentID == model.id,
+                    errorMessage: cardErrors[model.id],
+                    onStream: { onStream(model.id) },
+                    onDownload: { onDownload(model.id) },
+                    onCopyError: { onCopyError(model.id) }
+                )
+                .equatable()
+
+                if index < models.count - 1 {
+                    Divider()
+                }
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1)
+        }
+    }
+}
+
+private struct TorrentVersionRow: View, Equatable {
     let model: TorrentCardModel
+    let rowIndex: Int
     let isBusy: Bool
     let errorMessage: String?
     let onStream: () -> Void
     let onDownload: () -> Void
     let onCopyError: () -> Void
 
-    static func == (lhs: TorrentVersionCard, rhs: TorrentVersionCard) -> Bool {
+    static func == (lhs: TorrentVersionRow, rhs: TorrentVersionRow) -> Bool {
         lhs.model == rhs.model
+            && lhs.rowIndex == rhs.rowIndex
             && lhs.isBusy == rhs.isBusy
             && lhs.errorMessage == rhs.errorMessage
     }
 
     var body: some View {
-        ZStack {
-            VStack(alignment: .leading, spacing: 8) {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 8) {
-                    Text(model.source)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 0)
-                    Text(model.quality)
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(model.qualityColor)
+                    resolutionBadge
+                    if !model.techKinds.isEmpty {
+                        MediaTechBadgeRow(kinds: model.techKinds, context: .hero, size: .list)
+                    }
                 }
 
                 Text(model.title)
-                    .font(.caption)
+                    .font(.body)
                     .foregroundStyle(.primary)
                     .lineLimit(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
 
-                if !model.detailLine.isEmpty {
-                    Text(model.detailLine)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
+                metadataRow
+
+                if let errorMessage {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                        Text(errorMessage)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .lineLimit(2)
+                        Button("Copy", action: onCopyError)
+                            .buttonStyle(.link)
+                            .font(.caption)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: 4) {
+                Button(action: onStream) {
+                    Image(systemName: "play.circle.fill")
+                        .font(.system(size: 22))
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, Color.accentColor)
+                }
+                .buttonStyle(.plain)
+                .help("Play")
+
+                Button(action: onDownload) {
+                    Image(systemName: "arrow.down.circle")
+                        .font(.system(size: 22))
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Download")
+            }
+            .frame(width: 64, alignment: .trailing)
+            .opacity(isBusy ? 0.35 : 1)
+            .overlay {
+                if isBusy {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+            .disabled(isBusy)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(rowBackground)
+    }
+
+    private var metadataRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if !model.detailLine.isEmpty {
+                Text(model.detailLine)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            HStack(spacing: 10) {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .foregroundStyle(BadgePalette.seedColor(model.seeders))
+                    Text("\(model.seeders)")
+                        .monospacedDigit()
+                        .foregroundStyle(BadgePalette.seedColor(model.seeders))
                 }
 
-                HStack(spacing: 12) {
-                    Label("\(model.seeders)", systemImage: "arrow.up")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(BadgePalette.seedColor(model.seeders))
-                    if model.leechers > 0 {
-                        Label("\(model.leechers)", systemImage: "arrow.down")
-                            .font(.caption)
+                if model.leechers > 0 {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.down.circle.fill")
+                            .foregroundStyle(.secondary)
+                        Text("\(model.leechers)")
+                            .monospacedDigit()
                             .foregroundStyle(.secondary)
                     }
-                    Spacer(minLength: 0)
                 }
 
-                HStack(spacing: 8) {
-                    Button("Stream", action: onStream)
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                    Button("Download", action: onDownload)
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                }
-                .disabled(isBusy)
-            }
-            .padding(12)
-            .opacity(isBusy ? 0.35 : 1)
+                Text(model.source)
+                    .foregroundStyle(.secondary)
 
-            if isBusy {
-                ProgressView()
-                    .controlSize(.regular)
+                Spacer(minLength: 0)
             }
-
-            if let errorMessage {
-                VStack {
-                    Spacer()
-                    HStack(alignment: .top, spacing: 6) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.red)
-                            .font(.caption2)
-                        Text(errorMessage)
-                            .font(.caption2)
-                            .lineLimit(3)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        Button(action: onCopyError) {
-                            Image(systemName: "doc.on.doc")
-                                .font(.caption2)
-                        }
-                        .buttonStyle(.borderless)
-                    }
-                    .padding(8)
-                    .background(Color.red.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
-                    .padding(8)
-                }
-            }
+            .font(.caption)
+            .lineLimit(1)
         }
-        .background(Color(white: 0.07))
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
-        )
+    }
+
+    @ViewBuilder
+    private var resolutionBadge: some View {
+        if model.quality != VideoQuality.p2160.rawValue {
+            Text(model.quality)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+        }
+    }
+
+    private var rowBackground: Color {
+        let colors = NSColor.controlAlternatingRowBackgroundColors
+        guard colors.count >= 2 else {
+            return Color(nsColor: .controlBackgroundColor)
+        }
+        return Color(nsColor: colors[rowIndex % colors.count])
     }
 }

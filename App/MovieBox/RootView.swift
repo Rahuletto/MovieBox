@@ -48,6 +48,8 @@ public final class LogStore {
 struct RootView: View {
     @Environment(AppRouter.self) private var router
     @Environment(PlayerState.self) private var playerState
+    @Environment(\.modelContext) private var modelContext
+    @Query private var settings: [AppSettings]
     @State private var streamingOrchestrator = StreamingOrchestrator()
 
     var body: some View {
@@ -57,6 +59,9 @@ struct RootView: View {
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .ignoresSafeArea(edges: .top)
+                .opacity(playerState.isPresented ? 0 : 1)
+                .allowsHitTesting(!playerState.isPresented)
+                .animation(MovieBoxMotion.player, value: playerState.isPresented)
                 .animation(MovieBoxMotion.navigation, value: router.selectedRoute)
 
             VStack(spacing: 0) {
@@ -66,12 +71,16 @@ struct RootView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .ignoresSafeArea(edges: .top)
+            .opacity(playerState.isPresented ? 0 : 1)
+            .allowsHitTesting(!playerState.isPresented)
+            .animation(MovieBoxMotion.player, value: playerState.isPresented)
             .zIndex(5)
 
             if playerState.isPresented {
                 PlayerView(state: playerState)
                     .ignoresSafeArea()
-                    .transition(.opacity)
+                    .opacity(playerState.isPlayerRevealed ? 1 : 0)
+                    .animation(MovieBoxMotion.player, value: playerState.isPlayerRevealed)
                     .zIndex(10)
             }
 
@@ -84,6 +93,7 @@ struct RootView: View {
                 .frame(width: 0, height: 0)
         )
         .onAppear {
+            syncTorrentMetadataBackend()
             playerState.onPositionUpdate = { movieId, position, duration in
                 let fraction = duration > 0 ? position / duration : 0
                 updateWatchHistory(tmdbId: movieId, position: position, fraction: fraction)
@@ -145,6 +155,14 @@ struct RootView: View {
         }
     }
 
+    private func syncTorrentMetadataBackend() {
+        let config = settings.first?.backendTorrentConfig
+        TorrentMetadataFetcher.configureBackend(
+            baseURL: config?.baseURL,
+            appToken: config?.appToken
+        )
+    }
+
     private var tabStack: some View {
         ZStack {
             HomeView()
@@ -173,7 +191,6 @@ struct RootView: View {
         }
     }
 
-    @Environment(\.modelContext) private var modelContext
     @Query private var storedMovies: [MovieRecord]
     private func updateWatchHistory(tmdbId: Int, position: Double, fraction: Double) {
         if let record = storedMovies.first(where: { $0.tmdbId == tmdbId }) {
@@ -199,74 +216,122 @@ struct DetailHeroHeader: View {
       
       let detail: MovieDetail
       let kind: MediaKind
+      let techKinds: [MediaTechKind]
+      let accessibilityTags: [String]
       let addToMyList: () -> Void
       let onRate: (Float) -> Void
       let onPlayNow: () -> Void
       let onPlayTrailer: () -> Void
       let currentRating: Float?
+      var playButtonTitle: String = "Play Now"
       
       private var isInList: Bool {
           storedMovies.contains { $0.tmdbId == detail.movie.id }
       }
+
+      private var releaseYear: String? {
+          let year = detail.movie.releaseDate.prefix(4)
+          return year.count == 4 ? String(year) : nil
+      }
+
+      private var starringNames: [String] {
+          if let actors = detail.enrichment?.actors, !actors.isEmpty {
+              return actors
+                  .split(separator: ",")
+                  .map { $0.trimmingCharacters(in: .whitespaces) }
+                  .filter { !$0.isEmpty }
+          }
+          return detail.cast.map(\.name)
+      }
       
       var body: some View {
-         VStack(alignment: .leading, spacing: 14) {
-              // Logo or Title fallback
-              AsyncLogoView(movieId: detail.movie.id, title: detail.movie.title, kind: kind)
-              
-              HStack(spacing: 8) {
-                  // Prefer the real IMDb rating (from OMDB enrichment); fall back
-                  // to TMDB's vote average when OMDB has nothing for this title.
-                  if let imdbRating = detail.enrichment?.imdbRating {
-                      GlassBadge(String(format: "%.1f IMDb", imdbRating), color: MovieBoxColors.accent)
-                  } else {
-                      GlassBadge(String(format: "%.1f TMDB", detail.movie.voteAverage), color: MovieBoxColors.accent)
-                  }
-                  if let rt = detail.enrichment?.rottenTomatoes {
-                      RottenTomatoesBadge(score: rt)
-                  }
-                  if let runtime = detail.movie.runtime {
-                      GlassBadge("\(runtime) min")
-                  }
-                  if let rated = detail.enrichment?.rated {
-                      GlassBadge(rated)
-                  }
-                  ForEach(detail.genres.prefix(2)) { genre in
-                      GlassBadge(genre.name)
-                  }
-              }
-              
-              Spacer()
-                .frame(height: 6)
-              
-              HStack(spacing: 12) {
-                  Button {
-                      onPlayNow()
-                  } label: {
-                      Label("Play Now", systemImage: "play.fill")
-                          .font(.headline)
-                          .padding(.horizontal, 16)
-                          .padding(.vertical, 8)
-                          .background(.white, in: Capsule())
-                          .foregroundStyle(.black)
-                  }
-                  .buttonStyle(.plain)
-                  
-                  GlassButton(action: addToMyList) {
-                      Label(isInList ? "Added to List" : "Add To My List", systemImage: isInList ? "checkmark" : "plus")
-                  }
-              }
+          HStack(alignment: .bottom, spacing: 24) {
+              VStack(alignment: .leading, spacing: 14) {
+                  AsyncLogoView(movieId: detail.movie.id, title: detail.movie.title, kind: kind)
 
-              if detail.trailerURL != nil {
-                  Button(action: onPlayTrailer) {
-                      Label("Watch Trailer (Preview)", systemImage: "play.circle")
+                  if !detail.movie.overview.isEmpty {
+                      Text(detail.movie.overview)
                           .font(.subheadline)
-                          .foregroundStyle(.secondary)
+                          .foregroundStyle(.white.opacity(0.9))
+                          .lineLimit(4)
+                          .frame(maxWidth: 640, alignment: .leading)
                   }
-                  .buttonStyle(.plain)
+
+                  HStack(spacing: 12) {
+                      MediaMetadataRibbon(
+                          year: releaseYear,
+                          runtimeMinutes: detail.movie.runtime,
+                          contentRating: detail.enrichment?.rated,
+                          accessibilityTags: accessibilityTags,
+                          labelColor: .white.opacity(0.82),
+                          outlineForeground: .white,
+                          outlineStroke: Color.white.opacity(0.45)
+                      ) {
+                          HStack(spacing: 8) {
+                              if let imdbRating = detail.enrichment?.imdbRating {
+                                  IMDBBadge(rating: imdbRating)
+                              }
+                              MediaTechBadgeRow(kinds: techKinds)
+                          }
+                      }
+
+                      if let rt = detail.enrichment?.rottenTomatoes {
+                          RottenTomatoesBadge(score: rt)
+                      }
+                  }
+
+                  if !detail.genres.isEmpty {
+                      HStack(spacing: 8) {
+                          ForEach(detail.genres.prefix(4)) { genre in
+                              MediaOutlineBadge(
+                                  genre.name,
+                                  foreground: .white,
+                                  stroke: Color.white.opacity(0.45)
+                              )
+                          }
+                      }
+                  }
+
+                  HStack(spacing: 12) {
+                      Button(action: onPlayNow) {
+                          Label(playButtonTitle, systemImage: "play.fill")
+                              .font(.headline)
+                              .padding(.horizontal, 16)
+                              .padding(.vertical, 8)
+                              .background(.white, in: Capsule())
+                              .foregroundStyle(.black)
+                      }
+                      .buttonStyle(.plain)
+                      .disabled(kind == .tv && playButtonTitle == "Select Episode")
+
+                      GlassButton(action: addToMyList, glassStrength: .ultraThin) {
+                          Label(isInList ? "Added to List" : "Add To My List", systemImage: isInList ? "checkmark" : "plus")
+                      }
+                  }
+
+                  if detail.trailerURL != nil {
+                      Button(action: onPlayTrailer) {
+                          Label("Watch Trailer", systemImage: "play.circle")
+                              .font(.subheadline)
+                              .foregroundStyle(.white.opacity(0.75))
+                      }
+                      .buttonStyle(.plain)
+                  }
               }
-              
+              .frame(maxWidth: 720, alignment: .leading)
+              .shadow(color: .black.opacity(0.5), radius: 10, x: 0, y: 3)
+
+              Spacer(minLength: 0)
+
+              MediaStarringLine(
+                  names: starringNames,
+                  labelColor: .white.opacity(0.72),
+                  nameColor: .white
+              )
+              .frame(maxWidth: 380, alignment: .trailing)
+              .padding(.bottom, 2)
           }
+          .frame(maxWidth: .infinity, alignment: .leading)
       }
   }
 

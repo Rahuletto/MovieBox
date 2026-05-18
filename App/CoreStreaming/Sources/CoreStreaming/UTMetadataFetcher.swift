@@ -190,13 +190,7 @@ private final class MetadataPeerSession: @unchecked Sendable {
         reserved[5] |= 0x10
         handshake.append(contentsOf: reserved)
         handshake.append(contentsOf: hexToData(infoHash))
-        let peerBytes = peerId.data(using: .utf8) ?? Data()
-        if peerBytes.count >= 20 {
-            handshake.append(peerBytes.prefix(20))
-        } else {
-            handshake.append(peerBytes)
-            handshake.append(contentsOf: [UInt8](repeating: 0, count: 20 - peerBytes.count))
-        }
+        handshake.append(BitTorrentPeerID.data(for: peerId))
         try await send(handshake)
     }
 

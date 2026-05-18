@@ -17,16 +17,23 @@ public enum TorrentMetadataFetcher {
 
     public static func configureBackend(baseURL: URL?, appToken: String?) {
         if let baseURL, let appToken, !appToken.isEmpty {
-            backend = BackendConfig(baseURL: baseURL, appToken: appToken)
+            backend = BackendConfig(
+                baseURL: BackendURLSession.normalizeBaseURL(baseURL),
+                appToken: appToken
+            )
         } else {
             backend = nil
         }
     }
 
+    public static var hasBackend: Bool { backend != nil }
+
     public enum FetchError: LocalizedError {
         case invalidInfoHash
         case torrentFileUnavailable
         case infoHashMismatch
+        case backendMetadataFailed
+        case backendReturnedInvalidTorrent(statusCode: Int, byteCount: Int)
 
         public var errorDescription: String? {
             switch self {
@@ -34,6 +41,10 @@ public enum TorrentMetadataFetcher {
             case .torrentFileUnavailable:
                 "Could not download torrent metadata for this release. Try another version from the list."
             case .infoHashMismatch: "Downloaded torrent metadata does not match this magnet link."
+            case .backendMetadataFailed:
+                "Could not load torrent metadata via your backend or peers. Confirm wrangler is running, then try another release."
+            case .backendReturnedInvalidTorrent(let code, let bytes):
+                "Backend returned HTTP \(code) with \(bytes) bytes that are not a valid .torrent file (likely an HTML error page from a dead mirror). Peer metadata will be tried next."
             }
         }
     }
@@ -71,6 +82,8 @@ public enum TorrentMetadataFetcher {
             trackers = [defaultTrackers[0]]
         }
 
+        let useBackendOnly = backend != nil
+
         if let backend {
             do {
                 let data = try await fetchTorrentBytesFromBackend(hash: normalized, config: backend)
@@ -78,21 +91,20 @@ public enum TorrentMetadataFetcher {
             } catch let error as FetchError {
                 if case .infoHashMismatch = error { throw error }
             } catch {
-                // Backend mirror fetch failed — fall through to client mirrors / DHT.
+                // Fall through to peer metadata (skip broken client mirrors when backend is configured).
             }
         }
 
-        if let metadata = try? await fetchFirstMirror(
-            hash: normalized,
-            trackers: trackers
-        ) {
-            return metadata
+        if !useBackendOnly {
+            if let metadata = try? await fetchFirstMirror(hash: normalized, trackers: trackers) {
+                return metadata
+            }
         }
 
-        let peerId = "-MB0001-" + (0..<12).map { _ in "abcdefghijklmnopqrstuvwxyz0123456789".randomElement()! }
+        let peerId = BitTorrentPeerID.make()
         let trackerList = trackers
         do {
-            return try await TaskTimeout.withTimeout(seconds: 30) {
+            return try await TaskTimeout.withTimeout(seconds: useBackendOnly ? 45 : 30) {
                 try await UTMetadataFetcher.fetch(
                     infoHash: normalized,
                     trackers: trackerList,
@@ -102,8 +114,14 @@ public enum TorrentMetadataFetcher {
         } catch let error as FetchError {
             throw error
         } catch is TaskTimeoutError {
+            if useBackendOnly {
+                throw FetchError.backendMetadataFailed
+            }
             throw FetchError.torrentFileUnavailable
         } catch {
+            if useBackendOnly {
+                throw FetchError.backendMetadataFailed
+            }
             throw FetchError.torrentFileUnavailable
         }
     }
@@ -141,34 +159,55 @@ public enum TorrentMetadataFetcher {
 
     private static func torrentFileURLs(for hash: String) -> [URL] {
         let upper = hash.uppercased()
+        // HTTP torrage only — HTTPS mirror hosts often fail TLS on macOS with system proxy/VPN.
         let candidates = [
-            "https://itorrents.org/torrent/\(upper).torrent",
-            "https://itorrents.org/torrent/\(hash).torrent",
             "http://torrage.info/torrent.php?h=\(hash)",
-            "https://torra.to/api/v1/torrents/\(hash)",
+            "https://itorrents.org/torrent/\(upper).torrent",
         ]
         return candidates.compactMap { URL(string: $0) }
     }
 
     private static func fetchTorrentBytesFromBackend(hash: String, config: BackendConfig) async throws -> Data {
-        var components = URLComponents(
-            url: config.baseURL.appending(path: "api/torrent/metadata"),
-            resolvingAgainstBaseURL: false
-        )
-        components?.queryItems = [URLQueryItem(name: "hash", value: hash)]
-        guard let url = components?.url else {
+        guard let url = BackendURLSession.metadataURL(baseURL: config.baseURL, infoHash: hash) else {
             throw FetchError.torrentFileUnavailable
         }
 
         var request = URLRequest(url: url)
         request.setValue(config.appToken, forHTTPHeaderField: "X-MovieBox-Token")
-        request.timeoutInterval = 25
+        request.setValue("application/x-bittorrent,*/*", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 30
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode), data.count > 64 else {
+        let (data, response) = try await BackendURLSession.direct.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
             throw FetchError.torrentFileUnavailable
         }
+
+        if http.statusCode == 404 {
+            throw FetchError.torrentFileUnavailable
+        }
+
+        guard (200..<300).contains(http.statusCode) else {
+            throw FetchError.torrentFileUnavailable
+        }
+
+        if data.first == 0x7B {
+            // JSON error body from backend, e.g. {"error":"metadata_unavailable"}
+            throw FetchError.torrentFileUnavailable
+        }
+
+        guard isTorrentFileData(data) else {
+            throw FetchError.backendReturnedInvalidTorrent(
+                statusCode: http.statusCode,
+                byteCount: data.count
+            )
+        }
+
         return data
+    }
+
+    private static func isTorrentFileData(_ data: Data) -> Bool {
+        guard data.count >= 64 else { return false }
+        return data.first == 0x64
     }
 
     private static func downloadAndParse(url: URL, expectedHash: String, trackers: [String]) async throws -> TorrentMetadata {

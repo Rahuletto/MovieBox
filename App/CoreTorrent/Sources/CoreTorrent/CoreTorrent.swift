@@ -191,23 +191,29 @@ public enum ReleaseParser {
     public static func parseQuality(from title: String) -> VideoQuality {
         let t = normalized(title)
         if t.contains("2160") || tokenized(t).contains("4k") || tokenized(t).contains("uhd") { return .p2160 }
+        if t.contains("1080") { return .p1080 }
         if t.contains("720") { return .p720 }
         return .p1080
     }
 
-    /// Prefer explicit indexer/API quality labels, then parse the release title.
+    /// Release title wins when it contains an explicit resolution; otherwise use the indexer label.
     public static func resolveQuality(indexerLabel: String?, title: String) -> VideoQuality {
-        let parts = [indexerLabel, title].compactMap { $0 }.filter { !$0.isEmpty }
-        var best: VideoQuality = .p720
-        for part in parts {
-            let q = parseQuality(from: part)
-            if q > best { best = q }
+        if titleHasExplicitResolution(title) {
+            return parseQuality(from: title)
         }
-        if best != .p720 { return best }
-        for part in parts {
-            if normalized(part).contains("1080") { return .p1080 }
+        if let indexerLabel, !indexerLabel.isEmpty {
+            return parseQuality(from: indexerLabel)
         }
-        return .p1080
+        return parseQuality(from: title)
+    }
+
+    private static func titleHasExplicitResolution(_ title: String) -> Bool {
+        let t = normalized(title)
+        return t.contains("2160")
+            || t.contains("1080")
+            || t.contains("720")
+            || tokenized(t).contains("4k")
+            || tokenized(t).contains("uhd")
     }
 
     public static func parseAudio(from title: String) -> AudioFormat? {
@@ -315,11 +321,12 @@ public actor TorrentSearchAggregator {
         year: Int? = nil,
         imdbId: String? = nil,
         kind: TorrentioClient.MediaKind = .movie,
-        enabledIndexerIDs: Set<String> = TorrentIndexerPreferences.defaultIDs
+        enabledIndexerIDs: Set<String> = TorrentIndexerPreferences.defaultIDs,
+        queryOverride: String? = nil
     ) -> AsyncStream<[TorrentResult]> {
         AsyncStream { continuation in
             Task {
-                let query = TorrentSearchQuery.make(title: movieTitle, year: year)
+                let query = queryOverride ?? TorrentSearchQuery.make(title: movieTitle, year: year)
 
                 if let backendSearcher {
                     do {

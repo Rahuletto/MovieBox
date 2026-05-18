@@ -1,36 +1,72 @@
 import SwiftUI
+import DesignSystem
 
-/// A reusable navigation header with a back button and optional title
-/// - If title is provided: back button + title layout
-/// - If title is nil: just the back button (left-aligned)
+/// Navigation bar with back (left) and optional share (right).
 struct NavigationHeader: View {
     let title: String?
+    let shareURL: URL?
+    let shareTitle: String?
     let onBack: () -> Void
-    
+
+    init(
+        title: String?,
+        shareURL: URL? = nil,
+        shareTitle: String? = nil,
+        onBack: @escaping () -> Void
+    ) {
+        self.title = title
+        self.shareURL = shareURL
+        self.shareTitle = shareTitle
+        self.onBack = onBack
+    }
+
     var body: some View {
         HStack(spacing: 12) {
             BackButton(action: onBack, title: title)
-            Spacer()
+            Spacer(minLength: 0)
+            if let shareURL {
+                ShareLink(
+                    item: shareURL,
+                    subject: Text(shareTitle ?? ""),
+                    message: Text(shareTitle ?? "")
+                ) {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 40, height: 40)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .adaptiveGlass(cornerRadius: 32)
+                .clipShape(Circle())
+                .shadow(color: .black.opacity(0.12), radius: 12, x: 0, y: 4)
+                .help("Share")
+            }
         }
         .padding(.leading, 96)
-        .padding(.trailing, 16)
+        .padding(.trailing, 20)
         .padding(.top, 12)
         .padding(.bottom, 16)
     }
+
 }
 
 #Preview {
     ZStack {
         LinearGradient(
-            gradient: Gradient(colors: [.blue, .purple]),
+            colors: [.blue, .purple],
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
         .ignoresSafeArea()
-        
+
         VStack {
-            NavigationHeader(title: "Animation", onBack: {})
-            NavigationHeader(title: nil, onBack: {})
+            NavigationHeader(
+                title: nil,
+                shareURL: URL(string: "https://www.imdb.com/title/tt1375666/")!,
+                shareTitle: "Inception",
+                onBack: {}
+            )
             Spacer()
         }
     }

@@ -243,7 +243,7 @@ public final class PeerConnection: ObservableObject {
         handshake.append(contentsOf: "BitTorrent protocol".utf8)
         handshake.append(contentsOf: [UInt8](repeating: 0, count: 8))
         handshake.append(contentsOf: hexToData(infoHash))
-        handshake.append(contentsOf: peerId.utf8)
+        handshake.append(BitTorrentPeerID.data(for: peerId))
 
         connection?.send(content: handshake, completion: .contentProcessed { _ in })
     }
@@ -301,18 +301,26 @@ public final class PeerConnection: ObservableObject {
 
     private func receiveMessages() async {
         connection?.receive(minimumIncompleteLength: 1, maximumLength: 131072) { [weak self] data, _, isComplete, error in
-            guard let strongSelf = self, let data, !isComplete, error == nil else {
-                Task { @MainActor [weak self] in
-                    self?.state = .disconnected
-                }
-                return
-            }
+            Task { @MainActor [weak self] in
+                guard let strongSelf = self else { return }
 
-            Task { @MainActor in
-                strongSelf.buffer.append(data)
-                while let message = strongSelf.parseNextMessage() {
-                    await strongSelf.handleMessage(message)
+                if let error {
+                    strongSelf.state = .error(error.localizedDescription)
+                    return
                 }
+
+                if let data, !data.isEmpty {
+                    strongSelf.buffer.append(data)
+                    while let message = strongSelf.parseNextMessage() {
+                        await strongSelf.handleMessage(message)
+                    }
+                }
+
+                if isComplete {
+                    strongSelf.state = .disconnected
+                    return
+                }
+
                 await strongSelf.receiveMessages()
             }
         }
@@ -389,8 +397,9 @@ public final class PeerConnection: ObservableObject {
 
         state = .downloading
 
-        for _ in 0..<5 {
+        for _ in 0..<8 {
             guard let request = await pieceManager.getNextRequest() else { break }
+            if !peerBitfield.isEmpty, !peerHasPiece(request.pieceIndex) { continue }
 
             let message = WireMessage.request(
                 pieceIndex: request.pieceIndex,

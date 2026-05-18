@@ -105,7 +105,7 @@ public final class DownloadManager: ObservableObject {
 
         tasks[taskIndex].state = .downloading
 
-        let peerId = "-MB0001-" + (0..<12).map { _ in "abcdefghijklmnopqrstuvwxyz0123456789".randomElement()! }
+        let peerId = BitTorrentPeerID.make()
         let magnet = MagnetURI(from: task.magnetURI)
         guard let infoHash = magnet?.infoHash else {
             tasks[taskIndex].state = .failed

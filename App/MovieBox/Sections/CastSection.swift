@@ -5,54 +5,67 @@ import CoreMetadata
 struct CastSection: View {
     let cast: [CastMember]
 
+    private let photoSize: CGFloat = 128
+    private let cardWidth: CGFloat = 140
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Cast")
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Cast & Crew")
                 .font(MovieBoxTypography.title)
                 .foregroundStyle(.primary)
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 16) {
+            ScrollView(.horizontal) {
+                HStack(spacing: 20) {
                     ForEach(cast) { member in
                         VStack(spacing: 6) {
-                            if let path = member.profilePath, let url = URL(string: "https://image.tmdb.org/t/p/w185\(path)") {
-                                CachedImageView(url: url) {
-                                    Image(systemName: "person.circle.fill")
-                                        .font(.system(size: 32))
-                                        .foregroundStyle(.secondary)
-                                } content: { image in
-                                    image.resizable().scaledToFill()
-                                }
-                                .frame(width: 80, height: 80)
-                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                            } else {
-                                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    .fill(Color(nsColor: .controlBackgroundColor))
-                                    .frame(width: 80, height: 80)
-                                    .overlay {
-                                        Image(systemName: "person.circle.fill")
-                                            .font(.system(size: 32))
-                                            .foregroundStyle(.secondary)
-                                    }
-                            }
-
+                            castPhoto(for: member)
                             Text(member.name)
-                                .font(.caption)
-                                .fontWeight(.medium)
-                                .lineLimit(1)
-                                .frame(width: 80)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.primary)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.center)
+                                .frame(width: cardWidth)
 
                             Text(member.character)
-                                .font(.caption2)
+                                .font(.caption)
                                 .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .frame(width: 80)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.center)
+                                .frame(width: cardWidth)
                         }
                     }
                 }
-                .padding(.trailing, 100)
+                .padding(.trailing, 24)
             }
+            .scrollIndicators(.hidden)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    @ViewBuilder
+    private func castPhoto(for member: CastMember) -> some View {
+        if let path = member.profilePath,
+           let url = MetadataClient().imageURL(path: path, width: 342) {
+            CachedImageView(url: url) {
+                photoPlaceholder
+            } content: { image in
+                image.resizable().scaledToFill()
+            }
+            .frame(width: photoSize, height: photoSize)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        } else {
+            photoPlaceholder
+        }
+    }
+
+    private var photoPlaceholder: some View {
+        RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(Color(white: 0.12))
+            .frame(width: photoSize, height: photoSize)
+            .overlay {
+                Image(systemName: "person.circle.fill")
+                    .font(.system(size: 48))
+                    .foregroundStyle(.tertiary)
+            }
     }
 }

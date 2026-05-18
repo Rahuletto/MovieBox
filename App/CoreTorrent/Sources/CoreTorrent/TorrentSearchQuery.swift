@@ -17,6 +17,24 @@ public enum TorrentSearchQuery {
         }
         return cleaned
     }
+
+    /// TV episode search — e.g. `Breaking Bad S01E03`.
+    public static func makeEpisode(showTitle: String, season: Int, episode: Int, year: Int? = nil) -> String {
+        let cleaned = showTitle
+            .replacingOccurrences(of: "%", with: "")
+            .components(separatedBy: .controlCharacters)
+            .joined()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let seasonText = String(format: "%02d", max(season, 0))
+        let episodeText = String(format: "%02d", max(episode, 0))
+        let base = "\(cleaned) S\(seasonText)E\(episodeText)"
+
+        if let year, (1900...2100).contains(year) {
+            return "\(base) \(year)"
+        }
+        return base
+    }
 }
 
 public struct TorrentSearchDiagnostics: Sendable {

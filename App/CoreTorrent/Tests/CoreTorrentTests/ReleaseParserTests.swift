@@ -11,9 +11,15 @@ import Testing
     #expect(ReleaseParser.parseSource(from: title) == .bluray)
 }
 
-@Test func resolveQualityPrefersIndexerLabel() {
-    #expect(ReleaseParser.resolveQuality(indexerLabel: "2160p", title: "Movie.2026.1080p.WEB-DL") == .p2160)
-    #expect(ReleaseParser.resolveQuality(indexerLabel: "720p", title: "Movie.2026.1080p.WEB-DL") == .p1080)
+@Test func resolveQualityPrefersTitleWhenExplicit() {
+    #expect(ReleaseParser.resolveQuality(indexerLabel: "2160p", title: "Movie.2026.1080p.WEB-DL") == .p1080)
+    #expect(ReleaseParser.resolveQuality(indexerLabel: "1080p", title: "Movie.2026.720p.WEB-DL") == .p720)
+    #expect(ReleaseParser.resolveQuality(indexerLabel: "1080p", title: "Movie.2026.720p.AMZN.WEB-DL") == .p720)
+}
+
+@Test func resolveQualityUsesIndexerWhenTitleHasNoResolution() {
+    #expect(ReleaseParser.resolveQuality(indexerLabel: "2160p", title: "Movie.2026.WEB-DL.H265-GROUP") == .p2160)
+    #expect(ReleaseParser.resolveQuality(indexerLabel: "720p", title: "Movie.2026.WEB-DL-GROUP") == .p720)
 }
 
 @Test func parsesWebDLSDRDefaults() {

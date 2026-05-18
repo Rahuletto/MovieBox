@@ -97,7 +97,7 @@ public actor TorrentioClient {
                 }
 
                 let movieTitle = titleLines.first ?? "Unknown Movie"
-                let magnet = "magnet:?xt=urn:btih:\(stream.infoHash)&dn=\(movieTitle.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")"
+                let magnet = TorrentMagnet.build(infoHash: stream.infoHash, displayName: movieTitle)
 
                 return TorrentResult(
                     title: movieTitle,

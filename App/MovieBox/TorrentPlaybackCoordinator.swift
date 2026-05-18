@@ -49,7 +49,8 @@ final class TorrentPlaybackCoordinator {
         movieId: Int,
         subtitleURL: URL?,
         subtitleAppearance: SubtitleAppearance = .cinematic,
-        subtitleFontSize: CGFloat = 20
+        subtitleFontSize: CGFloat = 20,
+        episodeTitle: String? = nil
     ) throws {
         configureSources(on: playerState, torrents: allTorrents, selected: torrent)
 
@@ -67,7 +68,8 @@ final class TorrentPlaybackCoordinator {
             subtitleURL: subtitleURL,
             hdrType: playerHDRType(from: torrent.hdrType),
             subtitleAppearance: subtitleAppearance,
-            subtitleFontSize: subtitleFontSize
+            subtitleFontSize: subtitleFontSize,
+            episodeTitle: episodeTitle
         )
     }
 

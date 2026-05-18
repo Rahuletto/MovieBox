@@ -6,13 +6,18 @@ function normalizeHash(raw: string): string | null {
   return null
 }
 
+/** Bencode torrent files are dictionaries and always start with `d`. */
+export function isTorrentFileBytes(data: Uint8Array): boolean {
+  return data.byteLength >= 64 && data[0] === 0x64
+}
+
 function torrentFileURLs(hash: string): string[] {
   const upper = hash.toUpperCase()
   return [
     `https://itorrents.org/torrent/${upper}.torrent`,
     `https://itorrents.org/torrent/${hash}.torrent`,
-    `http://torrage.info/torrent.php?h=${hash}`,
-    `https://torra.to/api/v1/torrents/${hash}`,
+    `http://itorrents.org/torrent/${hash}`,
+    `http://itorrents.org/torrent/${upper}.torrent`,
   ]
 }
 
@@ -29,9 +34,9 @@ export async function fetchTorrentFileBytes(infoHash: string): Promise<Uint8Arra
         cf: { cacheTtl: 3600 },
       })
       if (!res.ok) continue
-      const buf = await res.arrayBuffer()
-      if (buf.byteLength < 64) continue
-      return new Uint8Array(buf)
+      const buf = new Uint8Array(await res.arrayBuffer())
+      if (!isTorrentFileBytes(buf)) continue
+      return buf
     } catch {
       continue
     }

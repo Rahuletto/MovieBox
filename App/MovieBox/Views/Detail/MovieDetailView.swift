@@ -29,8 +29,14 @@ struct MovieDetailView: View {
     @State private var activeStreamSession: StreamSession?
     @State private var torrentCoordinator: TorrentPlaybackCoordinator?
     @State private var isPreparingStream = false
-    @State private var scrollOffset: CGFloat = 0
-    
+    @State private var tvSeasons: [TVSeasonSummary] = []
+    @State private var tvEpisodes: [TVEpisode] = []
+    @State private var selectedTVSeason = 1
+    @State private var selectedTVEpisode: TVEpisode?
+    @State private var isLoadingTVSeasons = false
+    @State private var isLoadingTVEpisodes = false
+    @State private var isLoadingTorrents = false
+    @State private var tvSeasonsLoadFailed = false
     private let movieId: Int
     private let kind: MediaKind
     private let orchestrator: StreamingOrchestrator
@@ -45,37 +51,61 @@ struct MovieDetailView: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            // Fixed, full-window backdrop image — sits behind everything and
-            // doesn't scroll. The scroll content has its own opaque background
-            // below the hero area, so the backdrop is only visible at the top.
-            FixedDetailBackdrop(
-                backdropPath: detail?.movie.backdropPath,
-                scrollOffset: scrollOffset
-            )
-            .ignoresSafeArea()
+            FixedDetailBackdrop(backdropPath: detail?.movie.backdropPath)
+                .ignoresSafeArea()
 
-            MainContentView(
-                detail: detail,
-                isLoading: isLoading,
-                torrents: torrents,
-                torrentSearchDiagnostics: torrentSearchDiagnostics,
-                subtitles: subtitles,
-                selectedSubtitle: $selectedSubtitle,
-                isLoadingSubtitles: isLoadingSubtitles,
-                subtitleFileURL: subtitleFileURL,
-                subtitleAppearance: settings.first?.subtitleAppearance ?? .cinematic,
-                subtitleFontSize: settings.first?.subtitleFontSizePoints ?? 20,
-                currentRating: currentRating,
-                scrollOffset: $scrollOffset,
-                orchestrator: orchestrator,
-                kind: kind,
-                onAddToList: { addToMyList(detail!.movie) },
-                onRate: rateMovie,
-                onPlayNow: playBestTorrent,
-                onPlayTrailer: { playTrailer(detail?.trailerURL) },
-                onSearchSubtitles: { searchSubtitles(for: detail!.movie) },
-                onDownloadSubtitle: downloadSubtitle
-            )
+            ScrollView {
+                MainContentView(
+                    detail: detail,
+                    isLoading: isLoading,
+                    torrents: torrents,
+                    torrentSearchDiagnostics: torrentSearchDiagnostics,
+                    subtitles: subtitles,
+                    selectedSubtitle: $selectedSubtitle,
+                    isLoadingSubtitles: isLoadingSubtitles,
+                    subtitleFileURL: subtitleFileURL,
+                    subtitleAppearance: settings.first?.subtitleAppearance ?? .cinematic,
+                    subtitleFontSize: settings.first?.subtitleFontSizePoints ?? 20,
+                    currentRating: currentRating,
+                    orchestrator: orchestrator,
+                    kind: kind,
+                    tvSeasons: tvSeasons,
+                    tvEpisodes: tvEpisodes,
+                    selectedTVSeason: selectedTVSeason,
+                    selectedTVEpisode: selectedTVEpisode,
+                    isLoadingTVSeasons: isLoadingTVSeasons,
+                    isLoadingTVEpisodes: isLoadingTVEpisodes,
+                    tvSeasonsLoadFailed: tvSeasonsLoadFailed,
+                    isLoadingTorrents: isLoadingTorrents,
+                    playButtonTitle: heroPlayButtonTitle,
+                    onTVSeasonChange: { season in
+                        selectedTVSeason = season
+                        selectedTVEpisode = nil
+                        torrents = []
+                        torrentSearchDiagnostics = nil
+                        Task { await loadTVEpisodes() }
+                    },
+                    onEpisodeSelect: { episode in
+                        Task { await selectEpisode(episode) }
+                    },
+                    onRetryTVSeasons: {
+                        Task {
+                            guard let mode = settings.first?.metadataMode else { return }
+                            await loadTVSeasons(client: MetadataClient(mode: mode))
+                        }
+                    },
+                    onAddToList: { addToMyList(detail!.movie) },
+                    onRate: rateMovie,
+                    onPlayNow: playBestTorrent,
+                    onPlayTrailer: { playTrailer(detail?.trailerURL) },
+                    onSearchSubtitles: { searchSubtitles(for: detail!.movie) },
+                    onDownloadSubtitle: downloadSubtitle
+                )
+            }
+            .frame(maxWidth: .infinity)
+            .clipped()
+            .scrollContentBackground(.hidden)
+            .scrollIndicators(.hidden)
 
             if let errorMessage {
                 ErrorOverlay(message: errorMessage, onRetry: { Task { await load() } })
@@ -96,8 +126,13 @@ struct MovieDetailView: View {
 
             // (Loading state is rendered inline inside MainContentView — no duplicate overlay here.)
 
-            // Navigation header with back button (on top)
-            NavigationHeader(title: nil, onBack: onBack)
+            NavigationHeader(
+                title: nil,
+                shareURL: detail.map { MediaShareLink.url(for: $0, kind: kind) },
+                shareTitle: detail?.movie.title,
+                onBack: onBack
+            )
+            .zIndex(30)
         }
         .onAppear { syncMetadataBackend() }
         .onChange(of: settings.first?.proxyBaseURL) { _, _ in syncMetadataBackend() }
@@ -106,6 +141,8 @@ struct MovieDetailView: View {
         .onChange(of: settings.first?.proxyBaseURL) { _, _ in syncMetadataBackend() }
         .onChange(of: settings.first?.appToken) { _, _ in syncMetadataBackend() }
         .task(id: movieId) {
+            selectedTVEpisode = nil
+            torrents = []
             await load()
         }
         .keyboardShortcut(.cancelAction)
@@ -154,29 +191,6 @@ struct MovieDetailView: View {
             let imdb = loadedDetail.imdbId
             let subtitleClient = SubtitleClient(mode: mode)
 
-            // Torrent search + subtitle search run in parallel — neither depends on
-            // the other, and we no longer block one behind the other sequentially.
-            async let torrentsTask: ([TorrentResult], TorrentSearchDiagnostics) = {
-                let appSettings = settings.first
-                let backend = appSettings?.backendTorrentConfig
-                let aggregator = TorrentSearchAggregator(
-                    backendBaseURL: backend?.baseURL,
-                    backendAppToken: backend?.appToken
-                )
-                var latest: [TorrentResult] = []
-                let torrentKind: TorrentioClient.MediaKind = kind == .tv ? .tv : .movie
-                for await batch in aggregator.search(
-                    movieTitle: title,
-                    year: year,
-                    imdbId: imdb,
-                    kind: torrentKind,
-                    enabledIndexerIDs: appSettings?.enabledTorrentIndexerSet ?? TorrentIndexerPreferences.defaultIDs
-                ) {
-                    latest = batch
-                }
-                return (latest, await aggregator.lastDiagnostics)
-            }()
-
             async let subtitlesTask: [SubtitleInfo] = {
                 do {
                     return try await subtitleClient.searchSubtitles(
@@ -190,16 +204,20 @@ struct MovieDetailView: View {
                 }
             }()
 
-            let torrentSearch = await torrentsTask
-            torrents = torrentSearch.0
-            torrentSearchDiagnostics = torrentSearch.1
-            if torrents.isEmpty {
-                LogStore.shared.log(
-                    "Torrent search empty for \"\(torrentSearch.1.queryUsed)\" (torrentio: \(torrentSearch.1.torrentioCount), native: \(torrentSearch.1.nativeTotalCount), detail: \(torrentSearch.1.nativeCounts))."
-                )
-            }
             subtitles = await subtitlesTask
             isLoadingSubtitles = false
+
+            if kind == .tv {
+                torrents = []
+                torrentSearchDiagnostics = nil
+                selectedTVEpisode = nil
+                await loadTVSeasons(client: client)
+            } else {
+                tvSeasons = []
+                tvEpisodes = []
+                selectedTVEpisode = nil
+                await searchTorrents()
+            }
         } catch {
             if let urlError = error as? URLError, urlError.code == .cancelled {
                 return
@@ -210,6 +228,118 @@ struct MovieDetailView: View {
         }
         isLoading = false
         isLoadingSubtitles = false
+    }
+
+    private func loadTVSeasons(client: MetadataClient) async {
+        isLoadingTVSeasons = true
+        tvSeasonsLoadFailed = false
+        defer { isLoadingTVSeasons = false }
+        do {
+            let seasons = try await client.tvSeasonSummaries(showId: movieId)
+            tvSeasons = seasons
+            selectedTVSeason = seasons.last(where: { $0.episodeCount > 0 })?.seasonNumber
+                ?? seasons.first?.seasonNumber
+                ?? 1
+            await loadTVEpisodes(client: client)
+        } catch {
+            tvSeasons = []
+            tvEpisodes = []
+            tvSeasonsLoadFailed = true
+            LogStore.shared.log("TV seasons failed for \(movieId): \(error)")
+        }
+    }
+
+    private func loadTVEpisodes(client: MetadataClient? = nil) async {
+        guard kind == .tv, let mode = settings.first?.metadataMode else { return }
+        let resolvedClient = client ?? MetadataClient(mode: mode)
+        isLoadingTVEpisodes = true
+        defer { isLoadingTVEpisodes = false }
+        do {
+            tvEpisodes = try await resolvedClient.tvSeasonEpisodes(showId: movieId, season: selectedTVSeason)
+            if let first = tvEpisodes.first {
+                await selectEpisode(first)
+            } else {
+                selectedTVEpisode = nil
+                torrents = []
+            }
+        } catch {
+            tvEpisodes = []
+            selectedTVEpisode = nil
+            torrents = []
+        }
+    }
+
+    private var heroPlayButtonTitle: String {
+        guard kind == .tv else { return "Play Now" }
+        guard let episode = selectedTVEpisode else { return "Select Episode" }
+        return "Play S\(episode.seasonNumber) E\(episode.episodeNumber)"
+    }
+
+    private func selectEpisode(_ episode: TVEpisode) async {
+        selectedTVEpisode = episode
+        await searchTorrents(episode: episode)
+    }
+
+    private func searchTorrents(episode: TVEpisode? = nil) async {
+        guard let detail else { return }
+        let appSettings = settings.first
+        let backend = appSettings?.backendTorrentConfig
+        let title = detail.movie.title
+        let year = Int(detail.movie.releaseDate.prefix(4))
+        let imdb = detail.imdbId
+        let torrentKind: TorrentioClient.MediaKind = kind == .tv ? .tv : .movie
+
+        let queryOverride: String? = {
+            guard kind == .tv, let episode else { return nil }
+            return TorrentSearchQuery.makeEpisode(
+                showTitle: title,
+                season: episode.seasonNumber,
+                episode: episode.episodeNumber,
+                year: year
+            )
+        }()
+
+        isLoadingTorrents = true
+        torrents = []
+        defer { isLoadingTorrents = false }
+
+        let aggregator = TorrentSearchAggregator(
+            backendBaseURL: backend?.baseURL,
+            backendAppToken: backend?.appToken
+        )
+
+        var latest: [TorrentResult] = []
+        for await batch in aggregator.search(
+            movieTitle: title,
+            year: year,
+            imdbId: imdb,
+            kind: torrentKind,
+            enabledIndexerIDs: appSettings?.enabledTorrentIndexerSet ?? TorrentIndexerPreferences.defaultIDs,
+            queryOverride: queryOverride
+        ) {
+            latest = batch
+        }
+
+        if kind == .tv, let episode {
+            latest = filterTorrents(latest, season: episode.seasonNumber, episode: episode.episodeNumber)
+        }
+
+        torrents = latest
+        torrentSearchDiagnostics = await aggregator.lastDiagnostics
+    }
+
+    private func filterTorrents(_ results: [TorrentResult], season: Int, episode: Int) -> [TorrentResult] {
+        let patterns = [
+            String(format: "S%02dE%02d", season, episode),
+            String(format: "S%dE%d", season, episode),
+            String(format: "%dx%02d", season, episode),
+            String(format: "%dX%02d", season, episode)
+        ]
+        let filtered = results.filter { torrent in
+            let title = torrent.title.uppercased()
+            return patterns.contains { title.contains($0.uppercased()) }
+        }
+        return filtered.isEmpty ? results : filtered
     }
 
     private func addToMyList(_ movie: Movie) {
@@ -341,6 +471,11 @@ struct MovieDetailView: View {
     }
 
     private func playBestTorrent() {
+        if kind == .tv, selectedTVEpisode == nil {
+            errorMessage = "Select a season and episode to play."
+            return
+        }
+
         guard !torrents.isEmpty else {
             errorMessage = torrentFailureMessage(imdbId: detail?.imdbId)
             return
@@ -382,7 +517,9 @@ struct MovieDetailView: View {
                 }
 
                 await MainActor.run {
-                    isPreparingStream = false
+                    withAnimation(MovieBoxMotion.player) {
+                        isPreparingStream = false
+                    }
                     do {
                         try coordinator.finishPlayback(
                             torrent: torrent,
@@ -392,7 +529,10 @@ struct MovieDetailView: View {
                             movieId: movieId,
                             subtitleURL: subtitleFileURL,
                             subtitleAppearance: settings.first?.subtitleAppearance ?? .cinematic,
-                            subtitleFontSize: settings.first?.subtitleFontSizePoints ?? 20
+                            subtitleFontSize: settings.first?.subtitleFontSizePoints ?? 20,
+                            episodeTitle: selectedTVEpisode.map {
+                                "S\($0.seasonNumber)E\($0.episodeNumber) · \($0.name)"
+                            }
                         )
                     } catch {
                         errorMessage = error.localizedDescription
@@ -411,114 +551,140 @@ struct MovieDetailView: View {
 
 // MARK: - Subviews
 
-/// Fixed, full-window backdrop that sits behind the entire detail view.
-/// Doesn't scroll; the scroll content has its own opaque background that covers
-/// the backdrop everywhere except inside the hero overlay area at the top.
-///
-/// Layout safety:
-/// - `GeometryReader` gives a known size, so the image always fills its parent
-///   without intrinsic-size negotiation that could push siblings around.
-/// - `.clipped()` keeps oversized source images inside the frame.
-/// - The vertical gradient fades cleanly into the opaque content section below,
-///   so there's no visible seam.
+/// Top ~60vh sharp; blur + black fade on the lower portion (not scroll-linked).
+private enum DetailBackdropBlur {
+    static let clearThrough: CGFloat = 0.60
+}
+
+private struct ProgressiveBackdropBlurMask: View {
+    let clearThrough: CGFloat
+    let rampLength: CGFloat
+
+    var body: some View {
+        LinearGradient(
+            stops: [
+                .init(color: .clear, location: 0),
+                .init(color: .clear, location: clearThrough),
+                .init(color: .white, location: min(clearThrough + rampLength, 1))
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+    }
+}
+
+private struct ProgressiveBackdropBlackFade: View {
+    let clearThrough: CGFloat
+
+    var body: some View {
+        LinearGradient(
+            stops: [
+                .init(color: .clear, location: 0),
+                .init(color: .clear, location: clearThrough),
+                .init(color: .black.opacity(0.25), location: min(clearThrough + 0.10, 1)),
+                .init(color: .black.opacity(0.55), location: min(clearThrough + 0.22, 1)),
+                .init(color: .black.opacity(0.88), location: 1)
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+    }
+}
+
+/// Fixed full-window image with a static blurred layer composited on top (no solid fill).
 private struct FixedDetailBackdrop: View {
-    @Environment(\.colorScheme) private var colorScheme
-
     let backdropPath: String?
-    let scrollOffset: CGFloat
 
-    /// Fade color matches the surrounding chrome — black in dark mode,
-    /// white in light mode — so the backdrop dissolves into the page
-    /// background instead of awkwardly fading to black under a white UI.
-    private var fadeColor: Color {
-        colorScheme == .dark ? .black : .white
+    private var backdropURL: URL? {
+        guard let path = backdropPath else { return nil }
+        return MetadataClient().imageURL(path: path, width: 1920)
     }
 
     var body: some View {
-        // Scroll-driven blur + tinted overlay: as the user scrolls down,
-        // `scrollOffset` goes negative; we map that to a blur radius and a
-        // fade-color alpha so the backdrop softly dissolves into the
-        // content below. Same shape as the old `BackdropBackground`,
-        // applied to a fixed full-window backdrop.
-        let blurAmount = min(max(-scrollOffset / 20, 0), 32)
-        let fadeOpacity = min(max(-scrollOffset / 300, 0), 0.5)
-
         GeometryReader { geo in
-            ZStack {
-                fadeColor
-                if let path = backdropPath,
-                   let url = MetadataClient().imageURL(path: path, width: 1920) {
-                    CachedImageView(url: url) {
-                        fadeColor
-                    } content: { image in
-                        image
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                            .frame(width: geo.size.width, height: geo.size.height)
-                            .clipped()
-                            .blur(radius: blurAmount)
-                    }
+            backdropImage(size: geo.size)
+                .frame(width: geo.size.width, height: geo.size.height)
+                .clipped()
+        }
+    }
+
+    @ViewBuilder
+    private func backdropImage(size: CGSize) -> some View {
+        if let backdropURL {
+            CachedImageView(url: backdropURL) {
+                Color.clear
+            } content: { image in
+                let base = image
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: size.width, height: size.height)
+                    .clipped()
+
+                ZStack {
+                    base
+
+                    base
+                        .blur(radius: 16)
+                        .mask {
+                            ProgressiveBackdropBlurMask(
+                                clearThrough: DetailBackdropBlur.clearThrough,
+                                rampLength: 0.14
+                            )
+                        }
+
+                    base
+                        .blur(radius: 32)
+                        .mask {
+                            ProgressiveBackdropBlurMask(
+                                clearThrough: DetailBackdropBlur.clearThrough + 0.05,
+                                rampLength: 0.16
+                            )
+                        }
+
+                    ProgressiveBackdropBlackFade(clearThrough: DetailBackdropBlur.clearThrough)
                 }
-
-                // Scroll-driven fade overlay — same alpha-channel pattern as
-                // the previous `BackdropBackground`, tinted by `fadeColor`.
-                fadeColor.opacity(fadeOpacity)
-
-                // Subtle constant vertical fade so hero text always has
-                // legible contrast even at scrollOffset == 0.
-                LinearGradient(
-                    colors: [.clear, fadeColor.opacity(0.1)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-
-                // Horizontal vignette from the left.
-                LinearGradient(
-                    colors: [fadeColor.opacity(0.3), .clear],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
+                .drawingGroup(opaque: false)
             }
-            .frame(width: geo.size.width, height: geo.size.height)
-            .clipped()
+        } else {
+            Color.clear
         }
     }
 }
 
-/// Transparent hero overlay — no backdrop image (that's the fixed background),
-/// just a hero header pinned to the bottom-left at a known height. Sits at the
-/// top of the scroll content so the backdrop shows through.
+/// Transparent hero — fixed backdrop shows through behind this overlay.
 private struct DetailHeroOverlay: View {
     let detail: MovieDetail
     let kind: MediaKind
+    let techKinds: [MediaTechKind]
+    let accessibilityTags: [String]
+    let playButtonTitle: String
     let addToMyList: () -> Void
     let onRate: (Float) -> Void
     let onPlayNow: () -> Void
     let onPlayTrailer: () -> Void
     let currentRating: Float?
 
-    /// Fixed height so layout never shifts and content below always lands in
-    /// the same spot.
-    static let height: CGFloat = 540
+    static let height: CGFloat = 620
 
     var body: some View {
-        VStack(spacing: 0) {
-            Spacer(minLength: 0)
-            HStack {
+        ZStack(alignment: .bottomLeading) {
+            VStack(spacing: 0) {
+                Spacer(minLength: 0)
                 DetailHeroHeader(
                     detail: detail,
                     kind: kind,
+                    techKinds: techKinds,
+                    accessibilityTags: accessibilityTags,
                     addToMyList: addToMyList,
                     onRate: onRate,
                     onPlayNow: onPlayNow,
                     onPlayTrailer: onPlayTrailer,
-                    currentRating: currentRating
+                    currentRating: currentRating,
+                    playButtonTitle: playButtonTitle
                 )
-                .frame(maxWidth: 720, alignment: .leading)
-                Spacer(minLength: 0)
+                .padding(.horizontal, 28)
+                .padding(.bottom, 28)
             }
-            .padding(.horizontal, 28)
-            .padding(.bottom, 28)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: Self.height)
@@ -537,9 +703,20 @@ private struct MainContentView: View {
     let subtitleAppearance: SubtitleAppearance
     let subtitleFontSize: CGFloat
     let currentRating: Float?
-    @Binding var scrollOffset: CGFloat
     let orchestrator: StreamingOrchestrator
     let kind: MediaKind
+    let tvSeasons: [TVSeasonSummary]
+    let tvEpisodes: [TVEpisode]
+    let selectedTVSeason: Int
+    let selectedTVEpisode: TVEpisode?
+    let isLoadingTVSeasons: Bool
+    let isLoadingTVEpisodes: Bool
+    let tvSeasonsLoadFailed: Bool
+    let isLoadingTorrents: Bool
+    let playButtonTitle: String
+    let onTVSeasonChange: (Int) -> Void
+    let onEpisodeSelect: (TVEpisode) -> Void
+    let onRetryTVSeasons: () -> Void
     let onAddToList: () -> Void
     let onRate: (Float) -> Void
     let onPlayNow: () -> Void
@@ -547,16 +724,31 @@ private struct MainContentView: View {
     let onSearchSubtitles: () -> Void
     let onDownloadSubtitle: (SubtitleInfo) -> Void
 
+    private var accessibilityTags: [String] {
+        var tags: [String] = []
+        if !subtitles.isEmpty { tags.append("CC") }
+        if subtitles.contains(where: {
+            $0.name.localizedCaseInsensitiveContains("SDH")
+                || $0.name.localizedCaseInsensitiveContains("hearing")
+        }) {
+            tags.append("SDH")
+        }
+        return tags
+    }
+
+    private var subtitleLanguageLabels: [String] {
+        Array(Set(subtitles.map(\.language))).sorted()
+    }
+
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                if let detail {
-                    // Transparent hero overlay at the top of the scroll content
-                    // so the fixed backdrop behind the view shows through. Fixed
-                    // height means no layout shift while the backdrop loads.
+        VStack(alignment: .leading, spacing: 0) {
+            if let detail {
                     DetailHeroOverlay(
                         detail: detail,
                         kind: kind,
+                        techKinds: detailTechKinds(from: torrents),
+                        accessibilityTags: accessibilityTags,
+                        playButtonTitle: playButtonTitle,
                         addToMyList: onAddToList,
                         onRate: onRate,
                         onPlayNow: onPlayNow,
@@ -564,29 +756,71 @@ private struct MainContentView: View {
                         currentRating: currentRating
                     )
 
-                    VStack(alignment: .leading, spacing: 24) {
-                        // Rating Controls
+                    VStack(alignment: .leading, spacing: 32) {
+                        // Rating ALWAYS comes first
                         RatingControlsSection(currentRating: currentRating, onRate: onRate)
                             .frame(maxWidth: .infinity)
 
-                        // Cast
+                        if kind == .tv {
+                            TVEpisodesSection(
+                                showId: detail.movie.id,
+                                seasons: tvSeasons,
+                                episodes: tvEpisodes,
+                                selectedSeason: selectedTVSeason,
+                                selectedEpisodeID: selectedTVEpisode?.id,
+                                isLoadingSeasons: isLoadingTVSeasons,
+                                seasonsLoadFailed: tvSeasonsLoadFailed,
+                                isLoadingEpisodes: isLoadingTVEpisodes,
+                                onSeasonChange: onTVSeasonChange,
+                                onEpisodeSelect: onEpisodeSelect,
+                                onRetrySeasons: onRetryTVSeasons
+                            )
+                            .frame(maxWidth: .infinity)
+                        }
+
+                        if kind == .tv, selectedTVEpisode != nil {
+                            if isLoadingTorrents {
+                                HStack(spacing: 10) {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                    Text("Finding streams…")
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.vertical, 8)
+                            } else if let episode = selectedTVEpisode {
+                                TorrentSection(
+                                    movie: detail.movie,
+                                    torrents: torrents,
+                                    searchDiagnostics: torrentSearchDiagnostics,
+                                    isTV: true,
+                                    episodeLabel: "Season \(episode.seasonNumber) · Episode \(episode.episodeNumber)",
+                                    orchestrator: orchestrator,
+                                    subtitleURL: subtitleFileURL,
+                                    subtitleAppearance: subtitleAppearance,
+                                    subtitleFontSize: subtitleFontSize
+                                )
+                                .frame(maxWidth: .infinity)
+                            }
+                        } else if kind != .tv {
+                            TorrentSection(
+                                movie: detail.movie,
+                                torrents: torrents,
+                                searchDiagnostics: torrentSearchDiagnostics,
+                                isTV: false,
+                                orchestrator: orchestrator,
+                                subtitleURL: subtitleFileURL,
+                                subtitleAppearance: subtitleAppearance,
+                                subtitleFontSize: subtitleFontSize
+                            )
+                            .frame(maxWidth: .infinity)
+                        }
+
                         if !detail.cast.isEmpty {
                             CastSection(cast: detail.cast)
                                 .frame(maxWidth: .infinity)
                         }
-
-                        // Torrents
-                        TorrentSection(
-                            movie: detail.movie,
-                            torrents: torrents,
-                            searchDiagnostics: torrentSearchDiagnostics,
-                            isTV: kind == .tv,
-                            orchestrator: orchestrator,
-                            subtitleURL: subtitleFileURL,
-                            subtitleAppearance: subtitleAppearance,
-                            subtitleFontSize: subtitleFontSize
-                        )
-                        .frame(maxWidth: .infinity)
 
                         // Subtitles
                         SubtitleSection(
@@ -599,35 +833,29 @@ private struct MainContentView: View {
                         )
                         .frame(maxWidth: .infinity)
 
-                        // Similar Movies
                         if !detail.similar.isEmpty {
                             SimilarMoviesSection(movies: detail.similar)
                                 .frame(maxWidth: .infinity)
                         }
+
+                        MediaInformationSection(
+                            detail: detail,
+                            subtitleLanguages: subtitleLanguageLabels
+                        )
+                        .frame(maxWidth: .infinity)
                     }
                     .padding(.horizontal, EdgeInsets.defaultHorizontalPadding)
                     .padding(.vertical, 28)
                     .frame(maxWidth: .infinity, alignment: .leading)
-//                    .background(Color(nsColor: .windowBackgroundColor))
                 } else if isLoading {
                     ProgressView("Loading movie...")
                         .controlSize(.large)
                         .frame(maxWidth: .infinity, minHeight: 360)
-                } else {
-                    ContentUnavailableView("Movie Not Loaded", systemImage: "film")
-                }
+            } else {
+                ContentUnavailableView("Movie Not Loaded", systemImage: "film")
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity)
-        .clipped()
-        .scrollContentBackground(.hidden)
-        .onScrollGeometryChange(for: CGFloat.self) { geometry in
-            -geometry.contentOffset.y
-        } action: { _, newOffset in
-            scrollOffset = newOffset
-        }
-        .scrollIndicators(.hidden)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

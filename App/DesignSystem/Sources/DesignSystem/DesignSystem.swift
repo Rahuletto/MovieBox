@@ -18,31 +18,48 @@ public enum MovieBoxTypography {
     public static let caption = Font.system(.caption, weight: .medium)
 }
 
+public enum GlassStrength {
+  case ultraThin
+  case regular
+}
+
 public struct AdaptiveGlass: ViewModifier {
     private let cornerRadius: CGFloat
+    private let strength: GlassStrength
 
-    public init(cornerRadius: CGFloat = 18) {
+    public init(cornerRadius: CGFloat = 18, strength: GlassStrength = .regular) {
         self.cornerRadius = cornerRadius
+        self.strength = strength
     }
 
     public func body(content: Content) -> some View {
-        if #available(macOS 26.0, *) {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+
+        switch strength {
+        case .ultraThin:
             content
-                .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-        } else {
-            content
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                .background(.ultraThinMaterial, in: shape)
                 .overlay {
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .stroke(Color.primary.opacity(0.12), lineWidth: 0.6)
+                    shape.strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.6)
                 }
+        case .regular:
+            if #available(macOS 26.0, *) {
+                content
+                    .glassEffect(.regular.interactive(), in: shape)
+            } else {
+                content
+                    .background(.ultraThinMaterial, in: shape)
+                    .overlay {
+                        shape.strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.6)
+                    }
+            }
         }
     }
 }
 
 public extension View {
-    func adaptiveGlass(cornerRadius: CGFloat = 18) -> some View {
-        modifier(AdaptiveGlass(cornerRadius: cornerRadius))
+    func adaptiveGlass(cornerRadius: CGFloat = 18, strength: GlassStrength = .regular) -> some View {
+        modifier(AdaptiveGlass(cornerRadius: cornerRadius, strength: strength))
     }
 }
 
@@ -72,10 +89,16 @@ public struct GlassBadge: View {
 
 public struct GlassButton<Label: View>: View {
     private let action: () -> Void
+    private let glassStrength: GlassStrength
     private let label: Label
 
-    public init(action: @escaping () -> Void, @ViewBuilder label: () -> Label) {
+    public init(
+        action: @escaping () -> Void,
+        glassStrength: GlassStrength = .regular,
+        @ViewBuilder label: () -> Label
+    ) {
         self.action = action
+        self.glassStrength = glassStrength
         self.label = label()
     }
 
@@ -88,7 +111,7 @@ public struct GlassButton<Label: View>: View {
                 .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
         .buttonStyle(.plain)
-        .adaptiveGlass(cornerRadius: 14)
+        .adaptiveGlass(cornerRadius: 14, strength: glassStrength)
     }
 }
 
@@ -246,6 +269,14 @@ public enum BadgePalette {
         case 50...500: MovieBoxColors.warning
         case 10...49: .orange
         default: MovieBoxColors.danger
+        }
+    }
+
+    public static func leechColor(_ leechers: Int) -> Color {
+        switch leechers {
+        case 50...: MovieBoxColors.danger
+        case 10...49: .orange
+        default: Color.secondary
         }
     }
 }

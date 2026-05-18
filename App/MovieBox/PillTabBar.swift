@@ -97,6 +97,7 @@ struct PillTabBar: View {
                                     }
                                 }
                             }
+                            .animation(MovieBoxMotion.tabHighlight, value: currentTopLevelRoute)
                             .padding(.horizontal, 4)
                             .padding(.vertical, 3)
                             .frame(width: 420)
@@ -243,7 +244,6 @@ struct PillTabBar: View {
                 .contentShape(Capsule(style: .continuous))
         }
         .buttonStyle(.plain)
-        .animation(MovieBoxMotion.tabHighlight, value: isSelected)
         .accessibilityLabel(tab.title)
         .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : [.isButton])
     }
