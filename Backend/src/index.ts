@@ -203,6 +203,7 @@ app.get('/health', (c) => {
     service: 'moviebox-backend',
     timestamp: new Date().toISOString(),
     env: c.env.APP_ENV || 'unknown',
+    torrentApiVersion: TORRENT_API_VERSION,
     tmdbConfigured: Boolean(c.env.TMDB_TOKEN),
     fanartConfigured: Boolean(c.env.FANART_API_KEY),
     authConfigured: Boolean(c.env.APP_SECRET),

@@ -1,8 +1,8 @@
 import AVFoundation
+import AVKit
+import AppKit
 import Combine
 import SwiftUI
-import AppKit
-import AVKit
 
 public enum PlayerHDRType: String, Sendable, Codable {
     case hdr = "HDR"
@@ -184,7 +184,7 @@ public final class PlayerState {
         }
         thumbnailService = ThumbnailService(asset: asset)
 
-        PlaybackLog.log("load url=\(url.absoluteString) title=\(title)")
+        PlaybackLog.log("load url=\(PlaybackLog.redactURL(url)) title=\(title) movieId=\(movieId)")
 
         let playerItem = AVPlayerItem(asset: asset)
         if player.currentItem == nil {

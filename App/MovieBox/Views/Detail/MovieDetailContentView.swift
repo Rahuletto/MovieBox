@@ -33,6 +33,7 @@ struct MovieDetailContentView: View {
     let onRate: (Float) -> Void
     let onPlayNow: () -> Void
     let onPlayTrailer: () -> Void
+    let onPlayVideo: (URL) -> Void
     let onSearchSubtitles: () -> Void
     let onDownloadSubtitle: (SubtitleInfo) -> Void
 
@@ -73,6 +74,11 @@ struct MovieDetailContentView: View {
                     DetailRatingControlsSection(currentRating: currentRating, onRate: onRate)
                         .frame(maxWidth: .infinity)
 
+                    if !detail.videos.isEmpty {
+                        TrailersClipsSection(videos: detail.videos, onPlay: onPlayVideo)
+                            .frame(maxWidth: .infinity)
+                    }
+
                     if kind == .tv {
                         TVEpisodesSection(
                             showId: detail.movie.id,
@@ -90,35 +96,25 @@ struct MovieDetailContentView: View {
                         .frame(maxWidth: .infinity)
                     }
 
-                    if kind == .tv, selectedTVEpisode != nil {
-                        if isLoadingTorrents {
-                            HStack(spacing: 10) {
-                                ProgressView()
-                                    .controlSize(.small)
-                                Text("Finding streams…")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.vertical, 8)
-                        } else if let episode = selectedTVEpisode {
-                            TorrentSection(
-                                movie: detail.movie,
-                                torrents: torrents,
-                                searchDiagnostics: torrentSearchDiagnostics,
-                                isTV: true,
-                                episodeLabel: "Season \(episode.seasonNumber) · Episode \(episode.episodeNumber)",
-                                subtitleURL: subtitleFileURL,
-                                subtitleAppearance: subtitleAppearance,
-                                subtitleFontSize: subtitleFontSize
-                            )
-                            .frame(maxWidth: .infinity)
-                        }
+                    if kind == .tv, selectedTVEpisode != nil, let episode = selectedTVEpisode {
+                        TorrentSection(
+                            movie: detail.movie,
+                            torrents: torrents,
+                            searchDiagnostics: torrentSearchDiagnostics,
+                            isLoading: isLoadingTorrents,
+                            isTV: true,
+                            episodeLabel: "Season \(episode.seasonNumber) · Episode \(episode.episodeNumber)",
+                            subtitleURL: subtitleFileURL,
+                            subtitleAppearance: subtitleAppearance,
+                            subtitleFontSize: subtitleFontSize
+                        )
+                        .frame(maxWidth: .infinity)
                     } else if kind != .tv {
                         TorrentSection(
                             movie: detail.movie,
                             torrents: torrents,
                             searchDiagnostics: torrentSearchDiagnostics,
+                            isLoading: isLoadingTorrents || (isLoading && torrents.isEmpty),
                             isTV: false,
                             subtitleURL: subtitleFileURL,
                             subtitleAppearance: subtitleAppearance,

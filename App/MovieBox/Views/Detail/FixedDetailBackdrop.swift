@@ -35,9 +35,11 @@ struct FixedDetailBackdrop: View {
                         LinearGradient(
                             stops: [
                                 .init(color: .clear, location: 0),
-                                .init(color: .clear, location: 0.55),
-                                .init(color: .black.opacity(0.35), location: 0.85),
-                                .init(color: .black.opacity(0.75), location: 1),
+                                .init(color: .clear, location: 0.42),
+                                .init(color: .black.opacity(0.10), location: 0.58),
+                                .init(color: .black.opacity(0.28), location: 0.74),
+                                .init(color: .black.opacity(0.48), location: 0.88),
+                                .init(color: .black.opacity(0.68), location: 1),
                             ],
                             startPoint: .top,
                             endPoint: .bottom

@@ -17,6 +17,7 @@ struct TorrentSection: View {
     let movie: Movie
     let torrents: [TorrentResult]
     let searchDiagnostics: TorrentSearchDiagnostics?
+    var isLoading: Bool = false
     let isTV: Bool
     var episodeLabel: String? = nil
     let subtitleURL: URL?
@@ -68,7 +69,16 @@ struct TorrentSection: View {
         VStack(alignment: .leading, spacing: 12) {
             header
 
-            if torrents.isEmpty {
+            if isLoading {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Finding streams…")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, minHeight: 160, alignment: .leading)
+            } else if torrents.isEmpty {
                 ContentUnavailableView(
                     "No Versions Found",
                     systemImage: "magnifyingglass",

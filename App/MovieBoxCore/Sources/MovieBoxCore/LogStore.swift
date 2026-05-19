@@ -1,3 +1,4 @@
+import CoreStorage
 import Foundation
 import os
 
@@ -15,19 +16,12 @@ public final class LogStore {
     public static let shared = LogStore()
 
     /// Primary log file for diagnostics and agent inspection.
-    public nonisolated static var logFileURL: URL {
-        logsDirectory.appendingPathComponent("moviebox.log", isDirectory: false)
-    }
+    public nonisolated static var logFileURL: URL { MovieBoxFileLogger.logFileURL }
 
     /// macOS standard log directory: `~/Library/Logs/MovieBox/`
-    public nonisolated static var logsDirectory: URL {
-        let base = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("Logs/MovieBox", isDirectory: true)
-        return base ?? FileManager.default.temporaryDirectory.appendingPathComponent("MovieBox", isDirectory: true)
-    }
+    public nonisolated static var logsDirectory: URL { MovieBoxFileLogger.logsDirectory }
 
     private static let maxMemoryLines = 2_000
-    private nonisolated static let maxFileBytes: UInt64 = 5 * 1024 * 1024
 
     private let fileQueue = DispatchQueue(label: "moviebox.logger.file", qos: .utility)
     private let osLog = Logger(subsystem: "com.moviebox.app", category: "general")
@@ -52,7 +46,7 @@ public final class LogStore {
         let sanitized = sanitize(message)
         let line = formatLine(level: level, category: category, message: sanitized)
         appendToMemory(line)
-        writeToFile(line)
+        writeToFile(level: level, category: category, message: sanitized)
         mirrorToUnifiedLogging(level: level, message: line)
     }
 
@@ -106,9 +100,7 @@ public final class LogStore {
         # Agents: read this file for runtime errors; see .agents/LOGGING.md
         ---
         """
-        fileQueue.async { [header] in
-            Self.appendLine(header, to: Self.logFileURL)
-        }
+        MovieBoxFileLogger.appendRaw(header)
     }
 
     private func formatLine(level: Level, category: String, message: String) -> String {
@@ -130,34 +122,14 @@ public final class LogStore {
         }
     }
 
-    private func writeToFile(_ line: String) {
-        fileQueue.async {
-            Self.rotateIfNeeded()
-            Self.appendLine(line + "\n", to: Self.logFileURL)
+    private func writeToFile(level: Level, category: String, message: String) {
+        let fileLevel: MovieBoxFileLogger.Level = switch level {
+        case .debug: .debug
+        case .info: .info
+        case .warn: .warn
+        case .error: .error
         }
-    }
-
-    private nonisolated static func appendLine(_ text: String, to url: URL) {
-        guard let data = text.data(using: .utf8) else { return }
-        if FileManager.default.fileExists(atPath: url.path) {
-            if let handle = try? FileHandle(forWritingTo: url) {
-                defer { try? handle.close() }
-                try? handle.seekToEnd()
-                try? handle.write(contentsOf: data)
-                return
-            }
-        }
-        try? data.write(to: url, options: .atomic)
-    }
-
-    private nonisolated static func rotateIfNeeded() {
-        let url = logFileURL
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let size = attrs[.size] as? UInt64,
-              size > maxFileBytes else { return }
-        let backup = logsDirectory.appendingPathComponent("moviebox.log.1", isDirectory: false)
-        try? FileManager.default.removeItem(at: backup)
-        try? FileManager.default.moveItem(at: url, to: backup)
+        MovieBoxFileLogger.log(fileLevel, category: category, message)
     }
 
     private func mirrorToUnifiedLogging(level: Level, message: String) {

@@ -1,5 +1,6 @@
-import Foundation
+import CoreStorage
 import CoreTorrent
+import Foundation
 
 // MARK: - Streaming Orchestrator
 
@@ -25,8 +26,11 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         let magnet = MagnetURI(from: torrent.magnetURI)
         let infoHash = torrent.infoHash ?? magnet?.infoHash
         guard let infoHash, !infoHash.isEmpty else {
+            TorrentLog.warn("[Streaming] invalid magnet — no info hash for \"\(torrent.title)\"")
             throw StreamingOrchestratorError.invalidMagnetURI
         }
+
+        TorrentLog.info("[Streaming] fetching metadata — hash=\(infoHash.prefix(8))… trackers=\(magnet?.trackers.count ?? 0)")
 
         do {
             metadata = try await TorrentMetadataFetcher.fetch(
@@ -34,6 +38,7 @@ public final class StreamingOrchestrator: @unchecked Sendable {
                 magnetTrackers: magnet?.trackers ?? []
             )
         } catch {
+            TorrentLog.warn("[Streaming] metadata fetch failed — \(error.localizedDescription)")
             throw StreamingOrchestratorError.metadataUnavailable(error.localizedDescription)
         }
 
@@ -76,6 +81,9 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         await torrentEngine?.start()
 
         let streamURL = try await rangeServer.start(pieceStore: pieceStore!, streamTarget: target)
+        TorrentLog.info(
+            "[Streaming] HTTP range server — \(MovieBoxFileLogger.redactURL(streamURL)) type=\(target.contentType) mediaBytes=\(target.byteLength)"
+        )
         return streamURL
     }
 

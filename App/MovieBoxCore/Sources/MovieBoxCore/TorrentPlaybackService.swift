@@ -38,6 +38,9 @@ public enum TorrentPlaybackService {
     appServices: AppServices,
     playerState: PlayerState
   ) async throws {
+    PlaybackLog.log(
+      "play(single) movieId=\(request.movieId) torrent=\"\(request.torrent.title)\" waitTimeout=\(Int(request.waitTimeout))s"
+    )
     let coordinator = appServices.beginPlaybackCoordinator()
     let session = await coordinator.startSession(for: request.torrent)
     appServices.registerActiveSession(session)
@@ -45,9 +48,11 @@ public enum TorrentPlaybackService {
     await session.waitForPlayback(timeout: request.waitTimeout)
 
     if case .failed(let message) = session.state {
+      PlaybackLog.error("play(single) stream failed — \(message)")
       throw TorrentPlaybackError.streamingFailed(message)
     }
     guard case .ready = session.state else {
+      PlaybackLog.error("play(single) stream not ready — state=\(session.stateLabel)")
       throw TorrentPlaybackError.streamingFailed("Stream did not become ready.")
     }
 
@@ -86,11 +91,20 @@ public enum TorrentPlaybackService {
       return lhs.sizeBytes > rhs.sizeBytes
     }
 
+    PlaybackLog.log(
+      "playBestAvailable movieId=\(movieId) candidates=\(ordered.count) maxAttempts=\(maxAttempts) waitTimeout=\(Int(waitTimeout))s subtitle=\(subtitleURL != nil)"
+    )
+
     let coordinator = appServices.beginPlaybackCoordinator()
     var lastError: String?
+    var attempt = 0
 
     for torrent in ordered.prefix(maxAttempts) {
+      attempt += 1
       await coordinator.cancel()
+      PlaybackLog.log(
+        "attempt \(attempt)/\(min(maxAttempts, ordered.count)) — \"\(torrent.title)\" \(torrent.quality.rawValue) seeders=\(torrent.seeders) size=\(torrent.sizeBytes)"
+      )
       let session = await coordinator.startSession(for: torrent)
       onSessionStarted(session)
       appServices.registerActiveSession(session)
@@ -98,14 +112,17 @@ public enum TorrentPlaybackService {
       await session.waitForPlayback(timeout: waitTimeout)
 
       if case .failed(let err) = session.state {
+        PlaybackLog.warn("attempt \(attempt) failed — \(err)")
         lastError = err
         continue
       }
       guard case .ready = session.state else {
+        PlaybackLog.warn("attempt \(attempt) not ready after wait — state=\(session.stateLabel)")
         lastError = "Stream did not become ready."
         continue
       }
 
+      PlaybackLog.log("attempt \(attempt) ready — loading AVPlayer")
       try coordinator.finishPlayback(
         torrent: torrent,
         allTorrents: torrents,
@@ -117,11 +134,12 @@ public enum TorrentPlaybackService {
         subtitleFontSize: playback.fontSize,
         episodeTitle: episodeTitle
       )
+      PlaybackLog.log("playBestAvailable succeeded on attempt \(attempt)")
       return
     }
 
-    throw TorrentPlaybackError.streamingFailed(
-      lastError ?? "Could not prepare any release for streaming. Try another version."
-    )
+    let summary = lastError ?? "Could not prepare any release for streaming. Try another version."
+    PlaybackLog.error("playBestAvailable exhausted — \(summary)")
+    throw TorrentPlaybackError.streamingFailed(summary)
   }
 }

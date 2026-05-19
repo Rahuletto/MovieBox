@@ -42,51 +42,48 @@ struct DetailHeroHeader: View {
       var body: some View {
           HStack(alignment: .bottom, spacing: 24) {
               VStack(alignment: .leading, spacing: 14) {
-                  AsyncLogoView(movieId: detail.movie.id, title: detail.movie.title, kind: kind)
+                  Group {
+                      AsyncLogoView(movieId: detail.movie.id, title: detail.movie.title, kind: kind)
 
-                  if !detail.movie.overview.isEmpty {
-                      Text(detail.movie.overview)
-                          .font(.subheadline)
-                          .foregroundStyle(.white.opacity(0.9))
-                          .lineLimit(4)
-                          .frame(maxWidth: 640, alignment: .leading)
-                  }
+                      if !detail.movie.overview.isEmpty {
+                          Text(detail.movie.overview)
+                              .font(.system(size: 16))
+                              .foregroundStyle(.white.opacity(0.9))
+                              .lineLimit(4)
+                              .frame(maxWidth: 640, alignment: .leading)
+                      }
 
-                  HStack(spacing: 12) {
-                      MediaMetadataRibbon(
-                          year: releaseYear,
-                          runtimeMinutes: detail.movie.runtime,
-                          contentRating: detail.enrichment?.rated,
-                          accessibilityTags: accessibilityTags,
-                          labelColor: .white.opacity(0.82),
-                          outlineForeground: .white,
-                          outlineStroke: Color.white.opacity(0.45)
-                      ) {
-                          if let imdbRating = detail.enrichment?.imdbRating {
-                              IMDBBadge(rating: imdbRating)
+                      HStack(spacing: 12) {
+                          MediaMetadataRibbon(
+                              year: releaseYear,
+                              runtimeMinutes: detail.movie.runtime,
+                              contentRating: detail.enrichment?.rated,
+                              accessibilityTags: accessibilityTags,
+                              labelColor: .white.opacity(0.82),
+                              outlineForeground: .white,
+                              outlineStroke: Color.white.opacity(0.45)
+                          ) {
+                              if let imdbRating = detail.enrichment?.imdbRating {
+                                  IMDBBadge(rating: imdbRating)
+                              }
+                          }
+
+                          if let rt = detail.enrichment?.rottenTomatoes {
+                              RottenTomatoesBadge(score: rt)
                           }
                       }
 
-                      if let rt = detail.enrichment?.rottenTomatoes {
-                          RottenTomatoesBadge(score: rt)
+                      if !techKinds.isEmpty {
+                          MediaTechBadgeRow(kinds: techKinds)
+                      }
+
+                      if !detail.genres.isEmpty {
+                          Text(detail.genres.prefix(4).map(\.name).joined(separator: " · "))
+                              .font(.subheadline)
+                              .foregroundStyle(.white.opacity(0.82))
                       }
                   }
-
-                  if !techKinds.isEmpty {
-                      MediaTechBadgeRow(kinds: techKinds)
-                  }
-
-                  if !detail.genres.isEmpty {
-                      HStack(spacing: 8) {
-                          ForEach(detail.genres.prefix(4)) { genre in
-                              MediaOutlineBadge(
-                                  genre.name,
-                                  foreground: .white,
-                                  stroke: Color.white.opacity(0.45)
-                              )
-                          }
-                      }
-                  }
+                  .shadow(color: .black.opacity(0.5), radius: 10, x: 0, y: 3)
 
                   HStack(spacing: 12) {
                       Button(action: onPlayNow) {
@@ -115,7 +112,6 @@ struct DetailHeroHeader: View {
                   }
               }
               .frame(maxWidth: 720, alignment: .leading)
-              .shadow(color: .black.opacity(0.5), radius: 10, x: 0, y: 3)
 
               Spacer(minLength: 0)
 

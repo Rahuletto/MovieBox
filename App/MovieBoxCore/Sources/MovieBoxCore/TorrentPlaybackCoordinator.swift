@@ -1,4 +1,5 @@
 import CorePlayer
+import CoreStorage
 import CoreStreaming
 import CoreTorrent
 import Foundation
@@ -63,7 +64,7 @@ public final class TorrentPlaybackCoordinator {
             throw TorrentPlaybackError.streamingFailed("Stream did not become ready.")
         }
 
-        PlaybackLog.log("finishPlayback → loading player url=\(url.absoluteString)")
+        PlaybackLog.log("finishPlayback → loading player url=\(MovieBoxFileLogger.redactURL(url)) movieId=\(movieId) hdr=\(torrent.hdrType?.rawValue ?? "none")")
         playerState.load(
             url: url,
             title: torrent.title,

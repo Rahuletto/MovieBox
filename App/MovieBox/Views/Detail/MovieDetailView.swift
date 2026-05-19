@@ -97,6 +97,7 @@ struct MovieDetailView: View {
                     onRate: rateMovie,
                     onPlayNow: playBestTorrent,
                     onPlayTrailer: { playTrailer(detail?.trailerURL) },
+                    onPlayVideo: { playTrailer($0) },
                     onSearchSubtitles: { searchSubtitles(for: detail!.movie) },
                     onDownloadSubtitle: downloadSubtitle
                 )
@@ -115,12 +116,19 @@ struct MovieDetailView: View {
             if isPreparingStream, let session = activeStreamSession {
                 GlassStreamOverlay(session: session) {
                     Task {
+                        prepareStreamTask?.cancel()
                         await session.cancel()
                     }
                     isPreparingStream = false
                 }
                 .transition(.opacity)
                 .zIndex(20)
+                .onChange(of: session.state) { _, newState in
+                    if case .failed(let message) = newState {
+                        isPreparingStream = false
+                        errorMessage = message
+                    }
+                }
             }
 
             // (Loading state is rendered inline inside MainContentView — no duplicate overlay here.)
@@ -141,8 +149,11 @@ struct MovieDetailView: View {
             TorrentBackendSync.apply(from: settings.first)
         }
         .task(id: movieId) {
+            isLoading = true
+            detail = nil
             selectedTVEpisode = nil
             torrents = []
+            torrentSearchDiagnostics = nil
             await load()
         }
         .keyboardShortcut(.cancelAction)
@@ -261,6 +272,7 @@ struct MovieDetailView: View {
         guard let detail else { return }
         isLoadingTorrents = true
         torrents = []
+        torrentSearchDiagnostics = nil
         defer { isLoadingTorrents = false }
 
         let result = await MovieDetailTorrentSearch.search(
@@ -406,19 +418,33 @@ struct MovieDetailView: View {
 
     private func playBestTorrent() {
         if kind == .tv, selectedTVEpisode == nil {
+            LogStore.shared.log(.warn, category: "playback", "Play Now blocked — no TV episode selected (movieId=\(movieId))")
             errorMessage = "Select a season and episode to play."
             return
         }
 
         guard !torrents.isEmpty else {
+            let imdb = detail?.imdbId ?? "nil"
+            LogStore.shared.log(.warn, category: "playback", "Play Now blocked — no torrents (movieId=\(movieId) imdb=\(imdb))")
             errorMessage = torrentFailureMessage(imdbId: detail?.imdbId)
             return
         }
+
+        let seeded = torrents.filter { $0.seeders > 0 }.count
+        LogStore.shared.log(
+            .info,
+            category: "playback",
+            "Play Now tapped — movieId=\(movieId) title=\"\(detail?.movie.title ?? "?")\" torrents=\(torrents.count) seeded=\(seeded) kind=\(kind.rawValue)"
+        )
 
         isPreparingStream = true
         prepareStreamTask?.cancel()
 
         prepareStreamTask = Task {
+            if Task.isCancelled {
+                LogStore.shared.log(.info, category: "playback", "Play Now cancelled before start")
+                return
+            }
             if subtitleFileURL == nil, let preferred = subtitles.first {
                 await downloadSubtitleAsync(preferred)
             }
@@ -439,12 +465,20 @@ struct MovieDetailView: View {
                     playerState: playerState,
                     onSessionStarted: { session in
                         activeStreamSession = session
-                    }
+                    },
+                    maxAttempts: 5,
+                    waitTimeout: 90
                 )
+                LogStore.shared.log(.info, category: "playback", "Play Now finished — player should be visible")
                 withAnimation(MovieBoxMotion.player) {
                     isPreparingStream = false
                 }
             } catch {
+                if Task.isCancelled {
+                    LogStore.shared.log(.info, category: "playback", "Play Now task cancelled")
+                } else {
+                    LogStore.shared.log(.error, category: "playback", "Play Now failed — \(error.localizedDescription)")
+                }
                 isPreparingStream = false
                 errorMessage = error.localizedDescription
             }

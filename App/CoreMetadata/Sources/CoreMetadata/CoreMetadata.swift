@@ -87,12 +87,52 @@ public struct MovieEnrichment: Sendable, Codable, Hashable {
     public let genre: String?            // comma-separated
 }
 
+/// YouTube video from TMDB `videos` (trailers, teasers, clips, etc.).
+public struct MediaVideo: Identifiable, Sendable, Hashable, Codable {
+    public let key: String
+    public let name: String
+    public let type: String
+    public let official: Bool
+
+    public var id: String { key }
+
+    public init(key: String, name: String, type: String, official: Bool = false) {
+        self.key = key
+        self.name = name
+        self.type = type
+        self.official = official
+    }
+
+    public var youtubeWatchURL: URL? {
+        URL(string: "https://www.youtube.com/watch?v=\(key)")
+    }
+
+    public var thumbnailURL: URL? {
+        URL(string: "https://img.youtube.com/vi/\(key)/mqdefault.jpg")
+    }
+
+    public var isTrailerCategory: Bool {
+        let normalized = type.lowercased()
+        return normalized == "trailer" || normalized == "teaser"
+    }
+
+    public var isClipCategory: Bool {
+        !isTrailerCategory
+    }
+
+    public var displayType: String {
+        type.isEmpty ? "Video" : type.capitalized
+    }
+}
+
 public struct MovieDetail: Sendable, Codable, Identifiable, Hashable {
     public var id: Int { movie.id }
     public let movie: Movie
     public let genres: [Genre]
     public let cast: [CastMember]
     public let trailerURL: URL?
+    /// All YouTube videos from TMDB (trailers, clips, featurettes, …).
+    public let videos: [MediaVideo]
     public let similar: [Movie]
     /// Pre-resolved fanart logo (returned by the backend bundle endpoint).
     /// When non-nil, `AsyncLogoView` will skip its own network fetch.
@@ -108,6 +148,7 @@ public struct MovieDetail: Sendable, Codable, Identifiable, Hashable {
         genres: [Genre],
         cast: [CastMember] = [],
         trailerURL: URL? = nil,
+        videos: [MediaVideo] = [],
         similar: [Movie] = [],
         logoURL: URL? = nil,
         imdbId: String? = nil,
@@ -117,6 +158,7 @@ public struct MovieDetail: Sendable, Codable, Identifiable, Hashable {
         self.genres = genres
         self.cast = cast
         self.trailerURL = trailerURL
+        self.videos = videos
         self.similar = similar
         self.logoURL = logoURL
         self.imdbId = imdbId
@@ -739,12 +781,14 @@ private struct TitleBundleDTO: Decodable, Sendable {
         let cast = (credits?.cast ?? []).prefix(16).map(\.castMember)
         let similarMovies = (similar?.results ?? []).map(\.movie)
         let trailer = videos?.preferredTrailerURL
+        let mediaVideos = videos?.youtubeVideos ?? []
 
         return MovieDetail(
             movie: movie,
             genres: genres ?? [],
             cast: Array(cast),
             trailerURL: trailer,
+            videos: mediaVideos,
             similar: similarMovies,
             logoURL: movieboxLogo.flatMap(URL.init(string:)),
             imdbId: resolvedImdbId,
@@ -815,20 +859,34 @@ private struct ExternalIdsDTO: Decodable, Sendable {
 private struct VideosBundleDTO: Decodable, Sendable {
     let results: [VideoDTO]
 
+    var youtubeVideos: [MediaVideo] {
+        results.compactMap { video in
+            guard let key = video.key, video.site?.lowercased() == "youtube" else { return nil }
+            return MediaVideo(
+                key: key,
+                name: video.name?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                    ? video.name!.trimmingCharacters(in: .whitespacesAndNewlines)
+                    : (video.type ?? "Video"),
+                type: video.type ?? "Video",
+                official: video.official ?? false
+            )
+        }
+    }
+
     /// Pick the first official YouTube trailer; fall back to any trailer / teaser.
     var preferredTrailerURL: URL? {
-        let trailers = results.filter { $0.site?.lowercased() == "youtube" && $0.key != nil }
-        let chosen = trailers.first(where: { ($0.type ?? "").lowercased() == "trailer" && ($0.official ?? false) })
-            ?? trailers.first(where: { ($0.type ?? "").lowercased() == "trailer" })
-            ?? trailers.first(where: { ($0.type ?? "").lowercased() == "teaser" })
+        let trailers = youtubeVideos.filter(\.isTrailerCategory)
+        let chosen = trailers.first(where: { $0.type.lowercased() == "trailer" && $0.official })
+            ?? trailers.first(where: { $0.type.lowercased() == "trailer" })
+            ?? trailers.first(where: { $0.type.lowercased() == "teaser" })
             ?? trailers.first
-        guard let key = chosen?.key else { return nil }
-        return URL(string: "https://www.youtube.com/watch?v=\(key)")
+        return chosen?.youtubeWatchURL
     }
 }
 
 private struct VideoDTO: Decodable, Sendable {
     let key: String?
+    let name: String?
     let site: String?
     let type: String?
     let official: Bool?

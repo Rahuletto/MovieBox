@@ -1,5 +1,6 @@
-import Foundation
+import CoreStorage
 import CoreTorrent
+import Foundation
 
 @MainActor
 public final class StreamSession<O: StreamingOrchestration & Sendable>: ObservableObject {
@@ -50,6 +51,11 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
         bufferedPieces = 0
         bufferedBytes = 0
 
+        let hash = torrent.infoHash ?? "unknown"
+        TorrentLog.info(
+            "[StreamSession] start — \"\(torrent.title)\" quality=\(torrent.quality.rawValue) seeders=\(torrent.seeders) size=\(torrent.sizeBytes) hash=\(hash.prefix(8))…"
+        )
+
         do {
             let orchestrator = orchestrator
             streamURL = try await TaskTimeout.withTimeout(seconds: 50) {
@@ -66,13 +72,19 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
 
             await refreshBufferMetrics()
             updatePlaybackReadiness(progress: await orchestrator.progress())
+            TorrentLog.info(
+                "[StreamSession] orchestrator ready — streamURL=\(MovieBoxFileLogger.redactURL(streamURL!)) headKB=\(bufferedBytes / 1024) state=\(stateLabel)"
+            )
             startMonitoring()
             startBufferingWatchdog()
         } catch is TaskTimeoutError {
             await orchestrator.stop()
-            state = .failed(error: "Could not load torrent metadata in time. Try another release.")
+            let message = "Could not load torrent metadata in time. Try another release."
+            TorrentLog.warn("[StreamSession] failed — metadata timeout (50s) for \"\(torrent.title)\"")
+            state = .failed(error: message)
         } catch {
             await orchestrator.stop()
+            TorrentLog.warn("[StreamSession] failed — \(error.localizedDescription) for \"\(torrent.title)\"")
             state = .failed(error: error.localizedDescription)
         }
     }
@@ -88,7 +100,7 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
         bufferingWatchdogTask?.cancel()
         bufferingWatchdogTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            try? await Task.sleep(for: .seconds(150))
+            try? await Task.sleep(for: .seconds(90))
             guard !Task.isCancelled else { return }
             if case .ready = state { return }
             switch state {
@@ -109,6 +121,7 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
                     message =
                         "Buffering timed out (\(peersSnapshot) peer(s), 0 KB at file start). Try another release."
                 }
+                TorrentLog.warn("[StreamSession] buffering watchdog — \(message)")
                 state = .failed(error: message)
                 monitorTask?.cancel()
                 monitorTask = nil
@@ -119,6 +132,7 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
     }
 
     public func cancel() async {
+        TorrentLog.info("[StreamSession] cancel — was \(stateLabel)")
         bufferingWatchdogTask?.cancel()
         bufferingWatchdogTask = nil
         state = .cancelled
@@ -128,6 +142,7 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
     }
 
     public func failWithTimeout() async {
+        TorrentLog.warn("[StreamSession] waitForPlayback timeout — state was \(stateLabel)")
         bufferingWatchdogTask?.cancel()
         bufferingWatchdogTask = nil
         monitorTask?.cancel()
@@ -165,14 +180,19 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
 
         if hasVerifiedHead || hasContiguousHead {
             if case .ready = state {} else {
-                TorrentLog.debug(
-                    "[StreamSession] Buffer ready — \(bufferedBytes / 1024) KB head, \(bufferedPieces) verified piece(s)"
+                TorrentLog.info(
+                    "[StreamSession] buffer ready — \(bufferedBytes / 1024) KB head (need \(StreamPlaybackThreshold.minimumHeadBytes / 1024) KB), \(bufferedPieces) verified piece(s), \(peerCount) peers"
                 )
                 state = .ready(streamURL: url)
             }
         } else {
             let fraction = min(1, Double(bufferedBytes) / Double(StreamPlaybackThreshold.minimumHeadBytes))
             let hint = max(progress, fraction * 0.9, 0.02)
+            if case .preparing = state {
+                TorrentLog.info(
+                    "[StreamSession] buffering — \(bufferedBytes / 1024)/\(StreamPlaybackThreshold.minimumHeadBytes / 1024) KB head, \(peerCount) peers, \(Int(downloadSpeed / 1024)) KB/s"
+                )
+            }
             state = .buffering(progress: hint)
         }
     }

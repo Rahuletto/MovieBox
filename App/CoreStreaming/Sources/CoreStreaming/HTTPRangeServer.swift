@@ -1,3 +1,4 @@
+import CoreStorage
 import Foundation
 import Network
 
@@ -81,6 +82,9 @@ public final class HTTPRangeServer {
                 }
                 self.port = port.rawValue
                 if let url = URL(string: "http://127.0.0.1:\(port)/stream") {
+                    TorrentLog.info(
+                        "[HTTPRangeServer] listening on port \(port.rawValue) — \(MovieBoxFileLogger.redactURL(url)) length=\(self.streamByteLength) offset=\(self.streamByteOffset)"
+                    )
                     continuation.resume(returning: url)
                 } else {
                     continuation.resume(throwing: HTTPRangeServerError.failedToStart)

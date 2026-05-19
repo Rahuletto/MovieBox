@@ -47,39 +47,43 @@ struct MediaTechBadge: View {
     var body: some View {
         if let assetName = kind.assetName {
             if isDolby {
-                let overallWidth = kind.displayWidth(for: size)
-                let overallHeight = kind.displayHeight(for: size)
-                let horizontalPadding = size == .list ? 3.5 * 1.05 : 3.5
-                let verticalPadding = size == .list ? 2.0 * 1.05 : 2.0
-
-                // Dolby logos are wide horizontal lockups — wrap them in a
-                // dark rounded pill and force template+white so the two
-                // Dolby PNGs (different color casts) read the same.
+                dolbyPillBadge(assetName: assetName)
+            } else {
+                // 4K / HDR — template mask only (same tone as 1080p in How to Watch).
                 Image(assetName)
                     .renderingMode(.template)
                     .resizable()
                     .scaledToFit()
-                    .foregroundStyle(.white)
-                    .frame(width: overallWidth - horizontalPadding * 2, height: overallHeight - verticalPadding * 2)
-                    .padding(.horizontal, horizontalPadding)
-                    .padding(.vertical, verticalPadding)
-                    .background(
-                        RoundedRectangle(cornerRadius: 4, style: .continuous)
-                            .fill(Color.black.opacity(0.55))
-                    )
-                    .frame(width: overallWidth, height: overallHeight)
-                    .accessibilityLabel(kind.accessibilityLabel)
-            } else {
-                // 4K / HDR — straight image, no pill background.
-                Image(assetName)
-                    .resizable()
-                    .scaledToFit()
+                    .foregroundStyle(.secondary)
                     .frame(width: kind.displayWidth(for: size), height: kind.displayHeight(for: size))
                     .accessibilityLabel(kind.accessibilityLabel)
             }
         } else {
             MediaFilledBadge(kind.fallbackLabel)
         }
+    }
+
+    /// Dolby lockups: template on dark pill (wide logos need the capsule).
+    private func dolbyPillBadge(assetName: String) -> some View {
+        let overallWidth = kind.displayWidth(for: size)
+        let overallHeight = kind.displayHeight(for: size)
+        let horizontalPadding = size == .list ? 3.5 * 1.05 : 3.5
+        let verticalPadding = size == .list ? 2.0 * 1.05 : 2.0
+
+        return Image(assetName)
+            .renderingMode(.template)
+            .resizable()
+            .scaledToFit()
+            .foregroundStyle(.white)
+            .frame(width: overallWidth - horizontalPadding * 2, height: overallHeight - verticalPadding * 2)
+            .padding(.horizontal, horizontalPadding)
+            .padding(.vertical, verticalPadding)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(Color.black.opacity(0.55))
+            )
+            .frame(width: overallWidth, height: overallHeight)
+            .accessibilityLabel(kind.accessibilityLabel)
     }
 }
 
@@ -97,20 +101,20 @@ private extension MediaTechKind {
         // Dolby logos are horizontal lockups that read smaller than the
         // 4K/HDR pills at the same height, so they need a slightly taller box.
         let base: CGFloat = switch self {
-        case .fourK: 16
-        case .hdr: 16
-        case .dolbyVision: 17
-        case .dolbyAtmos: 17
+        case .fourK: 13
+        case .hdr: 13
+        case .dolbyVision: 15
+        case .dolbyAtmos: 15
         }
         return size == .list ? base * 1.05 : base
     }
 
     func displayWidth(for size: MediaTechBadgeSize) -> CGFloat {
         let base: CGFloat = switch self {
-        case .fourK: 30
-        case .hdr: 36
-        case .dolbyVision: 44
-        case .dolbyAtmos: 39
+        case .fourK: 25
+        case .hdr: 30
+        case .dolbyVision: 38
+        case .dolbyAtmos: 34
         }
         return size == .list ? base * 1.05 : base
     }
