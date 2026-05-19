@@ -9,6 +9,7 @@ public actor PieceManager {
     public let totalSize: Int64
     public let blockSize: UInt32 = 16384
     public let streamFirstPiece: Int
+    public let streamLastPiece: Int
 
     private var pieceHashes: [Data] = []
     private var downloadedPieces: Set<UInt32> = []
@@ -21,12 +22,14 @@ public actor PieceManager {
         pieceLength: Int64,
         totalSize: Int64,
         piecesHash: Data,
-        streamFirstPiece: Int = 0
+        streamFirstPiece: Int = 0,
+        streamLastPiece: Int? = nil
     ) {
         self.pieceCount = pieceCount
         self.pieceLength = pieceLength
         self.totalSize = totalSize
         self.streamFirstPiece = streamFirstPiece
+        self.streamLastPiece = streamLastPiece ?? max(0, pieceCount - 1)
 
         let cleanHash = Data(piecesHash)
         var index = 0
@@ -113,15 +116,30 @@ public actor PieceManager {
         downloadedPieces.count
     }
 
+    public func pendingRequestCount() -> Int {
+        pendingRequests.count
+    }
+
     public func takePieceData(_ pieceIndex: UInt32) -> Data? {
         defer { pieceBuffers.removeValue(forKey: pieceIndex) }
         return pieceBuffers[pieceIndex]
     }
 
-    /// Lowest-index incomplete piece — fills the file from the start so playback can begin.
+    /// Head, then tail (MKV cues), then sequential — so AVPlayer's end-of-file probes can be served.
     private func earliestIncompletePiece(peerBitfield: Data) -> UInt32? {
-        for i in 0..<pieceCount {
+        var priority: [UInt32] = [UInt32(streamFirstPiece)]
+        let last = UInt32(streamLastPiece)
+        if last != UInt32(streamFirstPiece) {
+            priority.append(last)
+        }
+        for i in streamFirstPiece..<pieceCount {
             let index = UInt32(i)
+            if !priority.contains(index) {
+                priority.append(index)
+            }
+        }
+
+        for index in priority {
             guard !downloadedPieces.contains(index) else { continue }
             if !peerBitfield.isEmpty, !peerHasPiece(index, in: peerBitfield) {
                 continue

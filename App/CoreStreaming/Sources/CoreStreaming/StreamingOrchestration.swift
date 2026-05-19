@@ -13,6 +13,8 @@ public protocol StreamingOrchestration: AnyObject, Sendable {
     func contiguousPiecesFromStart() async -> Int
     func contiguousBytesFromStreamStart() async -> Int64
     func streamHeadContiguousBytes() async -> Int64
+    func streamTargetNeedsTailProbe() async -> Bool
+    func isStreamTailPieceReady() async -> Bool
     func downloadSpeed() async -> Double
     func peerCount() async -> Int
 }

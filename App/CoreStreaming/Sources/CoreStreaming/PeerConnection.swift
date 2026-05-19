@@ -211,6 +211,10 @@ public final class PeerConnection: ObservableObject {
 
         guard case .connected = state else { return }
 
+        while let message = parseNextMessage() {
+            await handleMessage(message)
+        }
+
         await sendInterested()
         await startReceiving()
     }
@@ -251,9 +255,6 @@ public final class PeerConnection: ObservableObject {
                     }
                     switch nwState {
                     case .ready:
-                        if self.state == .connecting {
-                            self.state = .connected
-                        }
                         gate.finishOnce()
                     case .failed(let error):
                         self.state = .error(error.localizedDescription)
@@ -286,8 +287,9 @@ public final class PeerConnection: ObservableObject {
             }
         }
 
-        if case .connected = state { return true }
-        return false
+        if case .error = state { return false }
+        if case .disconnected = state { return false }
+        return true
     }
 
     private func recycleOutstandingRequests() {
@@ -310,39 +312,73 @@ public final class PeerConnection: ObservableObject {
         connection?.send(content: handshake, completion: .contentProcessed { _ in })
     }
 
-    private func receiveHandshake(infoHash: String) async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            connection?.receive(minimumIncompleteLength: 1, maximumLength: 128) { data, _, _, error in
-                Task { @MainActor in
-                    defer { continuation.resume() }
+    private static let handshakeLength = 68
 
+    private func receiveHandshake(infoHash: String) async {
+        var pending = Data()
+
+        while pending.count < Self.handshakeLength {
+            guard let chunk = await receiveSocketChunk(maxLength: 256) else {
+                if case .error = state {} else {
+                    state = .error("Invalid handshake")
+                }
+                return
+            }
+            pending.append(chunk)
+        }
+
+        let handshake = pending.prefix(Self.handshakeLength)
+        if pending.count > Self.handshakeLength {
+            buffer.append(pending.suffix(from: Self.handshakeLength))
+        }
+
+        guard handshake.count == Self.handshakeLength else {
+            state = .error("Invalid handshake")
+            return
+        }
+
+        let pstrLength = Int(handshake[handshake.startIndex])
+        guard pstrLength == 19 else {
+            state = .error("Invalid protocol string")
+            return
+        }
+        let pstr = String(data: handshake[1..<(1 + pstrLength)], encoding: .utf8)
+        guard pstr == "BitTorrent protocol" else {
+            state = .error("Invalid protocol string")
+            return
+        }
+
+        let peerInfoHashStart = 1 + pstrLength + 8
+        let peerInfoHashEnd = peerInfoHashStart + 20
+        let peerHash = handshake[peerInfoHashStart..<peerInfoHashEnd]
+
+        if peerHash.hexString != infoHash.lowercased() {
+            state = .error("Info hash mismatch")
+            return
+        }
+
+        state = .connected
+    }
+
+    private func receiveSocketChunk(maxLength: Int) async -> Data? {
+        await withCheckedContinuation { continuation in
+            connection?.receive(minimumIncompleteLength: 1, maximumLength: maxLength) { data, _, isComplete, error in
+                Task { @MainActor in
                     if let error {
                         self.state = .error(error.localizedDescription)
+                        continuation.resume(returning: nil)
                         return
                     }
-
-                    guard let data, data.count >= 68 else {
-                        self.state = .error("Invalid handshake")
+                    if isComplete {
+                        self.state = .disconnected
+                        continuation.resume(returning: nil)
                         return
                     }
-
-                    let pstrLength = Int(data[0])
-                    let pstr = String(data: data[1..<(1 + pstrLength)], encoding: .utf8)
-                    guard pstr == "BitTorrent protocol" else {
-                        self.state = .error("Invalid protocol string")
+                    guard let data, !data.isEmpty else {
+                        continuation.resume(returning: nil)
                         return
                     }
-
-                    let peerInfoHashStart = 1 + pstrLength + 8
-                    let peerInfoHashEnd = peerInfoHashStart + 20
-                    let peerHash = data[peerInfoHashStart..<peerInfoHashEnd]
-
-                    if peerHash.hexString != infoHash.lowercased() {
-                        self.state = .error("Info hash mismatch")
-                        return
-                    }
-
-                    self.state = .connected
+                    continuation.resume(returning: data)
                 }
             }
         }
@@ -372,6 +408,8 @@ public final class PeerConnection: ObservableObject {
                     while let message = self.parseNextMessage() {
                         await self.handleMessage(message)
                     }
+                    if case .disconnected = self.state { return }
+                    if case .error = self.state { return }
                 }
 
                 if isComplete {
@@ -398,8 +436,10 @@ public final class PeerConnection: ObservableObject {
         }
 
         guard length <= 262_144 else {
-            TorrentLog.warn("[PeerConnection] Dropping oversized message (\(length) bytes)")
-            buffer.removeAll()
+            TorrentLog.warn(
+                "[PeerConnection] Invalid wire length \(length) from \(peerInfo.ip):\(peerInfo.port) — disconnecting (likely encrypted or misaligned stream)"
+            )
+            disconnect()
             return nil
         }
 

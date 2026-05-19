@@ -40,6 +40,10 @@ final class MockStreamingOrchestrator: StreamingOrchestration, @unchecked Sendab
     }
 
     func streamHeadContiguousBytes() async -> Int64 { headBytes }
+    var needsTailProbe = false
+    var tailPieceReady = true
+    func streamTargetNeedsTailProbe() async -> Bool { needsTailProbe }
+    func isStreamTailPieceReady() async -> Bool { tailPieceReady }
     func downloadSpeed() async -> Double { speed }
     func peerCount() async -> Int { peers }
 
@@ -76,7 +80,8 @@ final class LocalStreamingHarness {
             pieceLength: metadata.pieceLength,
             totalSize: metadata.totalSize,
             piecesHash: metadata.pieces,
-            streamFirstPiece: target.firstPieceIndex
+            streamFirstPiece: target.firstPieceIndex,
+            streamLastPiece: target.lastPieceIndex
         )
     }
 

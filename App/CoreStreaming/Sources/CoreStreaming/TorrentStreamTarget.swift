@@ -7,14 +7,28 @@ public struct TorrentStreamTarget: Sendable {
     public let byteOffset: Int64
     public let byteLength: Int64
     public let firstPieceIndex: Int
+    /// Last torrent piece overlapping the streamed file (often needed for MKV index/cues).
+    public let lastPieceIndex: Int
     public let contentType: String
 
-    public init(file: TorrentFile, byteOffset: Int64, byteLength: Int64, firstPieceIndex: Int, contentType: String) {
+    public init(
+        file: TorrentFile,
+        byteOffset: Int64,
+        byteLength: Int64,
+        firstPieceIndex: Int,
+        lastPieceIndex: Int,
+        contentType: String
+    ) {
         self.file = file
         self.byteOffset = byteOffset
         self.byteLength = byteLength
         self.firstPieceIndex = firstPieceIndex
+        self.lastPieceIndex = lastPieceIndex
         self.contentType = contentType
+    }
+
+    public var needsTailProbeForPlayback: Bool {
+        contentType.contains("matroska") || file.relativePath.lowercased().hasSuffix(".mkv")
     }
 
     public static func selectPrimary(from metadata: TorrentMetadata) -> TorrentStreamTarget {
@@ -41,6 +55,8 @@ public struct TorrentStreamTarget: Sendable {
         }
 
         let firstPiece = Int(offset / metadata.pieceLength)
+        let lastByte = offset + chosen.length - 1
+        let lastPiece = Int(lastByte / metadata.pieceLength)
         let ext = (chosen.relativePath as NSString).pathExtension.lowercased()
         let mime: String
         switch ext {
@@ -55,6 +71,7 @@ public struct TorrentStreamTarget: Sendable {
             byteOffset: offset,
             byteLength: chosen.length,
             firstPieceIndex: firstPiece,
+            lastPieceIndex: lastPiece,
             contentType: mime
         )
     }

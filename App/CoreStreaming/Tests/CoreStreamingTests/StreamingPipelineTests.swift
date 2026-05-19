@@ -123,6 +123,61 @@ final class HTTPRangeServerTests: XCTestCase {
 
         await store.cleanup()
     }
+
+    func testOpenEndedRangeIsClampedNot416() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("http_range_open_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let pieceSize: Int64 = 256 * 1024
+        let fileLength: Int64 = pieceSize * 40
+        let store = try await PieceStore(
+            infoHash: "http_range_open_test",
+            pieceCount: 40,
+            pieceSize: pieceSize,
+            totalSize: fileLength,
+            storageDirectory: tempDir
+        )
+
+        let metadata = TorrentMetadata(
+            infoHash: "http_range_open_test",
+            name: "large.mkv",
+            totalSize: fileLength,
+            pieceLength: pieceSize,
+            pieces: Data(repeating: 0, count: 800),
+            files: [TorrentFile(path: ["large.mkv"], length: fileLength)],
+            trackers: []
+        )
+        let target = TorrentStreamTarget.selectPrimary(from: metadata)
+
+        let blockSize = 16_384
+        let pattern = Data("MOVIEBOX-OPEN-RANGE".utf8)
+        for blockIndex in 0..<16 {
+            var block = Data()
+            while block.count < blockSize {
+                block.append(pattern)
+            }
+            block = block.prefix(blockSize)
+            try await store.writeBlock(
+                pieceIndex: 0,
+                blockOffset: Int64(blockIndex * blockSize),
+                data: block
+            )
+        }
+
+        let server = HTTPRangeServer()
+        server.configureForTests(pieceStore: store, streamTarget: target)
+
+        let request = "GET /stream HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=0-\r\n\r\n"
+        let response = await server.handleRequest(request, pieceStore: store)
+
+        XCTAssertEqual(response.status, 206)
+        let headerEnd = response.data.range(of: Data("\r\n\r\n".utf8))!
+        let body = response.data[headerEnd.upperBound...]
+        XCTAssertEqual(body.count, 2 * 1024 * 1024)
+
+        await store.cleanup()
+    }
 }
 
 final class TorrentStreamTargetTests: XCTestCase {

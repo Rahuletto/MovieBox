@@ -1,16 +1,14 @@
+import { listPipedAPIBases } from './piped-instances'
+import { pickTrailerStreamURL as pickPlayableStream } from './trailer-stream-picker'
 import { PipedStreamResponseSchema } from './schemas'
 
-const PIPED_BASES = [
-  'https://pipedapi.kavin.rocks',
-  'https://pipedapi.adminforge.de',
-] as const
-
 /**
- * Resolves a YouTube video id to an HLS URL via public Piped instances.
+ * Resolves a YouTube video id to a direct MP4/HLS URL via public Piped instances.
  * Returns null when no playable stream is found.
  */
 export async function resolveTrailerStreamURL(videoKey: string): Promise<string | null> {
-  for (const base of PIPED_BASES) {
+  const pipedBases = await listPipedAPIBases()
+  for (const base of pipedBases) {
     const url = `${base}/streams/${encodeURIComponent(videoKey)}`
     try {
       const response = await fetch(url, {
@@ -23,12 +21,8 @@ export async function resolveTrailerStreamURL(videoKey: string): Promise<string 
       const parsed = PipedStreamResponseSchema.safeParse(json)
       if (!parsed.success) continue
 
-      const data = parsed.data
-      if (data.hlsUrl) return data.hlsUrl
-      if (data.hls) return data.hls
-
-      const stream = data.videoStreams?.find((s) => s.url && s.format?.includes('mp4'))
-      if (stream?.url) return stream.url
+      const picked = pickPlayableStream(parsed.data)
+      if (picked) return picked
     } catch {
       continue
     }

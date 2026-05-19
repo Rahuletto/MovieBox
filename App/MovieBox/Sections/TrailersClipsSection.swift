@@ -4,6 +4,7 @@ import SwiftUI
 private enum TrailerClipMetrics {
     static let width: CGFloat = 280
     static let height: CGFloat = 158
+    static let maxVisible = 12
 }
 
 private enum TrailerClipFilter: String, CaseIterable, Identifiable {
@@ -18,13 +19,14 @@ struct TrailersClipsSection: View {
     let onPlay: (URL) -> Void
 
     @State private var filter: TrailerClipFilter = .trailers
+    @State private var resolvedDurations: [String: Int] = [:]
 
     private var trailerItems: [MediaVideo] {
-        videos.filter(\.isTrailerCategory)
+        Array(MediaVideo.sortedTrailers(videos, durations: resolvedDurations).prefix(TrailerClipMetrics.maxVisible))
     }
 
     private var clipItems: [MediaVideo] {
-        videos.filter(\.isClipCategory)
+        Array(MediaVideo.sortedClips(videos, durations: resolvedDurations).prefix(TrailerClipMetrics.maxVisible))
     }
 
     private var visibleItems: [MediaVideo] {
@@ -56,7 +58,10 @@ struct TrailersClipsSection: View {
                 ScrollView(.horizontal) {
                     HStack(spacing: 14) {
                         ForEach(visibleItems) { video in
-                            TrailerClipCard(video: video) {
+                            TrailerClipCard(
+                                video: video,
+                                durationSeconds: resolvedDurations[video.key] ?? video.durationSeconds
+                            ) {
                                 guard let url = video.youtubeWatchURL else { return }
                                 onPlay(url)
                             }
@@ -66,18 +71,12 @@ struct TrailersClipsSection: View {
                 }
                 .scrollIndicators(.hidden)
                 .frame(height: TrailerClipMetrics.height)
-                .mask(
-                    LinearGradient(
-                        gradient: Gradient(stops: [
-                            .init(color: .black, location: 0),
-                            .init(color: .black, location: 0.75),
-                            .init(color: .clear, location: 1),
-                        ]),
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
-                )
             }
+        }
+        .task(id: videos.map(\.key)) {
+            let keys = videos.map(\.key)
+            guard !keys.isEmpty else { return }
+            resolvedDurations = await YouTubeDurationResolver.durations(for: keys)
         }
     }
 
@@ -110,53 +109,108 @@ struct TrailersClipsSection: View {
             }
         }
     }
+
 }
 
 private struct TrailerClipCard: View {
     let video: MediaVideo
+    let durationSeconds: Int?
     let onPlay: () -> Void
+
+    private var durationLabel: String? {
+        guard let durationSeconds, durationSeconds > 0 else { return nil }
+        let minutes = durationSeconds / 60
+        let seconds = durationSeconds % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
 
     var body: some View {
         Button(action: onPlay) {
             ZStack(alignment: .bottomLeading) {
                 thumbnail
                     .frame(width: TrailerClipMetrics.width, height: TrailerClipMetrics.height)
-                    .clipped()
 
-                LinearGradient(
-                    colors: [.clear, .black.opacity(0.35), .black.opacity(0.88)],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
+                bottomBlurScrim
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(video.displayType.uppercased())
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 6) {
+                        Text(video.displayType.uppercased())
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.75))
+                        if let durationLabel {
+                            Text(durationLabel)
+                                .font(.caption2.weight(.medium))
+                                .monospacedDigit()
+                                .foregroundStyle(.white.opacity(0.65))
+                        }
+                    }
 
                     Text(video.name)
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(.white)
                         .lineLimit(2)
 
                     HStack {
                         if video.official {
                             Text("Official")
                                 .font(.caption2.weight(.medium))
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(.white.opacity(0.7))
                         }
                         Spacer(minLength: 0)
                         Image(systemName: "play.circle.fill")
                             .font(.title3)
-                            .foregroundStyle(.white.opacity(0.9))
+                            .foregroundStyle(.white.opacity(0.95))
                     }
                 }
-                .padding(12)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 12)
+                .padding(.top, 28)
             }
             .frame(width: TrailerClipMetrics.width, height: TrailerClipMetrics.height)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain)
+    }
+
+    private var bottomBlurScrim: some View {
+        VStack(spacing: 0) {
+            Spacer(minLength: 0)
+            ZStack(alignment: .bottom) {
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            stops: [
+                                .init(color: .clear, location: 0),
+                                .init(color: .black.opacity(0.35), location: 0.55),
+                                .init(color: .black.opacity(0.62), location: 1),
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .frame(height: 118)
+
+                Rectangle()
+                    .fill(.thinMaterial)
+                    .frame(height: 112)
+                    .mask {
+                        LinearGradient(
+                            stops: cardBottomBlurStops,
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    }
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private var cardBottomBlurStops: [Gradient.Stop] {
+        (0...20).map { step in
+            let t = Double(step) / 20
+            let eased = t * t * (3 - 2 * t)
+            return .init(color: .black.opacity(eased), location: t)
+        }
     }
 
     @ViewBuilder

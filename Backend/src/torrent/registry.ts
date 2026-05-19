@@ -4,6 +4,19 @@ import { pirateBayIndexer } from './indexers/piratebay'
 import { torrentioIndexer } from './indexers/torrentio'
 import { x1337Indexer } from './indexers/x1337'
 import { ytsIndexer } from './indexers/yts'
+import { nyaaIndexer } from './indexers/nyaa'
+import { limeTorrentsIndexer } from './indexers/limetorrents'
+import { torrentGalaxyIndexer } from './indexers/torrentgalaxy'
+import { magnetDLIndexer } from './indexers/magnetdl'
+import { solidTorrentsIndexer } from './indexers/solidtorrents'
+import { rutrackerIndexer } from './indexers/rutracker'
+import { kickassTorrentsIndexer } from './indexers/kickasstorrents'
+import { rarbgIndexer } from './indexers/rarbg'
+import { zooqleIndexer } from './indexers/zooqle'
+import { torrentFunkIndexer } from './indexers/torrentfunk'
+import { isohuntIndexer } from './indexers/isohunt'
+import { torrentDownloadIndexer } from './indexers/torrentdownload'
+import { bitsearchIndexer } from './indexers/bitsearch'
 import type { SearchContext, TorrentIndexer, TorrentSearchHit } from './types'
 
 /** All indexers — add new sites here without touching the Mac app. */
@@ -13,6 +26,19 @@ export const INDEXERS: TorrentIndexer[] = [
   eztvIndexer,
   pirateBayIndexer,
   x1337Indexer,
+  nyaaIndexer,
+  limeTorrentsIndexer,
+  torrentGalaxyIndexer,
+  magnetDLIndexer,
+  solidTorrentsIndexer,
+  rutrackerIndexer,
+  kickassTorrentsIndexer,
+  rarbgIndexer,
+  zooqleIndexer,
+  torrentFunkIndexer,
+  isohuntIndexer,
+  torrentDownloadIndexer,
+  bitsearchIndexer,
 ]
 
 export const INDEXER_IDS = INDEXERS.map((i) => i.id)

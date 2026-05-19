@@ -12,7 +12,9 @@ import SwiftUI
 struct TorrentSection: View {
     @Environment(PlayerState.self) private var playerState
     @Environment(AppServices.self) private var appServices
+    @Environment(\.modelContext) private var modelContext
     @Query private var settings: [AppSettings]
+    @Query private var storedMovies: [MovieRecord]
 
     let movie: Movie
     let torrents: [TorrentResult]
@@ -94,11 +96,13 @@ struct TorrentSection: View {
 
                 TorrentVersionList(
                     models: visibleCardModels,
-                    busyTorrentID: busyTorrentID,
-                    cardErrors: cardErrors,
-                    onStream: { startStream(for: $0) },
-                    onDownload: { startDownload(for: $0) },
-                    onCopyError: copyError
+                    mode: .detail(
+                        busyTorrentID: busyTorrentID,
+                        cardErrors: cardErrors,
+                        onStream: { startStream(for: $0) },
+                        onDownload: { startDownload(for: $0) },
+                        onCopyError: copyError
+                    )
                 )
 
                 paginationBar
@@ -217,6 +221,14 @@ struct TorrentSection: View {
                 }
             }
             do {
+                WatchProgressStore.ensureRecord(
+                    movie: movie,
+                    kind: isTV ? .tv : .movie,
+                    genres: movie.genreIds,
+                    in: modelContext,
+                    existing: storedMovies
+                )
+
                 try await TorrentPlaybackService.play(
                     request: TorrentPlaybackService.Request(
                         torrent: torrent,
@@ -224,7 +236,9 @@ struct TorrentSection: View {
                         movieId: movie.id,
                         subtitleURL: subtitleURL,
                         playback: playback,
-                        episodeTitle: episodeLabel
+                        episodeTitle: episodeLabel,
+                        displayTitle: movie.title,
+                        resumePosition: WatchProgressStore.resumePosition(for: movie.id, in: storedMovies)
                     ),
                     appServices: appServices,
                     playerState: playerState
@@ -304,220 +318,4 @@ struct TorrentSection: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(message, forType: .string)
     }
-}
-
-// MARK: - Lightweight display model (computed once per torrent)
-
-private struct TorrentCardModel: Identifiable, Hashable {
-    let id: UUID
-    let source: String
-    let quality: String
-    let techKinds: [MediaTechKind]
-    let title: String
-    let detailLine: String
-    let seeders: Int
-    let leechers: Int
-
-    init(torrent: TorrentResult) {
-        id = torrent.id
-        source = torrent.trackerSource.label
-        quality = torrent.quality.rawValue
-        techKinds = torrentTechKinds(for: torrent)
-        title = torrent.title
-
-        var parts: [String] = []
-        if torrent.sizeBytes > 0 {
-            parts.append(ByteCountFormatter.string(fromByteCount: torrent.sizeBytes, countStyle: .file))
-        }
-        parts.append(torrent.codec.rawValue)
-        if torrent.source != .unknown {
-            parts.append(torrent.source.rawValue)
-        }
-        detailLine = parts.joined(separator: " · ")
-
-        seeders = torrent.seeders
-        leechers = torrent.leechers
-    }
-}
-
-// MARK: - macOS inset list (Settings / TV–style rows)
-
-private struct TorrentVersionList: View {
-    let models: [TorrentCardModel]
-    let busyTorrentID: UUID?
-    let cardErrors: [UUID: String]
-    let onStream: (UUID) -> Void
-    let onDownload: (UUID) -> Void
-    let onCopyError: (UUID) -> Void
-
-    var body: some View {
-        VStack(spacing: 0) {
-            ForEach(Array(models.enumerated()), id: \.element.id) { index, model in
-                TorrentVersionRow(
-                    model: model,
-                    isBusy: busyTorrentID == model.id,
-                    errorMessage: cardErrors[model.id],
-                    onStream: { onStream(model.id) },
-                    onDownload: { onDownload(model.id) },
-                    onCopyError: { onCopyError(model.id) }
-                )
-                .equatable()
-
-                if index < models.count - 1 {
-                    Divider()
-                        .padding(.leading, 12)
-                }
-            }
-        }
-        // Single uniform translucent container — matches Settings.app /
-        // inset-grouped list aesthetic instead of alternating row colors
-        // which look broken on top of an image backdrop.
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
-        }
-    }
-}
-
-private struct TorrentVersionRow: View, Equatable {
-    let model: TorrentCardModel
-    let isBusy: Bool
-    let errorMessage: String?
-    let onStream: () -> Void
-    let onDownload: () -> Void
-    let onCopyError: () -> Void
-
-    @State private var isHovering = false
-
-    static func == (lhs: TorrentVersionRow, rhs: TorrentVersionRow) -> Bool {
-        lhs.model == rhs.model
-            && lhs.isBusy == rhs.isBusy
-            && lhs.errorMessage == rhs.errorMessage
-    }
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 5) {
-                    resolutionBadge
-                    if !model.techKinds.isEmpty {
-                        MediaTechBadgeRow(kinds: model.techKinds, context: .hero, size: .list)
-                    }
-                }
-
-                Text(model.title)
-                    .font(.body)
-                    .foregroundStyle(.primary)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                metadataRow
-
-                if let errorMessage {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                        Text(errorMessage)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                            .lineLimit(2)
-                        Button("Copy", action: onCopyError)
-                            .buttonStyle(.link)
-                            .font(.caption)
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            HStack(spacing: 4) {
-                Button(action: onStream) {
-                    Image(systemName: "play.circle.fill")
-                        .font(.system(size: 22))
-                        .symbolRenderingMode(.palette)
-                        .foregroundStyle(.white, Color.accentColor)
-                }
-                .buttonStyle(.plain)
-                .help("Play")
-
-                Button(action: onDownload) {
-                    Image(systemName: "arrow.down.circle")
-                        .font(.system(size: 22))
-                        .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Download")
-            }
-            .frame(width: 64, alignment: .trailing)
-            .opacity(isBusy ? 0.35 : 1)
-            .overlay {
-                if isBusy {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-            }
-            .disabled(isBusy)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-        .background(isHovering ? Color.primary.opacity(0.06) : Color.clear)
-        .onHover { hovering in
-            isHovering = hovering
-        }
-    }
-
-    private var metadataRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if !model.detailLine.isEmpty {
-                Text(model.detailLine)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
-            HStack(spacing: 10) {
-                HStack(spacing: 4) {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .foregroundStyle(BadgePalette.seedColor(model.seeders))
-                    Text("\(model.seeders)")
-                        .monospacedDigit()
-                        .foregroundStyle(BadgePalette.seedColor(model.seeders))
-                }
-
-                if model.leechers > 0 {
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.down.circle.fill")
-                            .foregroundStyle(.secondary)
-                        Text("\(model.leechers)")
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                Text(model.source)
-                    .foregroundStyle(.secondary)
-
-                Spacer(minLength: 0)
-            }
-            .font(.caption)
-            .lineLimit(1)
-        }
-    }
-
-    @ViewBuilder
-    private var resolutionBadge: some View {
-        if model.quality != VideoQuality.p2160.rawValue {
-            Text(model.quality)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3)
-                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
-        }
-    }
-
 }

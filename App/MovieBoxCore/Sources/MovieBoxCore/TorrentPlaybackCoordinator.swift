@@ -8,7 +8,7 @@ import Foundation
 public final class TorrentPlaybackCoordinator {
     private let orchestrator: StreamingOrchestrator
     private(set) var session: TorrentStreamSession?
-    private(set) var torrents: [TorrentResult] = []
+    public private(set) var torrents: [TorrentResult] = []
 
     public init(orchestrator: StreamingOrchestrator) {
         self.orchestrator = orchestrator
@@ -51,7 +51,9 @@ public final class TorrentPlaybackCoordinator {
         subtitleURL: URL?,
         subtitleAppearance: SubtitleAppearance = .cinematic,
         subtitleFontSize: CGFloat = 20,
-        episodeTitle: String? = nil
+        episodeTitle: String? = nil,
+        displayTitle: String? = nil,
+        resumePosition: Double? = nil
     ) throws {
         configureSources(on: playerState, torrents: allTorrents, selected: torrent)
 
@@ -65,16 +67,21 @@ public final class TorrentPlaybackCoordinator {
         }
 
         PlaybackLog.log("finishPlayback → loading player url=\(MovieBoxFileLogger.redactURL(url)) movieId=\(movieId) hdr=\(torrent.hdrType?.rawValue ?? "none")")
-        playerState.load(
-            url: url,
-            title: torrent.title,
-            movieId: movieId,
-            subtitleURL: subtitleURL,
-            hdrType: playerHDRType(from: torrent.hdrType),
-            subtitleAppearance: subtitleAppearance,
-            subtitleFontSize: subtitleFontSize,
-            episodeTitle: episodeTitle
-        )
+        let hudTitle = displayTitle.map { PlaybackDisplayTitle.clean($0) }
+        Task { @MainActor in
+            playerState.load(
+                url: url,
+                title: torrent.title,
+                movieId: movieId,
+                subtitleURL: subtitleURL,
+                hdrType: playerHDRType(from: torrent.hdrType),
+                subtitleAppearance: subtitleAppearance,
+                subtitleFontSize: subtitleFontSize,
+                episodeTitle: episodeTitle,
+                displayTitle: hudTitle,
+                resumePosition: resumePosition
+            )
+        }
     }
 
     func switchToSource(id: String, playerState: PlayerState, subtitleAppearance: SubtitleAppearance = .cinematic) async {
@@ -101,11 +108,10 @@ public final class TorrentPlaybackCoordinator {
                 subtitleURL: subtitleURL,
                 hdrType: playerHDRType(from: torrent.hdrType),
                 subtitleAppearance: subtitleAppearance,
-                subtitleFontSize: playerState.subtitleFontSize
+                subtitleFontSize: playerState.subtitleFontSize,
+                displayTitle: playerState.seriesName,
+                resumePosition: savedTime > 20 ? savedTime : nil
             )
-            if savedTime > 1 {
-                playerState.seek(to: savedTime)
-            }
         } else if case .failed(let message) = streamSession.state {
             playerState.errorMessage = "Could not switch source: \(message)"
         }

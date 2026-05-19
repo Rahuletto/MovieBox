@@ -93,14 +93,23 @@ public struct MediaVideo: Identifiable, Sendable, Hashable, Codable {
     public let name: String
     public let type: String
     public let official: Bool
+    /// YouTube duration in seconds when known (fetched separately).
+    public var durationSeconds: Int?
 
     public var id: String { key }
 
-    public init(key: String, name: String, type: String, official: Bool = false) {
+    public init(
+        key: String,
+        name: String,
+        type: String,
+        official: Bool = false,
+        durationSeconds: Int? = nil
+    ) {
         self.key = key
         self.name = name
         self.type = type
         self.official = official
+        self.durationSeconds = durationSeconds
     }
 
     public var youtubeWatchURL: URL? {
@@ -111,9 +120,10 @@ public struct MediaVideo: Identifiable, Sendable, Hashable, Codable {
         URL(string: "https://img.youtube.com/vi/\(key)/mqdefault.jpg")
     }
 
+    public var normalizedType: String { type.lowercased() }
+
     public var isTrailerCategory: Bool {
-        let normalized = type.lowercased()
-        return normalized == "trailer" || normalized == "teaser"
+        normalizedType == "trailer" || normalizedType == "teaser"
     }
 
     public var isClipCategory: Bool {
@@ -123,6 +133,84 @@ public struct MediaVideo: Identifiable, Sendable, Hashable, Codable {
     public var displayType: String {
         type.isEmpty ? "Video" : type.capitalized
     }
+
+    public var formattedDuration: String? {
+        guard let durationSeconds, durationSeconds > 0 else { return nil }
+        let minutes = durationSeconds / 60
+        let seconds = durationSeconds % 60
+        if minutes >= 60 {
+            return String(format: "%d:%02d:%02d", minutes / 60, minutes % 60, seconds)
+        }
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+
+    /// Typical trailer: ~1–4 minutes; teasers shorter. Unknown duration is allowed.
+    public func matchesExpectedDuration(forTrailerTab: Bool, resolvedDuration: Int? = nil) -> Bool {
+        guard let duration = resolvedDuration ?? durationSeconds else { return true }
+        guard forTrailerTab else { return true }
+        switch normalizedType {
+        case "trailer":
+            return (40...360).contains(duration)
+        case "teaser":
+            return (8...150).contains(duration)
+        default:
+            return duration <= 420
+        }
+    }
+
+    public func sortScore(durationSeconds resolvedDuration: Int?) -> Int {
+        let duration = resolvedDuration ?? durationSeconds
+        var score = 0
+        if official { score += 200 }
+        switch normalizedType {
+        case "trailer": score += 120
+        case "teaser": score += 60
+        default: break
+        }
+        let lower = name.lowercased()
+        if lower.contains("official trailer") { score += 80 }
+        if lower.contains("main trailer") { score += 40 }
+        if lower.contains("final trailer") { score += 30 }
+        if let duration {
+            switch normalizedType {
+            case "trailer":
+                score += max(0, 50 - abs(duration - 120) / 4)
+                if duration > 600 { score -= 120 }
+            case "teaser":
+                score += max(0, 30 - abs(duration - 45) / 3)
+                if duration > 180 { score -= 60 }
+            default:
+                break
+            }
+        }
+        return score
+    }
+
+    public static func sortedTrailers(
+        _ videos: [MediaVideo],
+        durations: [String: Int] = [:]
+    ) -> [MediaVideo] {
+        videos
+            .filter(\.isTrailerCategory)
+            .filter { $0.matchesExpectedDuration(forTrailerTab: true, resolvedDuration: durations[$0.key]) }
+            .sorted {
+                $0.sortScore(durationSeconds: durations[$0.key]) >
+                    $1.sortScore(durationSeconds: durations[$1.key])
+            }
+    }
+
+    public static func sortedClips(
+        _ videos: [MediaVideo],
+        durations: [String: Int] = [:]
+    ) -> [MediaVideo] {
+        videos
+            .filter(\.isClipCategory)
+            .sorted {
+                $0.sortScore(durationSeconds: durations[$0.key]) >
+                    $1.sortScore(durationSeconds: durations[$1.key])
+            }
+    }
+
 }
 
 public struct MovieDetail: Sendable, Codable, Identifiable, Hashable {
@@ -256,12 +344,15 @@ public enum MetadataError: Error, Sendable, LocalizedError {
     case missingConfiguration
     case invalidURL
     case upstream(Int)
+    case trailerUnavailable
 
     public var errorDescription: String? {
         switch self {
         case .missingConfiguration: "Missing metadata API configuration."
         case .invalidURL: "Could not build metadata request URL."
         case .upstream(let status): "Metadata service returned HTTP \(status)."
+        case .trailerUnavailable:
+            "No playable trailer stream was found. Try another clip or check your connection."
         }
     }
 }
@@ -390,7 +481,12 @@ public actor MetadataClient {
     }
 
     public func resolveTrailer(key: String) async throws -> URL {
-        guard let mode else { throw MetadataError.missingConfiguration }
+        guard mode != nil else { throw MetadataError.missingConfiguration }
+
+        // Resolve on-device first — many public Piped mirrors block Cloudflare Workers.
+        if let piped = await resolveTrailerViaPiped(key: key) {
+            return piped
+        }
 
         if case .backend(let baseURL, let appToken) = mode {
             var components = URLComponents(url: baseURL.appending(path: "api/trailer/resolve"), resolvingAgainstBaseURL: false)
@@ -402,32 +498,89 @@ public actor MetadataClient {
             request.timeoutInterval = 20
 
             let (data, response) = try await session.data(for: request)
-            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-                throw MetadataError.upstream(http.statusCode)
-            }
-
-            struct TrailerResponse: Codable {
-                let url: String
-            }
-            let resolved = try JSONDecoder().decode(TrailerResponse.self, from: data)
-            if let resultURL = URL(string: resolved.url) {
-                return resultURL
+            if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
+                struct TrailerResponse: Codable { let url: String }
+                if let resolved = try? JSONDecoder().decode(TrailerResponse.self, from: data),
+                   let resultURL = URL(string: resolved.url) {
+                    return resultURL
+                }
             }
         }
 
-        // Direct mode fallback
-        let apiURL = URL(string: "https://pipedapi.kavin.rocks/streams/\(key)")!
-        let (data, _) = try await session.data(from: apiURL)
-        
+        throw MetadataError.trailerUnavailable
+    }
+
+    private static let staticPipedBases = [
+        "https://api.piped.private.coffee",
+        "https://pipedapi.kavin.rocks",
+        "https://pipedapi.adminforge.de",
+        "https://pipedapi.leptons.xyz",
+    ]
+
+    private func listPipedAPIBases() async -> [String] {
+        var merged: [String] = []
+        if let instancesURL = URL(string: "https://piped-instances.kavin.rocks/") {
+            do {
+                var request = URLRequest(url: instancesURL)
+                request.timeoutInterval = 5
+                let (data, response) = try await session.data(for: request)
+                if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
+                    struct Instance: Decodable { let api_url: String }
+                    let instances = try JSONDecoder().decode([Instance].self, from: data)
+                    for instance in instances {
+                        let trimmed = instance.api_url.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !trimmed.isEmpty else { continue }
+                        let base = trimmed.hasSuffix("/") ? String(trimmed.dropLast()) : trimmed
+                        if !merged.contains(base) { merged.append(base) }
+                    }
+                }
+            } catch {
+                // Fall back to static list.
+            }
+        }
+        for base in Self.staticPipedBases where !merged.contains(base) {
+            merged.append(base)
+        }
+        return merged
+    }
+
+    private func resolveTrailerViaPiped(key: String) async -> URL? {
+        let bases = await listPipedAPIBases()
+        struct PipedStream: Codable {
+            let url: String?
+            let format: String?
+            let quality: String?
+        }
         struct PipedResponse: Codable {
             let hlsUrl: String?
+            let hls: String?
+            let videoStreams: [PipedStream]?
         }
-        let piped = try JSONDecoder().decode(PipedResponse.self, from: data)
-        if let hls = piped.hlsUrl, let resultURL = URL(string: hls) {
-            return resultURL
+
+        for base in bases {
+            guard let apiURL = URL(string: "\(base)/streams/\(key)") else { continue }
+            do {
+                var request = URLRequest(url: apiURL)
+                request.timeoutInterval = 15
+                let (data, response) = try await session.data(for: request)
+                guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { continue }
+                let piped = try JSONDecoder().decode(PipedResponse.self, from: data)
+
+                let pickerInput = TrailerStreamPicker.Response(
+                    hlsUrl: piped.hlsUrl,
+                    hls: piped.hls,
+                    videoStreams: piped.videoStreams?.map {
+                        TrailerStreamPicker.Stream(url: $0.url ?? "", format: $0.format, quality: $0.quality)
+                    }
+                )
+                if let url = TrailerStreamPicker.pickPlayableURL(from: pickerInput) {
+                    return url
+                }
+            } catch {
+                continue
+            }
         }
-        
-        throw MetadataError.upstream(404)
+        return nil
     }
 
     /// Returns an absolute Fanart.tv logo URL (NOT a TMDB path).
@@ -873,14 +1026,9 @@ private struct VideosBundleDTO: Decodable, Sendable {
         }
     }
 
-    /// Pick the first official YouTube trailer; fall back to any trailer / teaser.
+    /// Pick the best official trailer / teaser (sorted by type + name; duration refined in UI).
     var preferredTrailerURL: URL? {
-        let trailers = youtubeVideos.filter(\.isTrailerCategory)
-        let chosen = trailers.first(where: { $0.type.lowercased() == "trailer" && $0.official })
-            ?? trailers.first(where: { $0.type.lowercased() == "trailer" })
-            ?? trailers.first(where: { $0.type.lowercased() == "teaser" })
-            ?? trailers.first
-        return chosen?.youtubeWatchURL
+        MediaVideo.sortedTrailers(youtubeVideos).first?.youtubeWatchURL
     }
 }
 

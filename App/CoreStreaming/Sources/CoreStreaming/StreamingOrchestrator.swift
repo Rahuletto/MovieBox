@@ -67,7 +67,8 @@ public final class StreamingOrchestrator: @unchecked Sendable {
             pieceLength: metadata.pieceLength,
             totalSize: metadata.totalSize,
             piecesHash: metadata.pieces,
-            streamFirstPiece: target.firstPieceIndex
+            streamFirstPiece: target.firstPieceIndex,
+            streamLastPiece: target.lastPieceIndex
         )
 
         torrentEngine = TorrentEngine(
@@ -116,12 +117,209 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         await pieceStore?.streamHeadContiguousBytes() ?? 0
     }
 
+    public func isStreamTailPieceReady() async -> Bool {
+        guard let pieceStore, let target = streamTarget else { return false }
+        return await pieceStore.hasPiece(target.lastPieceIndex)
+    }
+
+    public func streamTargetNeedsTailProbe() async -> Bool {
+        streamTarget?.needsTailProbeForPlayback ?? false
+    }
+
     public func downloadSpeed() async -> Double {
         await torrentEngine?.downloadSpeed ?? 0
     }
 
     public func peerCount() async -> Int {
         await torrentEngine?.activePeerCount ?? 0
+    }
+
+    public func diagnosticsSnapshot(
+        torrent: TorrentResult?,
+        sessionState: StreamSession<StreamingOrchestrator>.State,
+        swarmSeeders: Int,
+        swarmLeechers: Int,
+        livePeerCount: Int,
+        liveDownloadSpeed: Double,
+        liveBufferedBytes: Int64,
+        liveBufferedPieces: Int,
+        streamURL: URL?
+    ) async -> StreamDiagnosticsSnapshot {
+        var sections: [StreamDiagnosticsSnapshot.Section] = []
+
+        sections.append(
+            StreamDiagnosticsSnapshot.Section(
+                title: "Session",
+                rows: Self.sessionRows(
+                    torrent: torrent,
+                    sessionState: sessionState,
+                    swarmSeeders: swarmSeeders,
+                    swarmLeechers: swarmLeechers,
+                    livePeerCount: livePeerCount,
+                    liveDownloadSpeed: liveDownloadSpeed,
+                    liveBufferedBytes: liveBufferedBytes,
+                    liveBufferedPieces: liveBufferedPieces,
+                    streamURL: streamURL
+                )
+            )
+        )
+
+        if let torrent {
+            sections.append(StreamDiagnosticsSnapshot.Section(title: "Release", rows: Self.releaseRows(torrent: torrent)))
+        }
+
+        if let metadata {
+            sections.append(StreamDiagnosticsSnapshot.Section(title: "Torrent", rows: Self.torrentRows(metadata: metadata)))
+        }
+
+        if let target = streamTarget {
+            let tailReady = await isStreamTailPieceReady()
+            sections.append(
+                StreamDiagnosticsSnapshot.Section(
+                    title: "Stream file",
+                    rows: Self.streamTargetRows(target: target, tailReady: tailReady)
+                )
+            )
+        }
+
+        if pieceStore != nil || pieceManager != nil {
+            sections.append(StreamDiagnosticsSnapshot.Section(title: "Buffer", rows: await bufferRows()))
+        }
+
+        if let engine = torrentEngine {
+            sections.append(
+                StreamDiagnosticsSnapshot.Section(title: "Peers & trackers", rows: engine.peerDiagnosticRows())
+            )
+        }
+
+        if rangeServer.port > 0 || rangeServer.isRunning {
+            sections.append(
+                StreamDiagnosticsSnapshot.Section(title: "HTTP range server", rows: Self.rangeServerRows(rangeServer))
+            )
+        }
+
+        return StreamDiagnosticsSnapshot(sections: sections)
+    }
+
+    private static func sessionRows(
+        torrent: TorrentResult?,
+        sessionState: StreamSession<StreamingOrchestrator>.State,
+        swarmSeeders: Int,
+        swarmLeechers: Int,
+        livePeerCount: Int,
+        liveDownloadSpeed: Double,
+        liveBufferedBytes: Int64,
+        liveBufferedPieces: Int,
+        streamURL: URL?
+    ) -> [StreamDiagnosticsSnapshot.Row] {
+        let stateText: String = switch sessionState {
+        case .idle: "Idle"
+        case .preparing: "Preparing"
+        case .buffering(let p): "Buffering (\(Int(p * 100))%)"
+        case .ready: "Ready"
+        case .failed(let e): "Failed — \(e)"
+        case .cancelled: "Cancelled"
+        }
+
+        var rows: [StreamDiagnosticsSnapshot.Row] = [
+            .init(label: "State", value: stateText),
+            .init(label: "Connected peers", value: "\(livePeerCount)"),
+            .init(label: "Indexer seeders", value: "\(swarmSeeders)"),
+            .init(label: "Indexer leechers", value: "\(swarmLeechers)"),
+            .init(label: "Download speed", value: StreamDiagnosticsFormatting.speed(liveDownloadSpeed)),
+            .init(label: "Head buffered", value: StreamDiagnosticsFormatting.bytes(liveBufferedBytes)),
+            .init(label: "Verified head pieces", value: "\(liveBufferedPieces)"),
+        ]
+
+        if let streamURL {
+            rows.append(.init(label: "Local stream URL", value: MovieBoxFileLogger.redactURL(streamURL)))
+        }
+        if torrent == nil {
+            rows.append(.init(label: "Source", value: "No active torrent session"))
+        }
+
+        return rows
+    }
+
+    private static func releaseRows(torrent: TorrentResult) -> [StreamDiagnosticsSnapshot.Row] {
+        var rows: [StreamDiagnosticsSnapshot.Row] = [
+            .init(label: "Title", value: torrent.title),
+            .init(label: "Quality", value: torrent.quality.rawValue),
+            .init(label: "Codec", value: torrent.codec.rawValue),
+            .init(label: "Source", value: torrent.source.rawValue),
+            .init(label: "Language", value: torrent.language),
+            .init(label: "Size", value: StreamDiagnosticsFormatting.bytes(torrent.sizeBytes)),
+        ]
+        if let hdr = torrent.hdrType {
+            rows.append(.init(label: "HDR", value: hdr.rawValue))
+        }
+        if let audio = torrent.audioFormat {
+            rows.append(.init(label: "Audio", value: audio.rawValue))
+        }
+        if let hash = torrent.infoHash {
+            rows.append(.init(label: "Info hash", value: "\(hash.prefix(8))…\(hash.suffix(8))"))
+        }
+        return rows
+    }
+
+    private static func torrentRows(metadata: TorrentMetadata) -> [StreamDiagnosticsSnapshot.Row] {
+        [
+            .init(label: "Name", value: metadata.name),
+            .init(label: "Info hash", value: "\(metadata.infoHash.prefix(8))…"),
+            .init(label: "Total size", value: StreamDiagnosticsFormatting.bytes(metadata.totalSize)),
+            .init(label: "Piece length", value: StreamDiagnosticsFormatting.bytes(metadata.pieceLength)),
+            .init(label: "Piece count", value: "\(metadata.pieceCount)"),
+            .init(label: "Files", value: "\(metadata.files.count)"),
+            .init(label: "Trackers", value: "\(metadata.trackers.count)"),
+        ]
+    }
+
+    private static func streamTargetRows(target: TorrentStreamTarget, tailReady: Bool) -> [StreamDiagnosticsSnapshot.Row] {
+        [
+            .init(label: "File", value: target.file.relativePath),
+            .init(label: "MIME", value: target.contentType),
+            .init(label: "Media bytes", value: StreamDiagnosticsFormatting.bytes(target.byteLength)),
+            .init(label: "Byte offset", value: "\(target.byteOffset)"),
+            .init(label: "First piece", value: "\(target.firstPieceIndex)"),
+            .init(label: "Last piece", value: "\(target.lastPieceIndex)"),
+            .init(
+                label: "MKV tail probe",
+                value: target.needsTailProbeForPlayback ? (tailReady ? "Ready" : "Waiting") : "Not required"
+            ),
+        ]
+    }
+
+    private func bufferRows() async -> [StreamDiagnosticsSnapshot.Row] {
+        let storeProgress = await pieceStore?.progress() ?? 0
+        let verifiedPieces = await pieceStore?.contiguousPiecesFromStart() ?? 0
+        let verifiedBytes = await pieceStore?.contiguousBytesFromStreamStart() ?? 0
+        let headBytes = await pieceStore?.streamHeadContiguousBytes() ?? 0
+        let managerProgress = await pieceManager?.progress() ?? 0
+        let verifiedCount = await pieceManager?.downloadedCount() ?? 0
+        let pending = await pieceManager?.pendingRequestCount() ?? 0
+        let minHead = StreamPlaybackThreshold.minimumHeadBytes
+
+        return [
+            .init(label: "Verified pieces (all)", value: "\(verifiedCount)"),
+            .init(label: "Piece store progress", value: StreamDiagnosticsFormatting.percent(storeProgress)),
+            .init(label: "Piece manager progress", value: StreamDiagnosticsFormatting.percent(managerProgress)),
+            .init(label: "Contiguous from stream start", value: "\(verifiedPieces) piece(s)"),
+            .init(label: "Verified stream bytes", value: StreamDiagnosticsFormatting.bytes(verifiedBytes)),
+            .init(label: "Head contiguous (incl. in-flight)", value: StreamDiagnosticsFormatting.bytes(headBytes)),
+            .init(
+                label: "Playback head threshold",
+                value: "\(StreamDiagnosticsFormatting.bytes(minHead)) (\(headBytes >= minHead ? "met" : "pending"))"
+            ),
+            .init(label: "Pending block requests", value: "\(pending)"),
+        ]
+    }
+
+    private static func rangeServerRows(_ server: HTTPRangeServer) -> [StreamDiagnosticsSnapshot.Row] {
+        [
+            .init(label: "Listening", value: server.isRunning ? "Yes" : "No"),
+            .init(label: "Port", value: server.port > 0 ? "\(server.port)" : "—"),
+            .init(label: "Max range response", value: StreamDiagnosticsFormatting.bytes(2 * 1024 * 1024)),
+        ]
     }
 }
 
@@ -182,11 +380,12 @@ public final class TorrentEngine {
         self.progressHandler = progressHandler
     }
 
-    public func start() {
+    public func start() async {
         guard !isRunning else { return }
         isRunning = true
 
-        Task { await announceToTrackers() }
+        await announceToTrackers()
+        await updateStats()
         startAnnounceTimer()
         startMaintenanceTimer()
 
@@ -341,8 +540,9 @@ public final class TorrentEngine {
         }
 
         if connected > 0 {
-            TorrentLog.debug("[TorrentEngine] Connecting to \(connected) new peers (\(peerConnections.count) total)")
+            TorrentLog.info("[TorrentEngine] Connecting to \(connected) new peers (\(peerConnections.count) total)")
         }
+        await updateStats()
     }
 
     private func pruneDeadPeers() {
@@ -411,5 +611,38 @@ public final class TorrentEngine {
 
     private func peerKey(_ peer: PeerInfo) -> String {
         "\(peer.ip):\(peer.port)"
+    }
+
+    fileprivate func peerDiagnosticRows() -> [StreamDiagnosticsSnapshot.Row] {
+        var stateCounts: [String: Int] = [:]
+        for peer in peerConnections {
+            let key: String = switch peer.state {
+            case .connecting: "connecting"
+            case .handshaking: "handshaking"
+            case .connected: "connected"
+            case .choked: "choked"
+            case .unchoked: "unchoked"
+            case .downloading: "downloading"
+            case .disconnected: "disconnected"
+            case .error: "error"
+            }
+            stateCounts[key, default: 0] += 1
+        }
+
+        var rows: [StreamDiagnosticsSnapshot.Row] = [
+            .init(label: "Bytes downloaded", value: StreamDiagnosticsFormatting.bytes(bytesDownloaded)),
+            .init(label: "Active peers", value: "\(activePeerCount)"),
+            .init(label: "Peer sockets", value: "\(peerConnections.count) / \(maxPeerConnections)"),
+            .init(label: "DHT", value: dht != nil ? "Running" : "Off"),
+            .init(label: "Trackers (metadata)", value: "\(metadata.trackers.count)"),
+        ]
+
+        for key in ["downloading", "unchoked", "connected", "handshaking", "choked", "connecting", "disconnected", "error"] {
+            if let count = stateCounts[key], count > 0 {
+                rows.append(.init(label: "Peers · \(key)", value: "\(count)"))
+            }
+        }
+
+        return rows
     }
 }

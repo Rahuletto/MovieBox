@@ -30,6 +30,10 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
     @Published public private(set) var peerCount: Int = 0
     @Published public private(set) var bufferedPieces: Int = 0
     @Published public private(set) var bufferedBytes: Int64 = 0
+    /// Seeders reported by the indexer (Jackett/Prowlarr) — not the same as live peer connections.
+    public private(set) var swarmSeeders: Int = 0
+    public private(set) var swarmLeechers: Int = 0
+    public private(set) var activeTorrent: TorrentResult?
 
     private let orchestrator: O
     private var monitorTask: Task<Void, Never>?
@@ -50,10 +54,13 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
         streamURL = nil
         bufferedPieces = 0
         bufferedBytes = 0
+        activeTorrent = torrent
+        swarmSeeders = torrent.seeders
+        swarmLeechers = torrent.leechers
 
         let hash = torrent.infoHash ?? "unknown"
         TorrentLog.info(
-            "[StreamSession] start — \"\(torrent.title)\" quality=\(torrent.quality.rawValue) seeders=\(torrent.seeders) size=\(torrent.sizeBytes) hash=\(hash.prefix(8))…"
+            "[StreamSession] start — \"\(torrent.title)\" quality=\(torrent.quality.rawValue) indexerSeeders=\(torrent.seeders) indexerLeechers=\(torrent.leechers) size=\(torrent.sizeBytes) hash=\(hash.prefix(8))…"
         )
 
         do {
@@ -65,13 +72,13 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
                         self.downloadSpeed = speed
                         self.peerCount = peers
                         await self.refreshBufferMetrics()
-                        self.updatePlaybackReadiness(progress: progress)
+                        await self.updatePlaybackReadiness(progress: progress)
                     }
                 }
             }
 
             await refreshBufferMetrics()
-            updatePlaybackReadiness(progress: await orchestrator.progress())
+            await updatePlaybackReadiness(progress: await orchestrator.progress())
             TorrentLog.info(
                 "[StreamSession] orchestrator ready — streamURL=\(MovieBoxFileLogger.redactURL(streamURL!)) headKB=\(bufferedBytes / 1024) state=\(stateLabel)"
             )
@@ -136,6 +143,7 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
         bufferingWatchdogTask?.cancel()
         bufferingWatchdogTask = nil
         state = .cancelled
+        activeTorrent = nil
         monitorTask?.cancel()
         monitorTask = nil
         await orchestrator.stop()
@@ -162,14 +170,14 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
                 downloadSpeed = speed
                 peerCount = peers
                 await refreshBufferMetrics()
-                updatePlaybackReadiness(progress: progress)
+                await updatePlaybackReadiness(progress: progress)
 
                 try? await Task.sleep(for: .milliseconds(300))
             }
         }
     }
 
-    private func updatePlaybackReadiness(progress: Double) {
+    private func updatePlaybackReadiness(progress: Double) async {
         guard let url = streamURL else {
             state = .preparing
             return
@@ -177,11 +185,13 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
 
         let hasVerifiedHead = bufferedPieces >= 1
         let hasContiguousHead = bufferedBytes >= StreamPlaybackThreshold.minimumHeadBytes
+        let needsTail = await orchestrator.streamTargetNeedsTailProbe()
+        let hasTail = needsTail ? await orchestrator.isStreamTailPieceReady() : true
 
-        if hasVerifiedHead || hasContiguousHead {
+        if (hasVerifiedHead || hasContiguousHead), hasTail {
             if case .ready = state {} else {
                 TorrentLog.info(
-                    "[StreamSession] buffer ready — \(bufferedBytes / 1024) KB head (need \(StreamPlaybackThreshold.minimumHeadBytes / 1024) KB), \(bufferedPieces) verified piece(s), \(peerCount) peers"
+                    "[StreamSession] buffer ready — \(bufferedBytes / 1024) KB head (need \(StreamPlaybackThreshold.minimumHeadBytes / 1024) KB), tailReady=\(hasTail), \(bufferedPieces) verified piece(s), \(peerCount) connected peers"
                 )
                 state = .ready(streamURL: url)
             }
@@ -190,11 +200,16 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
             let hint = max(progress, fraction * 0.9, 0.02)
             if case .preparing = state {
                 TorrentLog.info(
-                    "[StreamSession] buffering — \(bufferedBytes / 1024)/\(StreamPlaybackThreshold.minimumHeadBytes / 1024) KB head, \(peerCount) peers, \(Int(downloadSpeed / 1024)) KB/s"
+                    "[StreamSession] buffering — \(bufferedBytes / 1024)/\(StreamPlaybackThreshold.minimumHeadBytes / 1024) KB head, \(peerCount) connected peers (indexer: \(swarmSeeders) seeders), \(Int(downloadSpeed / 1024)) KB/s"
                 )
             }
             state = .buffering(progress: hint)
         }
+    }
+
+    var activeStreamURL: URL? {
+        if case .ready(let url) = state { return url }
+        return streamURL
     }
 
     /// Human-readable state for logging (no PII).
@@ -207,5 +222,21 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
         case .failed(let e): "failed(\(e.prefix(80)))"
         case .cancelled: "cancelled"
         }
+    }
+}
+
+public extension StreamSession where O == StreamingOrchestrator {
+    func fetchDiagnostics() async -> StreamDiagnosticsSnapshot {
+        await orchestrator.diagnosticsSnapshot(
+            torrent: activeTorrent,
+            sessionState: state,
+            swarmSeeders: swarmSeeders,
+            swarmLeechers: swarmLeechers,
+            livePeerCount: peerCount,
+            liveDownloadSpeed: downloadSpeed,
+            liveBufferedBytes: bufferedBytes,
+            liveBufferedPieces: bufferedPieces,
+            streamURL: activeStreamURL
+        )
     }
 }

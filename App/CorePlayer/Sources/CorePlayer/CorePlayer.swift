@@ -43,6 +43,10 @@ public final class PlayerState {
     /// Fades the player layer in after app chrome has faded out.
     public var isPlayerRevealed: Bool
     public var isPlaying: Bool
+    /// True while AVPlayer is waiting for media data (initial load or rebuffer).
+    public var isBuffering: Bool = false
+    /// Shown under the buffering spinner while the torrent stream is preparing.
+    public var bufferingDetail: String?
     public var currentTime: Double = 0
     public var duration: Double = 0
     public var volume: Float = 1.0
@@ -75,6 +79,9 @@ public final class PlayerState {
     public var episodes: [PlayerEpisode] = []
     public var currentEpisodeIndex: Int? = nil
     public var isEpisodesSidebarOpen: Bool = false
+    public var isSourcesSidebarOpen: Bool = false
+    /// Seek here once the item is `readyToPlay` (continue watching).
+    public var pendingResumePosition: Double?
 
     // Picture in Picture
     public var isPictureInPictureActive: Bool = false
@@ -86,6 +93,7 @@ public final class PlayerState {
 
     private var timeObserver: Any?
     private var itemStatusObserver: NSKeyValueObservation?
+    private var playbackBufferObserver: NSKeyValueObservation?
     private var presentationSizeObserver: NSKeyValueObservation?
     private var playbackEndObserver: NSObjectProtocol?
     private var thumbnailService: ThumbnailService?
@@ -126,6 +134,47 @@ public final class PlayerState {
         self.hdrType = nil
     }
 
+    /// Opens the player immediately and shows buffering until `load(url:)` is called.
+    public func beginBufferingPlayback(
+        title: String,
+        movieId: Int,
+        subtitleAppearance: SubtitleAppearance = .cinematic,
+        subtitleFontSize: CGFloat = 20,
+        episodeTitle: String? = nil,
+        displayTitle: String? = nil
+    ) {
+        errorMessage = nil
+        isBuffering = true
+        bufferingDetail = "Preparing stream…"
+        self.title = title
+        self.movieId = movieId
+        self.subtitleAppearance = subtitleAppearance
+        self.subtitleFontSize = subtitleFontSize
+
+        let hudTitle: String
+        if let displayTitle, !displayTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            hudTitle = displayTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            hudTitle = PlayerState.parseTVShowMetadata(from: title).seriesName
+        }
+        seriesName = hudTitle
+        self.episodeTitle = episodeTitle
+
+        showsControls = true
+        isPresented = true
+        isPlayerRevealed = true
+        isPlaying = false
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+    }
+
+    public func updateBufferingDetail(_ text: String?) {
+        bufferingDetail = text
+        if text != nil {
+            isBuffering = true
+        }
+    }
+
     public func load(
         url: URL,
         title: String,
@@ -136,7 +185,9 @@ public final class PlayerState {
         subtitleFontSize: CGFloat = 20,
         episodeTitle: String? = nil,
         episodes: [PlayerEpisode] = [],
-        currentEpisodeIndex: Int? = nil
+        currentEpisodeIndex: Int? = nil,
+        displayTitle: String? = nil,
+        resumePosition: Double? = nil
     ) {
         stopPlaybackResources()
 
@@ -155,18 +206,35 @@ public final class PlayerState {
         self.videoGravity = .resizeAspect // Reset to default
         hasResizedForCurrentVideo = false
 
-        if let ep = episodeTitle {
-            self.seriesName = title
-            self.episodeTitle = ep
+        let hudTitle: String
+        if let displayTitle, !displayTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            hudTitle = displayTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else if let ep = episodeTitle {
+            let parsed = PlayerState.parseTVShowMetadata(from: title)
+            hudTitle = parsed.seriesName
         } else {
             let parsed = PlayerState.parseTVShowMetadata(from: title)
-            self.seriesName = parsed.seriesName
-            self.episodeTitle = parsed.episodeName
+            hudTitle = parsed.episodeName == nil ? parsed.seriesName : parsed.seriesName
         }
-        
+
+        if let ep = episodeTitle {
+            self.seriesName = hudTitle
+            self.episodeTitle = ep
+        } else {
+            self.seriesName = hudTitle
+            self.episodeTitle = nil
+        }
+
+        if let resumePosition, resumePosition > 20 {
+            pendingResumePosition = resumePosition
+        } else {
+            pendingResumePosition = nil
+        }
+
         lastPositionReportTime = .distantPast
         lastReportedPosition = -1
         lastSubtitleSyncTime = -1
+        isBuffering = true
 
         let asset = AVURLAsset(
             url: url,
@@ -177,6 +245,8 @@ public final class PlayerState {
                 AVURLAssetAllowsExpensiveNetworkAccessKey: true,
                 AVURLAssetAllowsCellularAccessKey: true,
                 AVURLAssetAllowsConstrainedNetworkAccessKey: true,
+                // Avoid blocking the main thread probing duration on large torrent streams.
+                AVURLAssetPreferPreciseDurationAndTimingKey: false,
             ] as [String: Any]
         )
         if let existing = thumbnailService {
@@ -200,27 +270,43 @@ public final class PlayerState {
         }
 
         showsControls = true
-        setupObservers()
 
+        schedulePlaybackStart(
+            url: url,
+            subtitleURL: subtitleURL,
+            useTransition: !(isPresented && isPlayerRevealed)
+        )
+    }
+
+    private func schedulePlaybackStart(url: URL, subtitleURL: URL?, useTransition: Bool) {
+        let work = { [weak self] in
+            guard let self else { return }
+            if useTransition, !(self.isPresented && self.isPlayerRevealed) {
+                PlaybackLog.log("revealPlayerWithTransition → will play after fade")
+                self.revealPlayerWithTransition {
+                    self.startPlayback(subtitleURL: subtitleURL)
+                }
+            } else {
+                PlaybackLog.log("play() immediately (player already visible)")
+                self.startPlayback(subtitleURL: subtitleURL)
+            }
+        }
+        Task { @MainActor in work() }
+    }
+
+    private func startPlayback(subtitleURL: URL?) {
+        setupObservers()
         if let subtitleURL {
             loadSubtitleStream(from: subtitleURL)
         } else {
             cancelSubtitleWork()
         }
-
-        if isPresented && isPlayerRevealed {
-            PlaybackLog.log("play() immediately (player already revealed)")
-            player.play()
-            player.rate = Float(playbackRate)
-            isPlaying = true
-            return
-        }
-
-        PlaybackLog.log("revealPlayerWithTransition → will play after fade")
-        revealPlayerWithTransition()
+        player.play()
+        player.rate = Float(playbackRate)
+        isPlaying = true
     }
 
-    private func revealPlayerWithTransition() {
+    private func revealPlayerWithTransition(onRevealed: @escaping () -> Void) {
         presentationTransitionTask?.cancel()
         isPresented = true
         isPlayerRevealed = false
@@ -232,10 +318,28 @@ public final class PlayerState {
             withAnimation(.easeInOut(duration: 0.38)) {
                 isPlayerRevealed = true
             }
-            player.play()
-            player.rate = Float(playbackRate)
-            isPlaying = true
+            onRevealed()
         }
+    }
+
+    static func playbackFailureMessage(from error: Error?) -> String {
+        guard let error else {
+            return "Playback failed. Try another version or format."
+        }
+        let ns = error as NSError
+        PlaybackLog.log(
+            "AVPlayerItem NSError domain=\(ns.domain) code=\(ns.code) desc=\(ns.localizedDescription)"
+        )
+        if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError {
+            PlaybackLog.log(
+                "AVPlayerItem underlying domain=\(underlying.domain) code=\(underlying.code) desc=\(underlying.localizedDescription)"
+            )
+        }
+        let trimmed = ns.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed.lowercased() == "unknown error" {
+            return "Playback failed (error \(ns.code)). Try another version or format."
+        }
+        return trimmed
     }
 
     public static func parseTVShowMetadata(from rawTitle: String) -> (seriesName: String, episodeName: String?) {
@@ -463,6 +567,10 @@ public final class PlayerState {
         episodes = []
         currentEpisodeIndex = nil
         isEpisodesSidebarOpen = false
+        isSourcesSidebarOpen = false
+        pendingResumePosition = nil
+        isBuffering = false
+        bufferingDetail = nil
         seriesName = ""
         episodeTitle = nil
         hdrType = nil
@@ -673,9 +781,16 @@ public final class PlayerState {
         guard let currentItem = player.currentItem else { return }
         observedPlayerItem = currentItem
 
-        let itemDuration = currentItem.asset.duration.seconds
-        if itemDuration.isFinite, itemDuration > 0 {
-            duration = itemDuration
+        let asset = currentItem.asset
+        Task { [weak self] in
+            guard let durationValue = try? await asset.load(.duration),
+                  durationValue.isNumeric else { return }
+            let seconds = durationValue.seconds
+            guard seconds.isFinite, seconds > 0 else { return }
+            await MainActor.run {
+                guard let self, currentItem === self.observedPlayerItem else { return }
+                self.duration = seconds
+            }
         }
 
         itemStatusObserver = currentItem.observe(\.status, options: [.new]) { [weak self] item, _ in
@@ -683,9 +798,10 @@ public final class PlayerState {
                 guard let self, item === self.observedPlayerItem else { return }
                 switch item.status {
                 case .failed:
-                    let message = item.error?.localizedDescription ?? "Playback failed. Please try a different source or format."
+                    let message = Self.playbackFailureMessage(from: item.error)
                     PlaybackLog.log("AVPlayerItem failed: \(message)")
                     self.errorMessage = message
+                    self.isBuffering = false
                 case .readyToPlay:
                     let readyDuration = item.asset.duration.seconds
                     if readyDuration.isFinite, readyDuration > 0 {
@@ -693,11 +809,26 @@ public final class PlayerState {
                     }
                     PlaybackLog.log("AVPlayerItem readyToPlay duration=\(self.duration)s")
                     self.errorMessage = nil
+                    self.bufferingDetail = nil
+                    if let resume = self.pendingResumePosition, resume > 20 {
+                        self.pendingResumePosition = nil
+                        PlaybackLog.log("resume playback at \(Int(resume))s")
+                        self.seek(to: resume)
+                    }
+                    self.updateBufferingState(for: item)
                 case .unknown:
                     PlaybackLog.log("AVPlayerItem status=unknown (buffering)")
+                    self.updateBufferingState(for: item)
                 @unknown default:
                     break
                 }
+            }
+        }
+
+        playbackBufferObserver = currentItem.observe(\.isPlaybackBufferEmpty, options: [.new, .initial]) { [weak self] item, _ in
+            Task { @MainActor in
+                guard let self, item === self.observedPlayerItem else { return }
+                self.updateBufferingState(for: item)
             }
         }
 
@@ -734,9 +865,33 @@ public final class PlayerState {
                        let reason = self.player.reasonForWaitingToPlay {
                         PlaybackLog.log("waitingToPlay reason=\(reason.rawValue)")
                     }
+                    self.updateBufferingState()
                 }
             }
             .store(in: &cancellables)
+    }
+
+    private func updateBufferingState(for item: AVPlayerItem? = nil) {
+        let item = item ?? observedPlayerItem
+
+        if !isPresented || errorMessage != nil {
+            isBuffering = false
+            return
+        }
+
+        if isSwitchingSource {
+            isBuffering = true
+            return
+        }
+
+        if player.timeControlStatus == .paused {
+            isBuffering = false
+            return
+        }
+
+        let waiting = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
+        let itemStalled = item.map { $0.isPlaybackBufferEmpty || $0.status == .unknown } ?? true
+        isBuffering = waiting || itemStalled
     }
 
     private func resizeWindowToMatch(aspectRatio: CGSize) {
@@ -771,6 +926,8 @@ public final class PlayerState {
         }
         itemStatusObserver?.invalidate()
         itemStatusObserver = nil
+        playbackBufferObserver?.invalidate()
+        playbackBufferObserver = nil
         presentationSizeObserver?.invalidate()
         presentationSizeObserver = nil
         if let playbackEndObserver {
@@ -839,16 +996,24 @@ public final class PlayerContainerView: NSView {
     }
 }
 
-public struct PlayerView: View {
+public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View {
     @Bindable private var state: PlayerState
+    @ViewBuilder private var sourcesSidebar: () -> SourcesSidebar
+    @ViewBuilder private var streamStatsAccessory: () -> StreamStatsAccessory
     @State private var controlFadeTask: Task<Void, Never>?
     @State private var isHoveringHUD: Bool = false
     @State private var skipBackTrigger: Int = 0
     @State private var skipForwardTrigger: Int = 0
     @State private var isCommandHeld = false
 
-    public init(state: PlayerState) {
+    public init(
+        state: PlayerState,
+        @ViewBuilder sourcesSidebar: @escaping () -> SourcesSidebar = { EmptyView() },
+        @ViewBuilder streamStatsAccessory: @escaping () -> StreamStatsAccessory = { EmptyView() }
+    ) {
         self.state = state
+        self.sourcesSidebar = sourcesSidebar
+        self.streamStatsAccessory = streamStatsAccessory
     }
 
     public var body: some View {
@@ -887,86 +1052,30 @@ public struct PlayerView: View {
 
             subtitleOverlay
 
+            if state.isBuffering || state.isSwitchingSource {
+                bufferingOverlay
+                    .transition(.opacity)
+            }
+
             // Beautiful, floating glassmorphic IINA top bar
             topHUD
                 .opacity(state.showsControls ? 1 : 0)
                 .animation(.easeOut(duration: 0.06), value: state.showsControls)
 
-            // Center play/pause & seek overlay
-            centerControls
+            // Center play/pause & seek overlay (hidden while buffering)
+            if !state.isBuffering && !state.isSwitchingSource {
+                centerControls
+            }
 
             // Stunning, floating glassmorphic IINA control pod
             bottomHUD
                 .opacity(state.showsControls ? 1 : 0)
                 .animation(.easeOut(duration: 0.06), value: state.showsControls)
 
-            // Frosted glass error overlay
             if let errorMsg = state.errorMessage {
-                VStack(spacing: 16) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 38))
-                        .foregroundStyle(.red)
-                        .shadow(color: .red.opacity(0.35), radius: 8)
-                    
-                    Text("Playback Error")
-                        .font(.system(size: 16, weight: .bold))
-                        .foregroundStyle(.white)
-                    
-                    Text(errorMsg)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.7))
-                        .multilineTextAlignment(.center)
-                        .lineLimit(4)
-                        .padding(.horizontal, 16)
-                    
-                    HStack(spacing: 12) {
-                        // Copy Logs Button
-                        Button {
-                            let assetURL = (state.player.currentItem?.asset as? AVURLAsset)?.url.absoluteString ?? "No URL"
-                            let logText = """
-                            Playback Error: \(state.errorMessage ?? "Unknown error")
-                            URL: \(assetURL)
-                            """
-                            let pasteboard = NSPasteboard.general
-                            pasteboard.clearContents()
-                            pasteboard.setString(logText, forType: .string)
-                        } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: "doc.on.doc.fill")
-                                Text("Copy Logs")
-                            }
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 7)
-                            .background(.white.opacity(0.12), in: Capsule())
-                            .overlay(Capsule().stroke(.white.opacity(0.15), lineWidth: 1))
-                        }
-                        .buttonStyle(.plain)
-
-                        // Close Player Red Button
-                        Button {
-                            state.dismiss()
-                        } label: {
-                            Text("Close Player")
-                                .font(.system(size: 11, weight: .bold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 18)
-                                .padding(.vertical, 7)
-                                .background(Color.red, in: Capsule())
-                                .shadow(color: .red.opacity(0.35), radius: 6)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.vertical, 24)
-                .padding(.horizontal, 20)
-                .frame(maxWidth: 360)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
-                .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.12), lineWidth: 1))
-                .shadow(color: .black.opacity(0.45), radius: 15, y: 8)
-                .transition(.scale.combined(with: .opacity))
-                .zIndex(8)
+                playbackErrorOverlay(message: errorMsg)
+                    .transition(.opacity)
+                    .zIndex(8)
             }
         }
         .overlay {
@@ -986,6 +1095,100 @@ public struct PlayerView: View {
             resetControlFade()
             NotificationCenter.default.post(name: .playerReclaimKeyboardFocus, object: nil)
         }
+    }
+
+    private var bufferingOverlay: some View {
+        ProgressView()
+            .controlSize(.large)
+            .tint(.white)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .allowsHitTesting(false)
+    }
+
+    private func playbackErrorOverlay(message: String) -> some View {
+        ZStack {
+            // Refined backdrop blur
+            Color.black.opacity(0.25)
+                .ignoresSafeArea()
+
+            VStack(alignment: .center, spacing: 20) {
+                // Icon with refined styling
+                Image(systemName: "exclamationmark.circle.fill")
+                    .font(.system(size: 64))
+                    .symbolRenderingMode(.monochrome)
+                    .foregroundStyle(.secondary)
+                    .opacity(0.6)
+
+                // Content
+                VStack(alignment: .center, spacing: 8) {
+                    Text("This video couldn't be played.")
+                        .font(.system(size: 17, weight: .semibold, design: .default))
+                        .tracking(-0.4)
+                        .foregroundStyle(.primary)
+
+                    Text(message)
+                        .font(.system(size: 15, weight: .regular, design: .default))
+                        .tracking(-0.2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+
+                // Buttons with Apple-style hierarchy
+                VStack(spacing: 12) {
+                    Button(action: { state.dismiss() }) {
+                        Text("OK")
+                            .font(.system(size: 16, weight: .semibold, design: .default))
+                            .tracking(-0.3)
+                            .frame(maxWidth: .infinity)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(AppleBlueButtonStyle())
+                    .keyboardShortcut(.defaultAction)
+
+                    Button(action: { copyPlaybackDiagnostics() }) {
+                        Text("Copy Diagnostics")
+                            .font(.system(size: 15, weight: .regular, design: .default))
+                            .tracking(-0.2)
+                            .frame(maxWidth: .infinity)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(AppleSecondaryButtonStyle())
+                    .keyboardShortcut("c", modifiers: [.command, .shift])
+                }
+            }
+            .padding(28)
+            .frame(width: 340, alignment: .center)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(.regularMaterial)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(
+                        LinearGradient(
+                            gradient: Gradient(colors: [
+                                Color.white.opacity(0.15),
+                                Color.white.opacity(0.05),
+                            ]),
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1
+                    )
+            )
+            .shadow(color: .black.opacity(0.2), radius: 20, x: 0, y: 12)
+            .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 1)
+        }
+    }
+
+    private func copyPlaybackDiagnostics() {
+        let assetURL = (state.player.currentItem?.asset as? AVURLAsset)?.url.absoluteString ?? "No URL"
+        let logText = """
+        Playback Error: \(state.errorMessage ?? "Unknown error")
+        URL: \(assetURL)
+        """
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(logText, forType: .string)
     }
 
     private var subtitleOverlay: some View {
@@ -1044,45 +1247,52 @@ public struct PlayerView: View {
 
                 Spacer()
 
-                // Top-Right Group: Volume + Episodes
+                // Top-Right Group: Stream stats (torrent) + Volume + Episodes
                 HStack(spacing: 12) {
-                    CustomSlider(value: Binding(
-                        get: { Double(state.volume) },
-                        set: { state.setVolume(Float($0)) }
-                    ), range: 0...1)
-                    .frame(width: 80)
+                    streamStatsAccessory()
 
-                    Button {
-                        state.isMuted.toggle()
-                        state.player.isMuted = state.isMuted
-                    } label: {
-                        Image(systemName: state.isMuted ? "speaker.slash.fill" : "speaker.wave.3.fill", variableValue: Double(state.volume))
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.85))
-                            .contentTransition(.symbolEffect(.replace))
-                    }
-                    .buttonStyle(.plain)
-                    
-                    // Episodes Button (TV only)
-                    if !state.episodes.isEmpty {
-                        Divider()
-                            .frame(height: 20)
-                        
+                    HStack(spacing: 12) {
+                        CustomSlider(value: Binding(
+                            get: { Double(state.volume) },
+                            set: { state.setVolume(Float($0)) }
+                        ), range: 0...1)
+                        .frame(width: 80)
+
                         Button {
-                            state.isEpisodesSidebarOpen.toggle()
+                            state.isMuted.toggle()
+                            state.player.isMuted = state.isMuted
                         } label: {
-                            Image(systemName: "list.bullet")
+                            Image(systemName: state.isMuted ? "speaker.slash.fill" : "speaker.wave.3.fill", variableValue: Double(state.volume))
                                 .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(.white.opacity(state.isEpisodesSidebarOpen ? 1.0 : 0.85))
+                                .foregroundStyle(.white.opacity(0.85))
                                 .contentTransition(.symbolEffect(.replace))
                         }
                         .buttonStyle(.plain)
-                        .help("Episodes")
+
+                        // Episodes Button (TV only)
+                        if !state.episodes.isEmpty {
+                            Divider()
+                                .frame(height: 20)
+
+                            Button {
+                                state.isEpisodesSidebarOpen.toggle()
+                                if state.isEpisodesSidebarOpen {
+                                    state.isSourcesSidebarOpen = false
+                                }
+                            } label: {
+                                Image(systemName: "list.bullet")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(.white.opacity(state.isEpisodesSidebarOpen ? 1.0 : 0.85))
+                                    .contentTransition(.symbolEffect(.replace))
+                            }
+                            .buttonStyle(.plain)
+                            .help("Episodes")
+                        }
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .nativeGlassEffect()
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .nativeGlassEffect()
             }
             .padding(.top, 24)
             .padding(.horizontal, 24)
@@ -1129,6 +1339,46 @@ public struct PlayerView: View {
         .animation(.spring(response: 0.08, dampingFraction: 0.92), value: state.showsControls)
     }
 
+    private var scrubberTransportControls: some View {
+        HStack(spacing: 14) {
+            Button {
+                state.seek(by: -15)
+                resetControlFade()
+            } label: {
+                Image(systemName: "gobackward.15")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.9))
+            }
+            .buttonStyle(.plain)
+            .help("Back 15 seconds")
+
+            Button {
+                state.togglePlayback()
+                resetControlFade()
+            } label: {
+                Image(systemName: state.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundStyle(.white)
+                    .contentTransition(.symbolEffect(.replace))
+                    .frame(width: 22)
+            }
+            .buttonStyle(.plain)
+            .help(state.isPlaying ? "Pause" : "Play")
+
+            Button {
+                state.seek(by: 15)
+                resetControlFade()
+            } label: {
+                Image(systemName: "goforward.15")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.9))
+            }
+            .buttonStyle(.plain)
+            .help("Forward 15 seconds")
+        }
+        .padding(.trailing, 4)
+    }
+
     private var bottomHUD: some View {
         HStack(spacing: 0) {
             // Episodes Sidebar (slides in from left)
@@ -1162,6 +1412,8 @@ public struct PlayerView: View {
             HStack(alignment: .center, spacing: 14) {
                 // Wide floating scrubber capsule
                 HStack(alignment: .center, spacing: 12) {
+                    scrubberTransportControls
+
                     Text(formatTime(state.currentTime))
                         .font(.system(size: 11, weight: .semibold))
                         .monospacedDigit()
@@ -1194,8 +1446,8 @@ public struct PlayerView: View {
 
                 // Quality, subtitles, rate, aspect
                 HStack(spacing: 18) {
-                    if state.hasMultiplePlaybackSources {
-                        qualitySourceMenu
+                    if !state.playbackSources.isEmpty {
+                        sourcesSidebarButton
                     }
 
                     Menu {
@@ -1251,44 +1503,28 @@ public struct PlayerView: View {
             }
             }
             .frame(maxWidth: .infinity)
+
+            if state.isSourcesSidebarOpen && !state.playbackSources.isEmpty {
+                sourcesSidebar()
+                    .transition(.move(edge: .trailing))
+            }
         }
         .frame(maxWidth: .infinity)
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: state.isSourcesSidebarOpen)
     }
-    
-    private var qualitySourceMenu: some View {
-        Menu {
-            let grouped = Dictionary(grouping: state.playbackSources, by: \.groupLabel)
-            ForEach(grouped.keys.sorted(), id: \.self) { group in
-                Section(group) {
-                    ForEach(grouped[group] ?? []) { source in
-                        Button {
-                            guard source.id != state.selectedPlaybackSourceID else { return }
-                            resetControlFade()
-                            Task {
-                                await state.onSelectPlaybackSource?(source)
-                            }
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(source.title)
-                                        .lineLimit(2)
-                                    Text(source.detailLine)
-                                        .font(.caption2)
-                                }
-                                Spacer()
-                                if source.id == state.selectedPlaybackSourceID {
-                                    Image(systemName: "checkmark")
-                                }
-                            }
-                        }
-                    }
-                }
+
+    private var sourcesSidebarButton: some View {
+        Button {
+            resetControlFade()
+            state.isSourcesSidebarOpen.toggle()
+            if state.isSourcesSidebarOpen {
+                state.isEpisodesSidebarOpen = false
             }
         } label: {
             ZStack(alignment: .topTrailing) {
                 Image(systemName: "sparkles")
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white.opacity(state.isSwitchingSource ? 0.5 : 0.9))
+                    .foregroundStyle(.white.opacity(state.isSourcesSidebarOpen || state.isSwitchingSource ? 1.0 : 0.9))
                     .symbolEffect(.pulse, isActive: state.isSwitchingSource)
                 if state.isSwitchingSource {
                     ProgressView()
@@ -1298,7 +1534,7 @@ public struct PlayerView: View {
             }
         }
         .buttonStyle(.plain)
-        .help("Switch quality or language")
+        .help("Versions & quality")
         .disabled(state.isSwitchingSource || state.onSelectPlaybackSource == nil)
     }
 
@@ -1857,8 +2093,10 @@ struct CustomSlider: View {
 }
 
 // Native glass effect modifier
-struct NativeGlassEffectModifier: ViewModifier {
-    func body(content: Content) -> some View {
+public struct NativeGlassEffectModifier: ViewModifier {
+    public init() {}
+
+    public func body(content: Content) -> some View {
         if #available(macOS 26.0, *) {
             content.glassEffect()
         } else {
@@ -1869,7 +2107,8 @@ struct NativeGlassEffectModifier: ViewModifier {
     }
 }
 
-extension View {
+public extension View {
+    @ViewBuilder
     func nativeGlassEffect() -> some View {
         modifier(NativeGlassEffectModifier())
     }
@@ -1884,4 +2123,56 @@ struct AirPlayView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: AVRoutePickerView, context: Context) {}
+}
+
+// MARK: - Apple-Style Button Styles
+
+struct AppleBlueButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(.white)
+            .padding(.vertical, 10)
+            .padding(.horizontal, 16)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.accentColor)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(
+                        Color.accentColor.opacity(0.3),
+                        lineWidth: 0.5
+                    )
+            )
+            .opacity(isEnabled ? 1 : 0.6)
+            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .animation(.easeInOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+struct AppleSecondaryButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(.primary)
+            .padding(.vertical, 10)
+            .padding(.horizontal, 16)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.secondary.opacity(0.1))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(
+                        Color.secondary.opacity(0.2),
+                        lineWidth: 0.5
+                    )
+            )
+            .opacity(isEnabled ? 1 : 0.6)
+            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .animation(.easeInOut(duration: 0.12), value: configuration.isPressed)
+    }
 }

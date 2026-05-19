@@ -12,6 +12,8 @@ public final class MovieRecord {
     public var lastWatchedAt: Date?
     public var playbackPositionSeconds: Double
     public var watchedFraction: Double
+    /// Total runtime in seconds (from player when available).
+    public var durationSeconds: Double
 
     public init(
         tmdbId: Int,
@@ -22,7 +24,8 @@ public final class MovieRecord {
         watchlistAddedAt: Date? = nil,
         lastWatchedAt: Date? = nil,
         playbackPositionSeconds: Double = 0,
-        watchedFraction: Double = 0
+        watchedFraction: Double = 0,
+        durationSeconds: Double = 0
     ) {
         self.tmdbId = tmdbId
         self.mediaKind = mediaKind
@@ -33,6 +36,7 @@ public final class MovieRecord {
         self.lastWatchedAt = lastWatchedAt
         self.playbackPositionSeconds = playbackPositionSeconds
         self.watchedFraction = watchedFraction
+        self.durationSeconds = durationSeconds
     }
 }
 

@@ -1,4 +1,5 @@
 import CorePlayer
+import CoreStreaming
 import CoreStorage
 import DesignSystem
 import MovieBoxCore
@@ -33,7 +34,16 @@ struct AppShellView: View {
                 .zIndex(5)
 
             if playerState.isPresented {
-                PlayerView(state: playerState)
+                PlayerView(state: playerState) {
+                    PlaybackSourcesSidebar(
+                        playerState: playerState,
+                        torrents: appServices.playbackCoordinator.torrents
+                    )
+                } streamStatsAccessory: {
+                    if let session = appServices.activeSession {
+                        TorrentStreamStatsAccessory(session: session)
+                    }
+                }
                     .ignoresSafeArea()
                     .opacity(playerState.isPlayerRevealed ? 1 : 0)
                     .animation(MovieBoxMotion.player, value: playerState.isPlayerRevealed)

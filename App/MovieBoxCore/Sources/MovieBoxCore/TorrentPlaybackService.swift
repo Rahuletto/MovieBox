@@ -4,6 +4,7 @@ import CoreTorrent
 import Foundation
 
 public enum TorrentPlaybackService {
+  @MainActor private static var bufferingMonitorTask: Task<Void, Never>?
   public struct Request: Sendable {
     let torrent: TorrentResult
     let allTorrents: [TorrentResult]
@@ -11,6 +12,8 @@ public enum TorrentPlaybackService {
     let subtitleURL: URL?
     let playback: PlaybackSettings
     let episodeTitle: String?
+    let displayTitle: String?
+    let resumePosition: Double?
     let waitTimeout: TimeInterval
 
     public init(
@@ -20,6 +23,8 @@ public enum TorrentPlaybackService {
       subtitleURL: URL? = nil,
       playback: PlaybackSettings,
       episodeTitle: String? = nil,
+      displayTitle: String? = nil,
+      resumePosition: Double? = nil,
       waitTimeout: TimeInterval = 180
     ) {
       self.torrent = torrent
@@ -28,6 +33,8 @@ public enum TorrentPlaybackService {
       self.subtitleURL = subtitleURL
       self.playback = playback
       self.episodeTitle = episodeTitle
+      self.displayTitle = displayTitle
+      self.resumePosition = resumePosition
       self.waitTimeout = waitTimeout
     }
   }
@@ -65,7 +72,9 @@ public enum TorrentPlaybackService {
       subtitleURL: request.subtitleURL,
       subtitleAppearance: request.playback.appearance,
       subtitleFontSize: request.playback.fontSize,
-      episodeTitle: request.episodeTitle
+      episodeTitle: request.episodeTitle,
+      displayTitle: request.displayTitle,
+      resumePosition: request.resumePosition
     )
   }
 
@@ -77,6 +86,8 @@ public enum TorrentPlaybackService {
     subtitleURL: URL?,
     playback: PlaybackSettings,
     episodeTitle: String?,
+    displayTitle: String? = nil,
+    resumePosition: Double? = nil,
     appServices: AppServices,
     playerState: PlayerState,
     onSessionStarted: @MainActor (TorrentStreamSession) -> Void = { _ in },
@@ -95,6 +106,15 @@ public enum TorrentPlaybackService {
       "playBestAvailable movieId=\(movieId) candidates=\(ordered.count) maxAttempts=\(maxAttempts) waitTimeout=\(Int(waitTimeout))s subtitle=\(subtitleURL != nil)"
     )
 
+    playerState.beginBufferingPlayback(
+      title: ordered.first?.title ?? "Playing",
+      movieId: movieId,
+      subtitleAppearance: playback.appearance,
+      subtitleFontSize: playback.fontSize,
+      episodeTitle: episodeTitle,
+      displayTitle: displayTitle
+    )
+
     let coordinator = appServices.beginPlaybackCoordinator()
     var lastError: String?
     var attempt = 0
@@ -108,8 +128,10 @@ public enum TorrentPlaybackService {
       let session = await coordinator.startSession(for: torrent)
       onSessionStarted(session)
       appServices.registerActiveSession(session)
+      startBufferingMonitor(session: session, playerState: playerState)
 
       await session.waitForPlayback(timeout: waitTimeout)
+      stopBufferingMonitor()
 
       if case .failed(let err) = session.state {
         PlaybackLog.warn("attempt \(attempt) failed — \(err)")
@@ -132,14 +154,50 @@ public enum TorrentPlaybackService {
         subtitleURL: subtitleURL,
         subtitleAppearance: playback.appearance,
         subtitleFontSize: playback.fontSize,
-        episodeTitle: episodeTitle
+        episodeTitle: episodeTitle,
+        displayTitle: displayTitle,
+        resumePosition: resumePosition
       )
       PlaybackLog.log("playBestAvailable succeeded on attempt \(attempt)")
       return
     }
 
+    stopBufferingMonitor()
+    playerState.dismiss()
+
     let summary = lastError ?? "Could not prepare any release for streaming. Try another version."
     PlaybackLog.error("playBestAvailable exhausted — \(summary)")
     throw TorrentPlaybackError.streamingFailed(summary)
+  }
+
+  @MainActor
+  private static func startBufferingMonitor(session: TorrentStreamSession, playerState: PlayerState) {
+    bufferingMonitorTask?.cancel()
+    bufferingMonitorTask = Task { @MainActor in
+      while !Task.isCancelled {
+        switch session.state {
+        case .preparing:
+          playerState.updateBufferingDetail(
+            "Connecting… \(session.peerCount) peers (swarm \(session.swarmSeeders) seeders)"
+          )
+        case .buffering(let progress):
+          playerState.updateBufferingDetail(
+            "\(session.peerCount) peers · \(Int(progress * 100))% buffered"
+          )
+        case .ready:
+          playerState.updateBufferingDetail("Starting playback…")
+          return
+        case .failed, .cancelled, .idle:
+          return
+        }
+        try? await Task.sleep(for: .milliseconds(350))
+      }
+    }
+  }
+
+  @MainActor
+  private static func stopBufferingMonitor() {
+    bufferingMonitorTask?.cancel()
+    bufferingMonitorTask = nil
   }
 }

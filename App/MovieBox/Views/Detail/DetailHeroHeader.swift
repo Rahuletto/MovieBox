@@ -47,8 +47,8 @@ struct DetailHeroHeader: View {
 
                       if !detail.movie.overview.isEmpty {
                           Text(detail.movie.overview)
-                              .font(.system(size: 16))
-                              .foregroundStyle(.white.opacity(0.9))
+                              .font(.subheadline)
+                              .foregroundStyle(.white.opacity(0.88))
                               .lineLimit(4)
                               .frame(maxWidth: 640, alignment: .leading)
                       }

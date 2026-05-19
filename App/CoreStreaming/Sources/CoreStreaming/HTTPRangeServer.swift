@@ -16,6 +16,7 @@ public final class HTTPRangeServer {
     private var contentType = "application/octet-stream"
 
     private static let maxRangeBytes = 2 * 1024 * 1024
+    private static let readTimeoutSeconds: UInt64 = 12
 
     public init() {}
 
@@ -165,7 +166,11 @@ public final class HTTPRangeServer {
         }
 
         let parts = requestLine.components(separatedBy: " ")
-        guard parts.count >= 2, parts[0] == "GET" else {
+        guard parts.count >= 2 else {
+            return HTTPResponse(status: 400, body: "Bad Request")
+        }
+        let method = parts[0].uppercased()
+        guard method == "GET" || method == "HEAD" else {
             return HTTPResponse(status: 405, body: "Method Not Allowed")
         }
 
@@ -175,6 +180,7 @@ public final class HTTPRangeServer {
         var bodyData = Data()
         var contentRange: String?
         var contentLength = mediaLength
+        var retryAfterSeconds: Int?
 
         if let rangeHeader = lines.first(where: { $0.lowercased().hasPrefix("range:") }) {
             let rangeParts = rangeHeader.components(separatedBy: "=")
@@ -182,7 +188,7 @@ public final class HTTPRangeServer {
                 let byteRange = rangeParts[1]
                 let rangeComponents = byteRange.components(separatedBy: "-")
                 if let startStr = rangeComponents.first, let mediaStart = Int64(startStr) {
-                    let mediaEnd: Int64
+                    var mediaEnd: Int64
                     if let endStr = rangeComponents.last, !endStr.isEmpty, let parsedEnd = Int64(endStr) {
                         mediaEnd = min(parsedEnd, mediaLength - 1)
                     } else {
@@ -193,9 +199,16 @@ public final class HTTPRangeServer {
                         return HTTPResponse(status: 416, body: "Range Not Satisfiable")
                     }
 
+                    // AVPlayer often sends open-ended ranges (e.g. bytes=0-). Cap the span
+                    // instead of 416 — oversized ranges surface as "unknown error" in AVFoundation.
+                    let maxSpan = Int64(Self.maxRangeBytes)
+                    if mediaEnd - mediaStart + 1 > maxSpan {
+                        mediaEnd = mediaStart + maxSpan - 1
+                    }
+
                     let span = mediaEnd &- mediaStart
                     let spanPlusOne = span &+ 1
-                    guard spanPlusOne > 0, spanPlusOne <= Int64(Self.maxRangeBytes) else {
+                    guard spanPlusOne > 0 else {
                         return HTTPResponse(status: 416, body: "Range Not Satisfiable")
                     }
                     var length = Int(spanPlusOne)
@@ -203,29 +216,44 @@ public final class HTTPRangeServer {
                     let torrentOffset = streamByteOffset + mediaStart
 
                     do {
-                        bodyData = try await pieceStore.read(offset: torrentOffset, length: length)
+                        bodyData = try await readBytes(
+                            pieceStore: pieceStore,
+                            offset: torrentOffset,
+                            length: length
+                        )
                         let servedEnd = mediaStart + Int64(bodyData.count) - 1
                         statusCode = 206
                         contentRange = "bytes \(mediaStart)-\(servedEnd)/\(mediaLength)"
                         contentLength = Int64(bodyData.count)
+                    } catch is HTTPRangeReadTimeout {
+                        return HTTPResponse(status: 503, body: "Buffering", retryAfterSeconds: 1)
                     } catch {
                         TorrentLog.warn("[HTTPRangeServer] Range read failed: \(error.localizedDescription)")
                         return HTTPResponse(status: 500, body: "Internal Server Error")
                     }
                 }
             }
-        } else {
+        } else if method == "GET" {
             let headAvailable = await pieceStore.streamHeadContiguousBytes()
             let length = min(512 * 1024, Int(mediaLength), Int(headAvailable))
             guard length > 0 else {
                 return HTTPResponse(status: 503, body: "Buffering")
             }
             do {
-                bodyData = try await pieceStore.read(offset: streamByteOffset, length: length)
+                bodyData = try await readBytes(
+                    pieceStore: pieceStore,
+                    offset: streamByteOffset,
+                    length: length
+                )
                 contentLength = Int64(bodyData.count)
+            } catch is HTTPRangeReadTimeout {
+                return HTTPResponse(status: 503, body: "Buffering", retryAfterSeconds: 1)
             } catch {
                 return HTTPResponse(status: 500, body: "Internal Server Error")
             }
+        } else {
+            // HEAD — metadata probe for AVPlayer; no body required.
+            contentLength = mediaLength
         }
 
         var headers = [
@@ -235,6 +263,9 @@ public final class HTTPRangeServer {
             "Accept-Ranges: bytes",
             "Connection: close",
         ]
+        if statusCode == 503, let retryAfterSeconds {
+            headers.append("Retry-After: \(retryAfterSeconds)")
+        }
 
         if let contentRange {
             headers.append("Content-Range: \(contentRange)")
@@ -246,9 +277,28 @@ public final class HTTPRangeServer {
         }
         var response = Data()
         response.append(headerData)
-        response.append(bodyData)
+        if method == "GET" {
+            response.append(bodyData)
+        }
 
-        return HTTPResponse(status: statusCode, data: response)
+        return HTTPResponse(status: statusCode, data: response, retryAfterSeconds: retryAfterSeconds)
+    }
+
+    private func readBytes(pieceStore: PieceStore, offset: Int64, length: Int) async throws -> Data {
+        try await withThrowingTaskGroup(of: Data.self) { group in
+            group.addTask {
+                try await pieceStore.read(offset: offset, length: length)
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(Self.readTimeoutSeconds))
+                throw HTTPRangeReadTimeout()
+            }
+            guard let data = try await group.next() else {
+                throw HTTPRangeReadTimeout()
+            }
+            group.cancelAll()
+            return data
+        }
     }
 
     private func sendResponse(connection: NWConnection, response: HTTPResponse) {
@@ -258,17 +308,28 @@ public final class HTTPRangeServer {
     }
 }
 
+private struct HTTPRangeReadTimeout: Error {}
+
 struct HTTPResponse {
     let status: Int
     let data: Data
 
-    init(status: Int, body: String) {
+    init(status: Int, body: String, retryAfterSeconds: Int? = nil) {
         self.status = status
-        let raw = "HTTP/1.1 \(status) \(HTTPResponse.statusMessage(for: status))\r\nContent-Length: \(body.count)\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n\(body)"
+        var headerLines = [
+            "HTTP/1.1 \(status) \(HTTPResponse.statusMessage(for: status))",
+            "Content-Length: \(body.count)",
+            "Content-Type: text/plain",
+            "Connection: close",
+        ]
+        if let retryAfterSeconds {
+            headerLines.append("Retry-After: \(retryAfterSeconds)")
+        }
+        let raw = headerLines.joined(separator: "\r\n") + "\r\n\r\n" + body
         self.data = raw.data(using: .utf8) ?? Data()
     }
 
-    init(status: Int, data: Data) {
+    init(status: Int, data: Data, retryAfterSeconds: Int? = nil) {
         self.status = status
         self.data = data
     }
@@ -280,6 +341,7 @@ struct HTTPResponse {
         case 400: "Bad Request"
         case 405: "Method Not Allowed"
         case 416: "Range Not Satisfiable"
+        case 503: "Service Unavailable"
         case 500: "Internal Server Error"
         default: "Unknown"
         }

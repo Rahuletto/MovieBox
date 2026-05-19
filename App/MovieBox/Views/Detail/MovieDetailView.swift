@@ -26,8 +26,6 @@ struct MovieDetailView: View {
     @State private var isLoading = false
     @State private var isLoadingSubtitles = false
     @State private var subtitleFileURL: URL?
-    @State private var showTrailer = false
-    @State private var trailerURL: URL?
     @State private var activeStreamSession: TorrentStreamSession?
     @State private var isPreparingStream = false
     /// Cancels an in-flight `playBestTorrent` attempt when the user starts another play.
@@ -110,25 +108,6 @@ struct MovieDetailView: View {
             if let errorMessage {
                 DetailErrorOverlay(message: errorMessage, onRetry: { Task { await load() } })
                     .zIndex(10)
-            }
-
-            // Preparing Stream Glass Overlay
-            if isPreparingStream, let session = activeStreamSession {
-                GlassStreamOverlay(session: session) {
-                    Task {
-                        prepareStreamTask?.cancel()
-                        await session.cancel()
-                    }
-                    isPreparingStream = false
-                }
-                .transition(.opacity)
-                .zIndex(20)
-                .onChange(of: session.state) { _, newState in
-                    if case .failed(let message) = newState {
-                        isPreparingStream = false
-                        errorMessage = message
-                    }
-                }
             }
 
             // (Loading state is rendered inline inside MainContentView — no duplicate overlay here.)
@@ -258,9 +237,17 @@ struct MovieDetailView: View {
     }
 
     private var heroPlayButtonTitle: String {
-        guard kind == .tv else { return "Play Now" }
-        guard let episode = selectedTVEpisode else { return "Select Episode" }
-        return "Play S\(episode.seasonNumber) E\(episode.episodeNumber)"
+        if kind == .tv {
+            guard let episode = selectedTVEpisode else { return "Select Episode" }
+            if WatchProgressStore.resumePosition(for: movieId, in: storedMovies) != nil {
+                return "Continue S\(episode.seasonNumber) E\(episode.episodeNumber)"
+            }
+            return "Play S\(episode.seasonNumber) E\(episode.episodeNumber)"
+        }
+        if WatchProgressStore.resumePosition(for: movieId, in: storedMovies) != nil {
+            return "Continue Watching"
+        }
+        return "Play Now"
     }
 
     private func selectEpisode(_ episode: TVEpisode) async {
@@ -391,26 +378,33 @@ struct MovieDetailView: View {
         
         Task {
             do {
-                guard let mode = settings.first?.metadataMode else { return }
+                guard let mode = settings.first?.metadataMode else {
+                    await MainActor.run { isPreparingStream = false }
+                    return
+                }
                 let client = MetadataClient(mode: mode)
                 let resolvedURL = try await client.resolveTrailer(key: trailerKey)
                 
                 await MainActor.run {
                     isPreparingStream = false
+                    LogStore.shared.log(.info, category: "playback", "Trailer resolved — playing in AVPlayer")
                     playerState.load(
                         url: resolvedURL,
                         title: detail?.movie.title ?? "",
                         movieId: movieId,
                         subtitleURL: nil,
                         subtitleAppearance: settings.first?.subtitleAppearance ?? .cinematic,
-                subtitleFontSize: settings.first?.subtitleFontSizePoints ?? 20,
-                        episodeTitle: "Trailer"
+                        subtitleFontSize: settings.first?.subtitleFontSizePoints ?? 20,
+                        episodeTitle: "Trailer",
+                        displayTitle: detail?.movie.title
                     )
                 }
             } catch {
                 await MainActor.run {
                     isPreparingStream = false
-                    errorMessage = "Failed to resolve trailer stream: \(error.localizedDescription)"
+                    LogStore.shared.log(.error, category: "playback", "Trailer resolve failed — \(error.localizedDescription)")
+                    errorMessage = (error as? LocalizedError)?.errorDescription
+                        ?? "Couldn't start the trailer. Try another clip or check your connection."
                 }
             }
         }
@@ -437,7 +431,6 @@ struct MovieDetailView: View {
             "Play Now tapped — movieId=\(movieId) title=\"\(detail?.movie.title ?? "?")\" torrents=\(torrents.count) seeded=\(seeded) kind=\(kind.rawValue)"
         )
 
-        isPreparingStream = true
         prepareStreamTask?.cancel()
 
         prepareStreamTask = Task {
@@ -455,12 +448,24 @@ struct MovieDetailView: View {
             }
 
             do {
+                if let movie = detail?.movie {
+                    WatchProgressStore.ensureRecord(
+                        movie: movie,
+                        kind: kind,
+                        genres: movie.genreIds,
+                        in: modelContext,
+                        existing: storedMovies
+                    )
+                }
+
                 try await TorrentPlaybackService.playBestAvailable(
                     torrents: torrents,
                     movieId: movieId,
                     subtitleURL: subtitleFileURL,
                     playback: playback,
                     episodeTitle: episodeTitle,
+                    displayTitle: detail?.movie.title,
+                    resumePosition: WatchProgressStore.resumePosition(for: movieId, in: storedMovies),
                     appServices: appServices,
                     playerState: playerState,
                     onSessionStarted: { session in
@@ -470,17 +475,20 @@ struct MovieDetailView: View {
                     waitTimeout: 90
                 )
                 LogStore.shared.log(.info, category: "playback", "Play Now finished — player should be visible")
-                withAnimation(MovieBoxMotion.player) {
-                    isPreparingStream = false
-                }
             } catch {
                 if Task.isCancelled {
                     LogStore.shared.log(.info, category: "playback", "Play Now task cancelled")
+                    playerState.dismiss()
                 } else {
                     LogStore.shared.log(.error, category: "playback", "Play Now failed — \(error.localizedDescription)")
+                    if playerState.isPresented {
+                        playerState.errorMessage = error.localizedDescription
+                        playerState.isBuffering = false
+                        playerState.bufferingDetail = nil
+                    } else {
+                        errorMessage = error.localizedDescription
+                    }
                 }
-                isPreparingStream = false
-                errorMessage = error.localizedDescription
             }
         }
     }

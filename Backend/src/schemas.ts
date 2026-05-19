@@ -90,13 +90,14 @@ export const ImageProxyQuerySchema = z.object({
 })
 
 export const PipedStreamResponseSchema = z.object({
-  hls: z.string().url().optional(),
-  hlsUrl: z.string().url().optional(),
+  hls: z.string().min(1).optional(),
+  hlsUrl: z.string().min(1).optional(),
   videoStreams: z
     .array(
       z.object({
-        url: z.string().url().optional(),
+        url: z.string().min(1).optional(),
         format: z.string().optional(),
+        quality: z.string().optional(),
       })
     )
     .optional(),

@@ -147,17 +147,6 @@ struct TVEpisodesSection: View {
             }
             .scrollIndicators(.hidden)
             .frame(height: TVEpisodeCardMetrics.height)
-            .mask(
-                LinearGradient(
-                    gradient: Gradient(stops: [
-                        .init(color: .black, location: 0),
-                        .init(color: .black, location: 0.75),
-                        .init(color: .clear, location: 1)
-                    ]),
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-            )
         }
     }
 
