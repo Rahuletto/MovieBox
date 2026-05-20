@@ -28,7 +28,7 @@ import { buildTMDBUpstreamURL, tmdbPathFromRequest } from './tmdb-upstream'
 import { kvGet, kvGetBuffer, kvPut } from './kv-cache'
 import {
   buildRottenTomatoesStatsFromOmdb,
-  fetchRottenTomatoesStats,
+  fetchRottenTomatoesBundle,
   type RottenTomatoesStats,
 } from './rotten-tomatoes'
 
@@ -702,8 +702,8 @@ app.get('/api/title/:kind/:id', async (c) => {
     if (route instanceof Response) return route
     const { kind, id } = route
 
-    // v3: bundles include RT Tomatometer breakdown + TMDB content advisories.
-    const cacheKey = `title:v3:${kind}:${id}`
+    // v6: refresh bundle after RT trailer selector accuracy fix.
+    const cacheKey = `title:v6:${kind}:${id}`
     const cached = await kvGet(c.env.MOVIEBOX_CACHE,cacheKey)
     if (cached) {
       return c.json(JSON.parse(cached), {
@@ -755,13 +755,13 @@ app.get('/api/title/:kind/:id', async (c) => {
     })()
 
     const rtTask = title
-      ? fetchRottenTomatoesStats(c.env.MOVIEBOX_CACHE, {
+      ? fetchRottenTomatoesBundle(c.env.MOVIEBOX_CACHE, {
           kind: kind === 'movie' ? 'movie' : 'tv',
           title,
           year,
           imdbId: extIds.imdb_id ?? null,
         })
-      : Promise.resolve(null)
+      : Promise.resolve({ stats: null, trailerHls: null })
 
     // For TV with tvdb_id we can already start fanart in parallel; for movies we
     // need the imdb_id, which may come from OMDB. So run a two-track race:
@@ -783,7 +783,7 @@ app.get('/api/title/:kind/:id', async (c) => {
       return null
     })()
 
-    const [omdb, fanart, rtStatsFromWeb] = await Promise.all([omdbTask, fanartTask, rtTask])
+    const [omdb, fanart, rtBundle] = await Promise.all([omdbTask, fanartTask, rtTask])
     const omdbImdbId = extIds.imdb_id ?? (omdb?.Response === 'True' ? (omdb.imdbID ?? null) : null)
 
     const logoUrl = fanart ? pickBestLogo(fanart) : null
@@ -804,7 +804,11 @@ app.get('/api/title/:kind/:id', async (c) => {
     const omdbRuntime = omdbOk ? parseOmdbRuntime(omdb.Runtime) : null
     const omdbRtPercent = omdbOk ? findOmdbRating(omdb.Ratings, 'Rotten Tomatoes') : null
     const rtStats: RottenTomatoesStats | null =
-      rtStatsFromWeb ?? buildRottenTomatoesStatsFromOmdb(omdbRtPercent)
+      rtBundle.stats ?? buildRottenTomatoesStatsFromOmdb(omdbRtPercent)
+
+    if (rtBundle.trailerHls) {
+      detail.moviebox_trailer_rt_hls = rtBundle.trailerHls
+    }
 
     if (omdbOk || rtStats) {
       detail.moviebox_enrichment = {

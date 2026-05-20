@@ -18,7 +18,8 @@
     "smoke": "node scripts/smoke-worker.mjs",
     "smoke:dev": "MOVIEBOX_WORKER_URL=http://127.0.0.1:8787 node scripts/smoke-worker.mjs",
     "smoke:prod": "MOVIEBOX_WORKER_URL=https://moviebox-backend.rahulmarban.workers.dev node scripts/smoke-worker.mjs",
-    "smoke:local": "MOVIEBOX_WORKER_URL=http://127.0.0.1:8787 node scripts/smoke-worker.mjs"
+    "smoke:local": "MOVIEBOX_WORKER_URL=http://127.0.0.1:8787 node scripts/smoke-worker.mjs",
+    "verify:rt": "node scripts/verify-rotten-tomatoes.mjs"
   },
   "dependencies": {
     "@zip.js/zip.js": "^2.8.26",
