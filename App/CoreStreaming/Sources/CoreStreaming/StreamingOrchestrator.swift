@@ -159,22 +159,27 @@ public final class StreamingOrchestrator: @unchecked Sendable {
             }
         }
 
-        // For all other containers (non-fast-start MP4, MKV, WebM, etc.):
-        // Return true as soon as the head satisfies the minimum buffer. AVPlayer will
-        // issue HTTP range requests for the moov/index tail as it needs them, and those
-        // are served by HTTPRangeServer once those pieces are downloaded (they remain
-        // prioritised in the background by PieceManager). Blocking here until ALL tail
-        // pieces are verified caused the 45-55% stall and 180s timeout.
-        let verifiedHead = await pieceStore.verifiedMediaBytesFromStart()
-        let effectiveHead = max(verifiedHead, headBytes)
-        if effectiveHead >= 64 * 1024 {
-            TorrentLog.info(
-                "[Streaming] Tail probe deferred — \(effectiveHead / 1024) KB head ready, tail will load on demand"
-            )
-            return true
+        // For all other containers (non-fast-start MP4, MKV, WebM, etc.) AVPlayer
+        // cannot parse the asset until it can read the trailing index (moov/cues).
+        // The very first thing AVPlayer does after `replaceCurrentItem` is issue a
+        // suffix range request (e.g. `bytes=-N`); if those bytes aren't on disk the
+        // local HTTP server has to block while peers deliver them, and AVPlayer's
+        // internal asset-loader timeout fires after ~15–20 s with NSURLErrorTimedOut
+        // (-1001).
+        //
+        // We only require the *last* piece of the file (the one that satisfies a
+        // suffix range immediately). Any additional tail bytes AVPlayer needs to
+        // walk the moov/cues are still requested in priority order by the bootstrap
+        // priority in PieceManager and will be served by HTTPRangeServer as soon as
+        // those pieces arrive — but AVPlayer can now begin parsing right away.
+        let lastPiece = min(target.lastPieceIndex, metadata.pieceCount - 1)
+        guard await pieceStore.hasPiece(lastPiece) else {
+            return false
         }
 
-        return false
+        let verifiedHead = await pieceStore.verifiedMediaBytesFromStart()
+        let effectiveHead = max(verifiedHead, headBytes)
+        return effectiveHead >= 64 * 1024
     }
 
     public func streamTailPieceCount() async -> Int {
