@@ -74,7 +74,10 @@ struct GenreResultsView: View {
                     MoviePosterCard(
                         title: movie.title,
                         subtitle: movie.releaseDate,
-                        posterURL: MetadataClient().imageURL(path: movie.posterPath)
+                        posterURL: MetadataClient().posterDisplayURL(
+                            posterPath: movie.posterPath,
+                            backdropPath: movie.backdropPath
+                        )
                     ) {
                         router.showDetail(id: movie.id, kind: kind)
                     }

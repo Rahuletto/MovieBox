@@ -18,21 +18,24 @@ struct CatalogView: View {
     @State private var extraSections: [HomeExtraSection] = []
     @State private var baseExtraSections: [HomeExtraSection] = []
     @State private var errorMessage: String?
-    @State private var isLoading = false
+    @State private var isCatalogRefreshing = false
 
-    
+    private var isCatalogContentVisible: Bool {
+        rows.values.contains { !$0.isEmpty } || extraSections.contains { !$0.items.isEmpty }
+    }
 
     var body: some View {
         ZStack {
             // Main content scroll view
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 36) {
-                    
-                    if isLoading && rows.isEmpty {
+
+                    if isCatalogRefreshing && !isCatalogContentVisible && errorMessage == nil {
                         ProgressView()
-                            .controlSize(.large)
-                            .frame(maxWidth: .infinity, minHeight: 260)
-                    } else if rows.values.allSatisfy(\.isEmpty) {
+                            .controlSize(.regular)
+                            .frame(maxWidth: .infinity, minHeight: 120)
+                            .padding(.top, 40)
+                    } else if !isCatalogRefreshing && rows.values.allSatisfy(\.isEmpty) && extraSections.allSatisfy(\.items.isEmpty) {
                         ContentUnavailableView(
                             "Nothing here yet",
                             systemImage: kind == .movie ? "film" : "tv",
@@ -53,7 +56,10 @@ struct CatalogView: View {
                                     MoviePosterCard(
                                         title: movie.title,
                                         subtitle: movie.releaseDate,
-                                        posterURL: MetadataClient().imageURL(path: movie.posterPath),
+                                        posterURL: MetadataClient().posterDisplayURL(
+                                            posterPath: movie.posterPath,
+                                            backdropPath: movie.backdropPath
+                                        ),
                                             onHover: {
                                             if let mode = MetadataSettings.mode(from: settings) {
                                                 Task { await Prefetcher.shared.prefetchDetail(id: movie.id, kind: kind, mode: mode) }
@@ -72,7 +78,10 @@ struct CatalogView: View {
                                     MoviePosterCard(
                                         title: movie.title,
                                         subtitle: movie.releaseDate,
-                                        posterURL: MetadataClient().imageURL(path: movie.posterPath),
+                                        posterURL: MetadataClient().posterDisplayURL(
+                                            posterPath: movie.posterPath,
+                                            backdropPath: movie.backdropPath
+                                        ),
                                         onHover: {
                                             if let mode = MetadataSettings.mode(from: settings) {
                                                 Task { await Prefetcher.shared.prefetchDetail(id: movie.id, kind: kind, mode: mode) }
@@ -89,14 +98,6 @@ struct CatalogView: View {
                 .padding(.bottom, 28)
             }
             .blur(radius: errorMessage != nil ? 18 : 0)
-            .opacity(rows.isEmpty ? 0 : 1)
-            
-            // Large loading (if rows is empty)
-            if isLoading && rows.isEmpty {
-                ProgressView()
-                    .controlSize(.large)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
 
             // Fixed centered Error card floating on a blurred panel
             if let errorMessage {
@@ -144,14 +145,18 @@ struct CatalogView: View {
             errorMessage = "Open Settings and configure metadata access first."
             return
         }
-        isLoading = true
+        isCatalogRefreshing = true
         errorMessage = nil
-        defer { isLoading = false }
+        rows = [:]
+        baseExtraSections = []
+        extraSections = []
+        defer { isCatalogRefreshing = false }
         do {
-            let payload = try await CatalogLoader.loadCatalogPayload(mode: mode, kind: kind)
-            rows = payload.rows
-            baseExtraSections = payload.extraSections
-            await refreshPersonalizedSections()
+            for try await payload in CatalogLoader.loadCatalogPayloadStream(mode: mode, kind: kind) {
+                rows = payload.rows
+                baseExtraSections = payload.extraSections
+                await refreshPersonalizedSections()
+            }
         } catch {
             if let urlError = error as? URLError, urlError.code == .cancelled {
                 return

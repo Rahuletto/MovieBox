@@ -10,7 +10,6 @@ struct PersonDetailView: View {
     @State private var detail: PersonDetail?
     @State private var isLoading = false
     @State private var errorMessage: String?
-    @State private var isBiographyExpanded = false
 
     private let personId: Int
     private let onBack: () -> Void
@@ -28,8 +27,7 @@ struct PersonDetailView: View {
             ScrollView {
                 PersonDetailContentView(
                     detail: detail,
-                    isLoading: isLoading,
-                    isBiographyExpanded: $isBiographyExpanded
+                    isLoading: isLoading
                 )
             }
             .frame(maxWidth: .infinity)

@@ -14,7 +14,7 @@ struct CastSection: View {
             Text("Cast & Crew")
                 .font(MovieBoxTypography.title)
                 .foregroundStyle(.primary)
-                .padding(.horizontal, 24)
+                .padding(.horizontal, DetailLayoutMetrics.shelfSideInset)
 
             ScrollView(.horizontal) {
                 HStack(spacing: 20) {
@@ -43,7 +43,7 @@ struct CastSection: View {
                         .disabled(onSelectMember == nil)
                     }
                 }
-                .padding(.horizontal, 24)
+                .padding(.horizontal, DetailLayoutMetrics.shelfSideInset)
             }
             .scrollIndicators(.hidden)
             .frame(maxWidth: .infinity, alignment: .leading)

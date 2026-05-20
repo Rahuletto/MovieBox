@@ -11,6 +11,7 @@ struct PersonKnownForSection: View {
             Text("Known for")
                 .font(MovieBoxTypography.title)
                 .foregroundStyle(.primary)
+                .padding(.horizontal, DetailLayoutMetrics.shelfSideInset)
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 14) {
@@ -18,13 +19,17 @@ struct PersonKnownForSection: View {
                         MoviePosterCard(
                             title: credit.title,
                             subtitle: credit.roleLine.isEmpty ? credit.displayYear : "\(credit.displayYear) · \(credit.roleLine)",
-                            posterURL: MetadataClient().imageURL(path: credit.posterPath)
+                            posterURL: MetadataClient().posterDisplayURL(
+                                posterPath: credit.posterPath,
+                                backdropPath: credit.backdropPath
+                            )
                         ) {
                             router.showDetail(id: credit.id, kind: credit.mediaKind)
                         }
                     }
                 }
-                .padding(.trailing, 100)
+                .padding(.horizontal, DetailLayoutMetrics.shelfSideInset)
+                .padding(.bottom, 10)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }

@@ -178,8 +178,9 @@ public struct MediaVideo: Identifiable, Sendable, Hashable, Codable {
         URL(string: "https://www.youtube.com/watch?v=\(key)")
     }
 
+    /// YouTube still image for the clip card. Uses **sddefault** (640×480) so previews never match the old tiny `mqdefault` (~320×180) tiles.
     public var thumbnailURL: URL? {
-        URL(string: "https://img.youtube.com/vi/\(key)/mqdefault.jpg")
+        URL(string: "https://img.youtube.com/vi/\(key)/sddefault.jpg")
     }
 
     public var normalizedType: String { type.lowercased() }
@@ -625,8 +626,8 @@ public actor MetadataClient {
         await TrailerStreamRelay.shared.stop()
 
         // Native, on-device extraction of playable streams from YouTube.
-        // Choose quality based on current throughput with an "edge-up" rule:
-        // if bandwidth suggests 720p, try 1080p; if 360p, try 480p.
+        // Choose quality based on current throughput with an "edge-up" rule.
+        // Sub-480p muxed streams are only used when nothing ≥480p is available.
         let streams = try await YouTube(videoID: key).streams
         let playableMuxed = Array(streams
             .filterVideoAndAudio()
@@ -643,17 +644,19 @@ public actor MetadataClient {
                 score: streamScore(stream.url)
             )
         }
-        let throughputMbps = await measuredNetworkMbps(probeURL: candidates.max(by: { $0.score < $1.score })?.url)
+        /// Never prefer sub-480p muxed streams when any ≥480p option exists (YouTube still serves itag 18 on some titles).
+        let tierPool = candidatesAtLeastMinimumDisplayTier(candidates)
+        let throughputMbps = await measuredNetworkMbps(probeURL: tierPool.max(by: { $0.score < $1.score })?.url)
 
         if let throughputMbps {
             let suggested = tierForThroughput(mbps: throughputMbps)
             let target = edgeUpTier(from: suggested)
-            if let adaptivePick = pickBestCandidate(candidates, targetTier: target) {
+            if let adaptivePick = pickBestCandidate(tierPool, targetTier: target) {
                 return adaptivePick.url
             }
         }
 
-        if let scoredBest = candidates.max(by: { $0.score < $1.score }) {
+        if let scoredBest = tierPool.max(by: { $0.score < $1.score }) {
             return scoredBest.url
         }
 
@@ -666,9 +669,15 @@ public actor MetadataClient {
         let score: Int
     }
 
+    private func candidatesAtLeastMinimumDisplayTier(_ candidates: [TrailerStreamCandidate]) -> [TrailerStreamCandidate] {
+        let minimumTier = 480
+        let filtered = candidates.filter { $0.tier >= minimumTier }
+        return filtered.isEmpty ? candidates : filtered
+    }
+
     private func tierForThroughput(mbps: Double) -> Int {
         switch mbps {
-        case ..<0.9: 360
+        case ..<0.9: 480
         case ..<1.8: 480
         case ..<3.8: 720
         case ..<8.0: 1080
@@ -718,8 +727,8 @@ public actor MetadataClient {
         if quality.contains("hd1080") { return 1080 }
         if quality.contains("hd720") { return 720 }
         if quality.contains("large") { return 480 }
-        if quality.contains("medium") { return 360 }
-        return 360
+        if quality.contains("medium") { return 480 }
+        return 480
     }
 
     private func streamScore(_ url: URL) -> Int {
@@ -847,6 +856,11 @@ public actor MetadataClient {
     public nonisolated func imageURL(path: String?, width: Int = 342) -> URL? {
         guard let path else { return nil }
         return URL(string: "https://image.tmdb.org/t/p/w\(width)\(path)")
+    }
+
+    /// Poster-shaped UI: prefer poster art, fall back to backdrop when poster is missing (common for some TV / catalog entries).
+    public nonisolated func posterDisplayURL(posterPath: String?, backdropPath: String?, width: Int = 342) -> URL? {
+        imageURL(path: posterPath, width: width) ?? imageURL(path: backdropPath, width: width)
     }
 
     private func request<T: Decodable & Sendable>(path: String, queryItems: [URLQueryItem] = []) async throws -> T {

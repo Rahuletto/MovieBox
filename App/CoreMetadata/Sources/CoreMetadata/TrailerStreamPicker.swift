@@ -62,15 +62,30 @@ public enum TrailerStreamPicker {
 
     // MARK: - Picker
 
+    private static let minimumTrailerVideoPixels = 480
+
     private static func pickBestStream(from response: Response) -> Stream? {
         guard let streams = response.videoStreams, !streams.isEmpty else {
             return nil
         }
 
+        let playable = streams.filter { isCandidate($0) }
+        guard !playable.isEmpty else {
+            if let hls = response.hlsUrl ?? response.hls,
+               !hls.isEmpty,
+               isAllowlistedHost(hls),
+               !hls.contains("videoplayback") {
+                return Stream(url: hls, format: "HLS", quality: nil, videoOnly: false, mimeType: "application/vnd.apple.mpegurl")
+            }
+            return nil
+        }
+
+        let atOrAboveMin = playable.filter { streamPixelHeight($0) >= minimumTrailerVideoPixels }
+        let pool = atOrAboveMin.isEmpty ? playable : atOrAboveMin
+
         var best: (stream: Stream, score: Int)?
 
-        for stream in streams {
-            guard isCandidate(stream) else { continue }
+        for stream in pool {
             let score = scoreStream(stream)
             if let current = best {
                 if score > current.score { best = (stream, score) }
@@ -89,6 +104,30 @@ public enum TrailerStreamPicker {
         }
 
         return nil
+    }
+
+    /// Parses a best-effort video height from Piped/YouTube-style `quality` labels (e.g. `"720p"`).
+    private static func streamPixelHeight(_ stream: Stream) -> Int {
+        let fromLabel = parseQuality(stream.quality)
+        if fromLabel > 0 { return fromLabel }
+        return itagHeightHint(from: stream.url)
+    }
+
+    private static func itagHeightHint(from url: String) -> Int {
+        guard let components = URLComponents(string: url),
+              let items = components.queryItems,
+              let raw = items.first(where: { $0.name == "itag" })?.value,
+              let itag = Int(raw) else {
+            return 0
+        }
+        switch itag {
+        case 38: return 2160
+        case 37: return 1080
+        case 22: return 720
+        case 59, 78: return 480
+        case 18: return 360
+        default: return 0
+        }
     }
 
     private static func isCandidate(_ stream: Stream) -> Bool {
@@ -141,7 +180,7 @@ public enum TrailerStreamPicker {
         switch quality {
         case 720...1080: score += 50
         case 480..<720: score += 40
-        case 360..<480: score += 30
+        case 360..<480: score += 10
         case 1081...: score += 10
         default: score += 5
         }

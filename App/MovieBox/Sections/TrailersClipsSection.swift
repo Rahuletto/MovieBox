@@ -1,4 +1,5 @@
 import CoreMetadata
+import DesignSystem
 import SwiftUI
 
 private enum TrailerClipMetrics {
@@ -71,7 +72,7 @@ struct TrailersClipsSection: View {
                             .disabled(isPreparingStream)
                         }
                     }
-                    .padding(.horizontal, 24)
+                    .padding(.horizontal, DetailLayoutMetrics.shelfSideInset)
                 }
                 .scrollIndicators(.hidden)
                 .frame(height: TrailerClipMetrics.height)
@@ -90,7 +91,7 @@ struct TrailersClipsSection: View {
                 Image(systemName: "play.rectangle.on.rectangle")
                     .foregroundStyle(.secondary)
                 Text("Trailers & Clips")
-                    .font(.title3.weight(.semibold))
+                    .font(MovieBoxTypography.title)
             }
 
             Spacer(minLength: 0)
@@ -105,7 +106,7 @@ struct TrailersClipsSection: View {
                 .frame(maxWidth: 220)
             }
         }
-        .padding(.horizontal, 24)
+        .padding(.horizontal, DetailLayoutMetrics.shelfSideInset)
         .onAppear {
             if trailerItems.isEmpty, !clipItems.isEmpty {
                 filter = .clips

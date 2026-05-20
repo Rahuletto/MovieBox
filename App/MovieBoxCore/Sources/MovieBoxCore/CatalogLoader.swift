@@ -123,24 +123,63 @@ public enum CatalogLoader {
     }
 
     public static func loadCatalogPayload(mode: MetadataEndpointMode, kind: MediaKind) async throws -> CatalogPayload {
-        let client = MetadataClient(mode: mode)
-        async let trending = client.movies(for: .trending, kind: kind)
-        async let popular = client.movies(for: .popular, kind: kind)
-        async let topRated = client.movies(for: .topRated, kind: kind)
-        async let nowPlaying = client.movies(for: .nowPlaying, kind: kind)
-        let trendingList = try await trending
-        let popularList = try await popular
-        let topRatedList = try await topRated
-        let nowPlayingList = try await nowPlaying
+        var last: CatalogPayload?
+        for try await payload in loadCatalogPayloadStream(mode: mode, kind: kind) {
+            last = payload
+        }
+        guard let last else {
+            throw CancellationError()
+        }
+        return last
+    }
 
-        let canonical = canonicalMap(from: [trendingList, popularList, topRatedList, nowPlayingList])
-        let rows: [MetadataCategory: [Movie]] = [
-            .trending: hydrate(trendingList, using: canonical),
-            .popular: hydrate(popularList, using: canonical),
-            .topRated: hydrate(topRatedList, using: canonical),
-            .nowPlaying: hydrate(nowPlayingList, using: canonical),
-        ]
+    /// Yields at least twice: first when core category rows are ready, again when extra shelves have been merged in.
+    public static func loadCatalogPayloadStream(mode: MetadataEndpointMode, kind: MediaKind) -> AsyncThrowingStream<CatalogPayload, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    let client = MetadataClient(mode: mode)
+                    async let trending = client.movies(for: .trending, kind: kind)
+                    async let popular = client.movies(for: .popular, kind: kind)
+                    async let topRated = client.movies(for: .topRated, kind: kind)
+                    async let nowPlaying = client.movies(for: .nowPlaying, kind: kind)
+                    let trendingList = try await trending
+                    let popularList = try await popular
+                    let topRatedList = try await topRated
+                    let nowPlayingList = try await nowPlaying
 
+                    let canonical = canonicalMap(from: [trendingList, popularList, topRatedList, nowPlayingList])
+                    let rows: [MetadataCategory: [Movie]] = [
+                        .trending: hydrate(trendingList, using: canonical),
+                        .popular: hydrate(popularList, using: canonical),
+                        .topRated: hydrate(topRatedList, using: canonical),
+                        .nowPlaying: hydrate(nowPlayingList, using: canonical),
+                    ]
+                    continuation.yield(CatalogPayload(rows: rows, extraSections: []))
+
+                    let fullPayload = try await loadCatalogExtraSections(
+                        client: client,
+                        kind: kind,
+                        canonical: canonical,
+                        baseRows: rows
+                    )
+                    continuation.yield(fullPayload)
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination { _ in task.cancel() }
+        }
+    }
+
+    /// Fetches curated extra sections for catalog (same shelves as `loadCatalogPayload` after core rows).
+    private static func loadCatalogExtraSections(
+        client: MetadataClient,
+        kind: MediaKind,
+        canonical: [Int: Movie],
+        baseRows: [MetadataCategory: [Movie]]
+    ) async throws -> CatalogPayload {
         let extraSections: [HomeExtraSection]
         switch kind {
         case .movie:
@@ -316,7 +355,7 @@ public enum CatalogLoader {
             extraSections = sections
         }
 
-        return CatalogPayload(rows: rows, extraSections: extraSections)
+        return CatalogPayload(rows: baseRows, extraSections: extraSections)
     }
 
     public static func loadHomeRows(mode: MetadataEndpointMode) async throws -> [MetadataCategory: [Movie]] {
@@ -325,116 +364,138 @@ public enum CatalogLoader {
     }
 
     public static func loadHomePayload(mode: MetadataEndpointMode) async throws -> HomeCatalogPayload {
-        let client = MetadataClient(mode: mode)
-        
-        // Fetch movies and TV shows in parallel
-        async let moviesTrending = client.movies(for: .trending, kind: .movie)
-        async let moviesPopular = client.movies(for: .popular, kind: .movie)
-        async let moviesTopRated = client.movies(for: .topRated, kind: .movie)
-        async let moviesNowPlaying = client.movies(for: .nowPlaying, kind: .movie)
-        
-        async let tvTrending = client.movies(for: .trending, kind: .tv)
-        async let tvPopular = client.movies(for: .popular, kind: .tv)
-        async let tvTopRated = client.movies(for: .topRated, kind: .tv)
-        
-        let movieTrendingList = try await moviesTrending
-        let moviePopularList = try await moviesPopular
-        let movieTopRatedList = try await moviesTopRated
-        let movieNowPlayingList = try await moviesNowPlaying
-        let tvTrendingList = try await tvTrending
-        let tvPopularList = try await tvPopular
-        let tvTopRatedList = try await tvTopRated
-
-        let movieCanonical = canonicalMap(from: [movieTrendingList, moviePopularList, movieTopRatedList, movieNowPlayingList])
-        let tvCanonical = canonicalMap(from: [tvTrendingList, tvPopularList, tvTopRatedList])
-        let hydratedMovieTrending = hydrate(movieTrendingList, using: movieCanonical)
-        let hydratedMoviePopular = hydrate(moviePopularList, using: movieCanonical)
-        let hydratedMovieTopRated = hydrate(movieTopRatedList, using: movieCanonical)
-        let hydratedMovieNowPlaying = hydrate(movieNowPlayingList, using: movieCanonical)
-        let hydratedTvTrending = hydrate(tvTrendingList, using: tvCanonical)
-        let hydratedTvPopular = hydrate(tvPopularList, using: tvCanonical)
-        let hydratedTvTopRated = hydrate(tvTopRatedList, using: tvCanonical)
-
-        var kindsByID: [Int: MediaKind] = [:]
-        for movie in hydratedMovieTrending + hydratedMoviePopular + hydratedMovieTopRated + hydratedMovieNowPlaying {
-            kindsByID[movie.id] = .movie
+        var last: HomeCatalogPayload?
+        for try await payload in loadHomePayloadStream(mode: mode) {
+            last = payload
         }
-        for show in hydratedTvTrending + hydratedTvPopular + hydratedTvTopRated {
-            kindsByID[show.id] = .tv
+        guard let last else {
+            throw CancellationError()
         }
+        return last
+    }
 
-        let rows: [MetadataCategory: [Movie]] = [
-            .trending: interleave(hydratedMovieTrending, hydratedTvTrending),
-            .popular: interleave(hydratedMoviePopular, hydratedTvPopular),
-            .topRated: interleave(hydratedMovieTopRated, hydratedTvTopRated),
-            .nowPlaying: hydratedMovieNowPlaying,
-        ]
+    /// Yields at least twice: first when core category rows are ready, again when extra shelves have been merged in.
+    public static func loadHomePayloadStream(mode: MetadataEndpointMode) -> AsyncThrowingStream<HomeCatalogPayload, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    let client = MetadataClient(mode: mode)
 
-        // Extra streaming-style shelves for Home.
-        async let criticallyAcclaimedTask = client.discoverCurated(
-            kind: .movie,
-            queryItems: [
-                URLQueryItem(name: "sort_by", value: "vote_average.desc"),
-                URLQueryItem(name: "vote_count.gte", value: "2500"),
-            ]
-        )
-        async let bingeWorthyShowsTask = client.discoverCurated(
-            kind: .tv,
-            queryItems: [
-                URLQueryItem(name: "sort_by", value: "popularity.desc"),
-                URLQueryItem(name: "vote_count.gte", value: "750"),
-            ]
-        )
-        async let oscarCandidatesTask = collectAwardCandidates(
-            client: client,
-            kind: .movie,
-            keywordQueries: [
-                "academy award winner",
-                "academy award",
-                "oscar winner",
-                "best picture winner",
-            ]
-        )
+                    async let moviesTrending = client.movies(for: .trending, kind: .movie)
+                    async let moviesPopular = client.movies(for: .popular, kind: .movie)
+                    async let moviesTopRated = client.movies(for: .topRated, kind: .movie)
+                    async let moviesNowPlaying = client.movies(for: .nowPlaying, kind: .movie)
 
-        var extraSections: [HomeExtraSection] = []
+                    async let tvTrending = client.movies(for: .trending, kind: .tv)
+                    async let tvPopular = client.movies(for: .popular, kind: .tv)
+                    async let tvTopRated = client.movies(for: .topRated, kind: .tv)
 
-        if let critically = try? await criticallyAcclaimedTask, !critically.isEmpty {
-            let hydrated = hydrate(critically, using: movieCanonical)
-            extraSections.append(
-                HomeExtraSection(
-                    id: "critically-acclaimed",
-                    title: "Critically Acclaimed",
-                    items: Array(hydrated.prefix(20)),
-                    kindByID: Dictionary(uniqueKeysWithValues: hydrated.map { ($0.id, MediaKind.movie) })
-                )
-            )
+                    let movieTrendingList = try await moviesTrending
+                    let moviePopularList = try await moviesPopular
+                    let movieTopRatedList = try await moviesTopRated
+                    let movieNowPlayingList = try await moviesNowPlaying
+                    let tvTrendingList = try await tvTrending
+                    let tvPopularList = try await tvPopular
+                    let tvTopRatedList = try await tvTopRated
+
+                    let movieCanonical = canonicalMap(from: [movieTrendingList, moviePopularList, movieTopRatedList, movieNowPlayingList])
+                    let tvCanonical = canonicalMap(from: [tvTrendingList, tvPopularList, tvTopRatedList])
+                    let hydratedMovieTrending = hydrate(movieTrendingList, using: movieCanonical)
+                    let hydratedMoviePopular = hydrate(moviePopularList, using: movieCanonical)
+                    let hydratedMovieTopRated = hydrate(movieTopRatedList, using: movieCanonical)
+                    let hydratedMovieNowPlaying = hydrate(movieNowPlayingList, using: movieCanonical)
+                    let hydratedTvTrending = hydrate(tvTrendingList, using: tvCanonical)
+                    let hydratedTvPopular = hydrate(tvPopularList, using: tvCanonical)
+                    let hydratedTvTopRated = hydrate(tvTopRatedList, using: tvCanonical)
+
+                    var kindsByID: [Int: MediaKind] = [:]
+                    for movie in hydratedMovieTrending + hydratedMoviePopular + hydratedMovieTopRated + hydratedMovieNowPlaying {
+                        kindsByID[movie.id] = .movie
+                    }
+                    for show in hydratedTvTrending + hydratedTvPopular + hydratedTvTopRated {
+                        kindsByID[show.id] = .tv
+                    }
+
+                    let rows: [MetadataCategory: [Movie]] = [
+                        .trending: interleave(hydratedMovieTrending, hydratedTvTrending),
+                        .popular: interleave(hydratedMoviePopular, hydratedTvPopular),
+                        .topRated: interleave(hydratedMovieTopRated, hydratedTvTopRated),
+                        .nowPlaying: hydratedMovieNowPlaying,
+                    ]
+
+                    continuation.yield(HomeCatalogPayload(rows: rows, kindsByID: kindsByID, extraSections: []))
+
+                    async let criticallyAcclaimedTask = client.discoverCurated(
+                        kind: .movie,
+                        queryItems: [
+                            URLQueryItem(name: "sort_by", value: "vote_average.desc"),
+                            URLQueryItem(name: "vote_count.gte", value: "2500"),
+                        ]
+                    )
+                    async let bingeWorthyShowsTask = client.discoverCurated(
+                        kind: .tv,
+                        queryItems: [
+                            URLQueryItem(name: "sort_by", value: "popularity.desc"),
+                            URLQueryItem(name: "vote_count.gte", value: "750"),
+                        ]
+                    )
+                    async let oscarCandidatesTask = collectAwardCandidates(
+                        client: client,
+                        kind: .movie,
+                        keywordQueries: [
+                            "academy award winner",
+                            "academy award",
+                            "oscar winner",
+                            "best picture winner",
+                        ]
+                    )
+
+                    var extraSections: [HomeExtraSection] = []
+
+                    if let critically = try? await criticallyAcclaimedTask, !critically.isEmpty {
+                        let hydrated = hydrate(critically, using: movieCanonical)
+                        extraSections.append(
+                            HomeExtraSection(
+                                id: "critically-acclaimed",
+                                title: "Critically Acclaimed",
+                                items: Array(hydrated.prefix(20)),
+                                kindByID: Dictionary(uniqueKeysWithValues: hydrated.map { ($0.id, MediaKind.movie) })
+                            )
+                        )
+                    }
+
+                    if let bingeShows = try? await bingeWorthyShowsTask, !bingeShows.isEmpty {
+                        let hydrated = hydrate(bingeShows, using: tvCanonical)
+                        extraSections.append(
+                            HomeExtraSection(
+                                id: "binge-worthy-shows",
+                                title: "Binge-Worthy Shows",
+                                items: Array(hydrated.prefix(20)),
+                                kindByID: Dictionary(uniqueKeysWithValues: hydrated.map { ($0.id, MediaKind.tv) })
+                            )
+                        )
+                    }
+
+                    if let oscarWinners = try? await oscarCandidatesTask,
+                       !oscarWinners.isEmpty {
+                        let hydrated = hydrate(oscarWinners, using: movieCanonical)
+                        extraSections.append(
+                            HomeExtraSection(
+                                id: "oscar-winners",
+                                title: "Oscar Nominees",
+                                items: Array(hydrated.prefix(20)),
+                                kindByID: Dictionary(uniqueKeysWithValues: hydrated.map { ($0.id, MediaKind.movie) })
+                            )
+                        )
+                    }
+
+                    continuation.yield(HomeCatalogPayload(rows: rows, kindsByID: kindsByID, extraSections: extraSections))
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination { _ in task.cancel() }
         }
-
-        if let bingeShows = try? await bingeWorthyShowsTask, !bingeShows.isEmpty {
-            let hydrated = hydrate(bingeShows, using: tvCanonical)
-            extraSections.append(
-                HomeExtraSection(
-                    id: "binge-worthy-shows",
-                    title: "Binge-Worthy Shows",
-                    items: Array(hydrated.prefix(20)),
-                    kindByID: Dictionary(uniqueKeysWithValues: hydrated.map { ($0.id, MediaKind.tv) })
-                )
-            )
-        }
-
-        if let oscarWinners = try? await oscarCandidatesTask,
-           !oscarWinners.isEmpty {
-            let hydrated = hydrate(oscarWinners, using: movieCanonical)
-            extraSections.append(
-                HomeExtraSection(
-                    id: "oscar-winners",
-                    title: "Oscar Nominees",
-                    items: Array(hydrated.prefix(20)),
-                    kindByID: Dictionary(uniqueKeysWithValues: hydrated.map { ($0.id, MediaKind.movie) })
-                )
-            )
-        }
-
-        return HomeCatalogPayload(rows: rows, kindsByID: kindsByID, extraSections: extraSections)
     }
 }

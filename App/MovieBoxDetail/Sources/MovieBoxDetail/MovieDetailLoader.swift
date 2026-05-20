@@ -40,23 +40,7 @@ public enum MovieDetailLoader {
         let client = MetadataClient(mode: mode)
         let loadedDetail = try await client.movieDetail(id: movieId, kind: kind)
 
-        let preferredLang = settings?.preferredSubtitleLang ?? "en"
-        let title = loadedDetail.movie.title
-        let year = Int(loadedDetail.movie.releaseDate.prefix(4))
-        let imdb = loadedDetail.imdbId
-        let subtitleClient = SubtitleClient(mode: mode)
-
-        let subtitles: [SubtitleInfo]
-        do {
-            subtitles = try await subtitleClient.searchSubtitles(
-                title: title,
-                year: year,
-                language: preferredLang,
-                imdbId: imdb
-            )
-        } catch {
-            subtitles = []
-        }
+        let subtitles = await loadSubtitles(detail: loadedDetail, settings: settings)
 
         if kind == .tv {
             let seasons = try await client.tvSeasonSummaries(showId: movieId)
@@ -83,6 +67,27 @@ public enum MovieDetailLoader {
             selectedSeason: 1,
             selectedEpisode: nil
         )
+    }
+
+    /// Subtitle search can be slow; call from a detached task after the main detail UI is on screen.
+    @MainActor
+    public static func loadSubtitles(detail: MovieDetail, settings: AppSettings?) async -> [SubtitleInfo] {
+        guard let mode = settings?.metadataMode else { return [] }
+        let preferredLang = settings?.preferredSubtitleLang ?? "en"
+        let title = detail.movie.title
+        let year = Int(detail.movie.releaseDate.prefix(4))
+        let imdb = detail.imdbId
+        let subtitleClient = SubtitleClient(mode: mode)
+        do {
+            return try await subtitleClient.searchSubtitles(
+                title: title,
+                year: year,
+                language: preferredLang,
+                imdbId: imdb
+            )
+        } catch {
+            return []
+        }
     }
 
     @MainActor

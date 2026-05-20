@@ -55,8 +55,8 @@ public final class PlayerState {
     public var isMuted: Bool = false
     public var playbackRate: Double = 1.0
     public private(set) var isFastScanning = false
-    public var fastScanStatusIcon: String?
-    public var fastScanSpeedMultiplier: Int?
+    /// Fast scan or transient video-fit feedback (top-center glass pill).
+    public var hudStatusPill: PlayerHUDStatusPillModel?
     public var showsControls: Bool = false
     public var subtitleURL: URL? = nil
     public var activeSubtitleTrack: Int = 0
@@ -95,6 +95,8 @@ public final class PlayerState {
     private var fastScanBackwardTask: Task<Void, Never>?
     private var fastScanIsForward = false
     private var wasPlayingBeforeFastScan = false
+    private var hudPillDismissTask: Task<Void, Never>?
+    private var hudPillDismissGeneration: UInt64 = 0
 
     private var timeObserver: Any?
     private var itemStatusObserver: NSKeyValueObservation?
@@ -399,6 +401,37 @@ public final class PlayerState {
             videoGravity = .resize
         } else {
             videoGravity = .resizeAspect
+        }
+        guard !isFastScanning else { return }
+        presentVideoGravityHUDPill()
+    }
+
+    private func cancelHUDPillDismissTask() {
+        hudPillDismissTask?.cancel()
+        hudPillDismissTask = nil
+    }
+
+    private func presentVideoGravityHUDPill() {
+        cancelHUDPillDismissTask()
+        hudPillDismissGeneration += 1
+        let generation = hudPillDismissGeneration
+        hudStatusPill = .videoGravity(title: videoGravityHUDTitle, icon: "aspectratio")
+        hudPillDismissTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            guard self.hudPillDismissGeneration == generation else { return }
+            if case .videoGravity = self.hudStatusPill {
+                self.hudStatusPill = nil
+            }
+        }
+    }
+
+    public var videoGravityHUDTitle: String {
+        switch videoGravity {
+        case .resizeAspect: return "Fit Screen"
+        case .resizeAspectFill: return "Fill"
+        case .resize: return "100%"
+        default: return "Fit Screen"
         }
     }
 
@@ -739,8 +772,11 @@ public final class PlayerState {
 
         isFastScanning = true
         fastScanIsForward = forward
-        fastScanStatusIcon = forward ? "forward.fill" : "backward.fill"
-        fastScanSpeedMultiplier = 2
+        cancelHUDPillDismissTask()
+        hudStatusPill = .fastScan(
+            icon: forward ? "forward.fill" : "backward.fill",
+            multiplier: 2
+        )
         fastScanBackwardTask?.cancel()
         player.pause()
         isPlaying = false
@@ -749,9 +785,9 @@ public final class PlayerState {
 
     public func stopFastScan() {
         guard isFastScanning else { return }
+        cancelHUDPillDismissTask()
         isFastScanning = false
-        fastScanStatusIcon = nil
-        fastScanSpeedMultiplier = nil
+        hudStatusPill = nil
         fastScanIsForward = false
         fastScanBackwardTask?.cancel()
         fastScanBackwardTask = nil
@@ -769,7 +805,8 @@ public final class PlayerState {
                 ticks += 1
                 let multiplier = ticks >= 7 ? 4 : 2
                 await MainActor.run {
-                    self.fastScanSpeedMultiplier = multiplier
+                    let icon = forward ? "forward.fill" : "backward.fill"
+                    self.hudStatusPill = .fastScan(icon: icon, multiplier: multiplier)
                     let delta = Double(multiplier * 6) * (forward ? 1 : -1)
                     self.seek(by: delta)
                 }
@@ -1040,6 +1077,7 @@ public final class PlayerContainerView: NSView {
 }
 
 public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View {
+    private let surfaceCornerRadius: CGFloat = 14
     @Bindable private var state: PlayerState
     @ViewBuilder private var sourcesSidebar: () -> SourcesSidebar
     @ViewBuilder private var streamStatsAccessory: () -> StreamStatsAccessory
@@ -1102,22 +1140,11 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
                     .transition(.opacity)
             }
 
-            if let icon = state.fastScanStatusIcon,
-               let speed = state.fastScanSpeedMultiplier {
-                HStack(spacing: 8) {
-                    Image(systemName: icon)
-                        .font(.system(size: 12, weight: .bold))
-                    Text("\(speed)x")
-                        .font(.system(size: 13, weight: .semibold))
-                        .monospacedDigit()
-                }
-                .foregroundStyle(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 7)
-                .nativeGlassEffect()
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .padding(.top, 72)
-                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            if let pill = state.hudStatusPill {
+                PlayerHUDStatusPill(model: pill)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 72)
+                    .transition(.scale(scale: 0.52, anchor: .center))
             }
 
             // Beautiful, floating glassmorphic IINA top bar
@@ -1162,6 +1189,13 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
         .sheet(item: $nerdStats) { stats in
             PlayerNerdStatsSheet(stats: stats)
         }
+        .clipShape(
+            RoundedRectangle(
+                cornerRadius: surfaceCornerRadius,
+                style: .continuous
+            )
+        )
+        .compositingGroup()
     }
 
     private var bufferingOverlay: some View {
@@ -1533,9 +1567,9 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
                     scrubberTransportControls
 
                     Text(formatTime(state.currentTime))
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(size: 11, weight: .medium))
                         .monospacedDigit()
-                        .foregroundStyle(.white.opacity(0.85))
+                        .foregroundStyle(.white.opacity(0.4))
                         .frame(width: 44, alignment: .trailing)
 
                     ScrubberSlider(
@@ -1553,9 +1587,9 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
                     .frame(maxWidth: .infinity)
 
                     Text(formatRemainingTime())
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(size: 11, weight: .medium))
                         .monospacedDigit()
-                        .foregroundStyle(.white.opacity(0.85))
+                        .foregroundStyle(.white.opacity(0.4))
                         .frame(width: 44, alignment: .leading)
                 }
                 .padding(.horizontal, 16)

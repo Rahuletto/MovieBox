@@ -5,26 +5,22 @@ import SwiftUI
 struct PersonDetailContentView: View {
     let detail: PersonDetail?
     let isLoading: Bool
-    @Binding var isBiographyExpanded: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let detail {
-                PersonHeroOverlay(detail: detail, isBiographyExpanded: $isBiographyExpanded)
+                PersonHeroOverlay(detail: detail)
                     .zIndex(1)
 
                 VStack(alignment: .leading, spacing: 32) {
                     if !detail.knownForCredits.isEmpty {
-                        PersonKnownForSection(credits: detail.knownForCredits)
-                            .frame(maxWidth: .infinity)
+                        personShelfSection {
+                            PersonKnownForSection(credits: detail.knownForCredits)
+                        }
                     }
 
-                    PersonFilmographySection(detail: detail)
-                        .frame(maxWidth: .infinity)
-
-                    if detail.externalLinks.hasAny || detail.profile.homepage != nil {
-                        PersonExternalLinksSection(profile: detail.profile, links: detail.externalLinks)
-                            .frame(maxWidth: .infinity)
+                    personShelfSection {
+                        PersonFilmographySection(detail: detail)
                     }
                 }
                 .padding(.horizontal, DetailLayoutMetrics.horizontalPadding)
@@ -42,17 +38,23 @@ struct PersonDetailContentView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+
+    @ViewBuilder
+    private func personShelfSection<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        content()
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, -DetailLayoutMetrics.horizontalPadding)
+    }
 }
 
 private struct PersonHeroOverlay: View {
     let detail: PersonDetail
-    @Binding var isBiographyExpanded: Bool
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
-                PersonHeroHeader(profile: detail.profile, isBiographyExpanded: $isBiographyExpanded)
+                PersonHeroHeader(profile: detail.profile)
                     .padding(.horizontal, DetailLayoutMetrics.horizontalPadding)
                     .padding(.bottom, 28)
             }

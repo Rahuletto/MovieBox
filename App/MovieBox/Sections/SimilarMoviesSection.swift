@@ -11,6 +11,7 @@ struct SimilarMoviesSection: View {
             Text("Similar Movies")
                 .font(MovieBoxTypography.title)
                 .foregroundStyle(.primary)
+                .padding(.horizontal, DetailLayoutMetrics.shelfSideInset)
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 14) {
@@ -18,13 +19,16 @@ struct SimilarMoviesSection: View {
                         MoviePosterCard(
                             title: movie.title,
                             subtitle: movie.releaseDate,
-                            posterURL: MetadataClient().imageURL(path: movie.posterPath)
+                            posterURL: MetadataClient().posterDisplayURL(
+                                posterPath: movie.posterPath,
+                                backdropPath: movie.backdropPath
+                            )
                         ) {
                             router.showDetail(id: movie.id, kind: router.detailKind)
                         }
                     }
                 }
-                .padding(.trailing, 100)
+                .padding(.horizontal, DetailLayoutMetrics.shelfSideInset)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }

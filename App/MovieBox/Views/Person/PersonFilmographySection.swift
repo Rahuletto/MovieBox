@@ -11,37 +11,69 @@ struct PersonFilmographySection: View {
         detail.credits(filter: filter)
     }
 
+    private let gridColumns = [
+        GridItem(.adaptive(minimum: 140, maximum: 170), spacing: 16)
+    ]
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Filmography")
                 .font(MovieBoxTypography.title)
                 .foregroundStyle(.primary)
+                .padding(.horizontal, DetailLayoutMetrics.shelfSideInset)
 
-            Picker("Category", selection: $filter) {
-                ForEach(PersonCreditFilter.allCases) { option in
-                    Text(option.rawValue).tag(option)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Category")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                Picker("Category", selection: $filter) {
+                    ForEach(PersonCreditFilter.allCases) { option in
+                        Text(option.rawValue).tag(option)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
             }
-            .pickerStyle(.segmented)
-            .frame(maxWidth: 320)
+            .padding(.horizontal, DetailLayoutMetrics.shelfSideInset)
 
             if filteredCredits.isEmpty {
                 Text("No credits in this category.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 8)
+                    .padding(.horizontal, DetailLayoutMetrics.shelfSideInset)
             } else {
-                LazyVStack(spacing: 0) {
+                LazyVGrid(columns: gridColumns, spacing: 22) {
                     ForEach(filteredCredits) { credit in
-                        PersonCreditRow(credit: credit) {
+                        MoviePosterCard(
+                            title: credit.title,
+                            subtitle: filmographySubtitle(for: credit),
+                            posterURL: MetadataClient().posterDisplayURL(
+                                posterPath: credit.posterPath,
+                                backdropPath: credit.backdropPath
+                            )
+                        ) {
                             router.showDetail(id: credit.id, kind: credit.mediaKind)
-                        }
-                        if credit.id != filteredCredits.last?.id {
-                            Divider().opacity(0.35)
                         }
                     }
                 }
+                .padding(.horizontal, DetailLayoutMetrics.shelfSideInset)
+                .padding(.bottom, 4)
             }
         }
+    }
+
+    private func filmographySubtitle(for credit: PersonCredit) -> String {
+        let year = credit.displayYear
+        let kindLabel = credit.mediaKind == .movie ? "Movie" : "TV"
+        if credit.voteAverage > 0 {
+            let rating = String(format: "%.1f", credit.voteAverage)
+            if year.isEmpty {
+                return "\(kindLabel) · \(rating)"
+            }
+            return "\(year) · \(rating)"
+        }
+        return year.isEmpty ? kindLabel : year
     }
 }

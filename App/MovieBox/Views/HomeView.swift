@@ -18,7 +18,6 @@ struct HomeView: View {
     @State private var recommended: [Movie] = []
     @State private var continueWatching: [MovieRecord] = []
     @State private var errorMessage: String?
-    @State private var isLoading = false
     @State private var scrollOffset: CGFloat = 0
 
     var body: some View {
@@ -98,12 +97,6 @@ struct HomeView: View {
                                 }
                             }
 
-                            if isLoading && rows.isEmpty {
-                                ProgressView("Loading movies...")
-                                    .controlSize(.large)
-                                    .frame(maxWidth: .infinity, minHeight: 260)
-                            }
-
                             ForEach(MetadataCategory.allCases) { category in
                                 if let movies = rows[category], !movies.isEmpty {
                                     HorizontalMovieRow(title: category.rawValue, items: movies) { movie in
@@ -150,14 +143,6 @@ struct HomeView: View {
                 }
                 .scrollIndicators(.hidden)
                 .blur(radius: errorMessage != nil ? 18 : 0)
-                .opacity(rows.isEmpty ? 0 : 1)
-            }
-            
-            // Full screen loading (if rows is empty)
-            if isLoading && rows.isEmpty && metadataMode != nil {
-                ProgressView("Loading movies...")
-                    .controlSize(.large)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
             // Fixed centered Error card floating on a blurred panel
@@ -221,25 +206,30 @@ struct HomeView: View {
     }
 
     private func load(mode: MetadataEndpointMode) async {
-        isLoading = true
         errorMessage = nil
         do {
-            let payload = try await CatalogLoader.loadHomePayload(mode: mode)
-            rows = payload.rows
-            kindByID = payload.kindsByID
-            extraSections = payload.extraSections
-            await refreshRecommendations()
-
-            continueWatching = storedMovies
-                .filter {
-                    PlaybackDisplayTitle.hasContinueProgress(
-                        positionSeconds: $0.playbackPositionSeconds,
-                        watchedFraction: $0.watchedFraction
-                    )
+            var sawCorePayload = false
+            for try await payload in CatalogLoader.loadHomePayloadStream(mode: mode) {
+                rows = payload.rows
+                kindByID = payload.kindsByID
+                extraSections = payload.extraSections
+                if !sawCorePayload {
+                    sawCorePayload = true
+                    continueWatching = storedMovies
+                        .filter {
+                            PlaybackDisplayTitle.hasContinueProgress(
+                                positionSeconds: $0.playbackPositionSeconds,
+                                watchedFraction: $0.watchedFraction
+                            )
+                        }
+                        .sorted { ($0.lastWatchedAt ?? .distantPast) > ($1.lastWatchedAt ?? .distantPast) }
+                        .prefix(8)
+                        .map { $0 }
+                    await refreshRecommendations()
+                } else {
+                    await refreshRecommendations()
                 }
-                .sorted { ($0.lastWatchedAt ?? .distantPast) > ($1.lastWatchedAt ?? .distantPast) }
-                .prefix(8)
-                .map { $0 }
+            }
         } catch {
             if let urlError = error as? URLError, urlError.code == .cancelled {
                 return
@@ -250,7 +240,6 @@ struct HomeView: View {
                 backendURL: settings.first?.proxyBaseURL
             )
         }
-        isLoading = false
     }
 
     private func refreshRecommendations() async {
@@ -356,11 +345,7 @@ struct HomeView: View {
     }
 
     private func posterURL(for movie: Movie) -> URL? {
-        let client = MetadataClient()
-        if let poster = client.imageURL(path: movie.posterPath) {
-            return poster
-        }
-        return client.imageURL(path: movie.backdropPath)
+        MetadataClient().posterDisplayURL(posterPath: movie.posterPath, backdropPath: movie.backdropPath)
     }
 }
 

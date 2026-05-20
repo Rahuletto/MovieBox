@@ -4,7 +4,8 @@ import SwiftUI
 
 struct PersonHeroHeader: View {
     let profile: PersonProfile
-    @Binding var isBiographyExpanded: Bool
+
+    @State private var isBiographySheetPresented = false
 
     private let photoSize: CGFloat = 160
 
@@ -18,15 +19,10 @@ struct PersonHeroHeader: View {
                     .foregroundStyle(.white)
                     .shadow(color: .black.opacity(0.45), radius: 8, x: 0, y: 2)
 
-                HStack(spacing: 8) {
-                    if let department = profile.knownForDepartment, !department.isEmpty {
-                        GlassBadge(department, color: MovieBoxColors.accent.opacity(0.85))
-                    }
-                    if let ageLine = profile.displayAgeLine {
-                        Text(ageLine)
-                            .font(.subheadline)
-                            .foregroundStyle(.white.opacity(0.82))
-                    }
+                if let ageLine = profile.displayAgeLine {
+                    Text(ageLine)
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.82))
                 }
 
                 if let birthplace = profile.placeOfBirth, !birthplace.isEmpty {
@@ -41,6 +37,9 @@ struct PersonHeroHeader: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .sheet(isPresented: $isBiographySheetPresented) {
+            biographySheet
         }
     }
 
@@ -81,19 +80,40 @@ struct PersonHeroHeader: View {
             Text(profile.biography)
                 .font(.subheadline)
                 .foregroundStyle(.white.opacity(0.88))
-                .lineLimit(isBiographyExpanded ? nil : 4)
+                .lineLimit(4)
                 .fixedSize(horizontal: false, vertical: true)
 
             if profile.biography.count > 200 {
-                Button(isBiographyExpanded ? "Show less" : "Read more") {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        isBiographyExpanded.toggle()
-                    }
+                Button("Read more") {
+                    isBiographySheetPresented = true
                 }
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.white.opacity(0.9))
                 .buttonStyle(.plain)
             }
         }
+    }
+
+    private var biographySheet: some View {
+        NavigationStack {
+            ScrollView {
+                Text(profile.biography)
+                    .font(.body)
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                    .padding(20)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .navigationTitle("Biography")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        isBiographySheetPresented = false
+                    }
+                }
+            }
+        }
+        .frame(minWidth: 520, minHeight: 440)
     }
 }

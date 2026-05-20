@@ -98,7 +98,7 @@ struct TVEpisodesSection: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
                     .menuStyle(.borderlessButton)
-                    .padding(.horizontal, 24)
+                    .padding(.horizontal, DetailLayoutMetrics.shelfSideInset)
                 } else {
                     HStack(spacing: 6) {
                         Image(systemName: "tv.inset.filled")
@@ -108,7 +108,7 @@ struct TVEpisodesSection: View {
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 8)
-                    .padding(.horizontal, 24)
+                    .padding(.horizontal, DetailLayoutMetrics.shelfSideInset)
                 }
 
                 // Episodes
@@ -145,7 +145,7 @@ struct TVEpisodesSection: View {
                         }
                     }
                 }
-                .padding(.horizontal, 24)
+                .padding(.horizontal, DetailLayoutMetrics.shelfSideInset)
             }
             .scrollIndicators(.hidden)
             .frame(height: TVEpisodeCardMetrics.height)

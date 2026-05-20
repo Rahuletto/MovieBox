@@ -138,7 +138,10 @@ struct SearchView: View {
                         MoviePosterCard(
                             title: movie.title,
                             subtitle: movie.releaseDate,
-                            posterURL: MetadataClient().imageURL(path: movie.posterPath)
+                            posterURL: MetadataClient().posterDisplayURL(
+                                posterPath: movie.posterPath,
+                                backdropPath: movie.backdropPath
+                            )
                         ) {
                             commitCurrentSearch()
                             router.showDetail(id: movie.id, kind: resultKinds[movie.id] ?? .movie)

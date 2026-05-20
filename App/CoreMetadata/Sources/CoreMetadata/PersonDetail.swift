@@ -73,6 +73,7 @@ public struct PersonCredit: Sendable, Codable, Identifiable, Hashable {
     public let character: String?
     public let job: String?
     public let posterPath: String?
+    public let backdropPath: String?
     public let releaseDate: String
     public let voteAverage: Double
     public let voteCount: Int
@@ -85,6 +86,7 @@ public struct PersonCredit: Sendable, Codable, Identifiable, Hashable {
         character: String? = nil,
         job: String? = nil,
         posterPath: String? = nil,
+        backdropPath: String? = nil,
         releaseDate: String = "",
         voteAverage: Double = 0,
         voteCount: Int = 0,
@@ -96,6 +98,7 @@ public struct PersonCredit: Sendable, Codable, Identifiable, Hashable {
         self.character = character
         self.job = job
         self.posterPath = posterPath
+        self.backdropPath = backdropPath
         self.releaseDate = releaseDate
         self.voteAverage = voteAverage
         self.voteCount = voteCount
@@ -187,6 +190,7 @@ enum PersonDetailMapper {
                 mediaKind: kind,
                 character: credit.character,
                 posterPath: credit.posterPath,
+                backdropPath: credit.backdropPath,
                 releaseDate: date,
                 voteAverage: credit.voteAverage ?? 0,
                 voteCount: credit.voteCount ?? 0,
@@ -237,6 +241,7 @@ struct TMDBPersonCreditDTO: Decodable, Sendable {
     let character: String?
     let mediaType: String?
     let posterPath: String?
+    let backdropPath: String?
     let releaseDate: String?
     let firstAirDate: String?
     let voteAverage: Double?

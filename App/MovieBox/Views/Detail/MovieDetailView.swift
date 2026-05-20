@@ -170,33 +170,48 @@ struct MovieDetailView: View {
         TorrentBackendSync.apply(from: settings.first)
         isLoading = true
         errorMessage = nil
-        isLoadingSubtitles = true
-        defer {
-            isLoading = false
-            isLoadingSubtitles = false
-        }
+        defer { isLoading = false }
 
         do {
-            let loaded = try await MovieDetailLoader.load(
-                movieId: movieId,
-                kind: kind,
-                settings: settings.first
-            )
-            detail = loaded.detail
-            subtitles = loaded.subtitles
-            tvSeasons = loaded.tvSeasons
-            tvEpisodes = loaded.tvEpisodes
-            selectedTVSeason = loaded.selectedSeason
-            selectedTVEpisode = loaded.selectedEpisode
+            guard let mode = settings.first?.metadataMode else {
+                throw MovieDetailLoader.LoadError.metadataNotConfigured
+            }
+            let client = MetadataClient(mode: mode)
+            let loadedDetail = try await client.movieDetail(id: movieId, kind: kind)
+            detail = loadedDetail
+
+            isLoadingSubtitles = true
+            Task {
+                let subs = await MovieDetailLoader.loadSubtitles(detail: loadedDetail, settings: settings.first)
+                await MainActor.run {
+                    subtitles = subs
+                    isLoadingSubtitles = false
+                }
+            }
 
             if kind == .tv {
+                isLoadingTVSeasons = true
+                tvSeasonsLoadFailed = false
+                defer { isLoadingTVSeasons = false }
+                let seasons = try await client.tvSeasonSummaries(showId: movieId)
+                tvSeasons = seasons
+                selectedTVSeason = seasons.last(where: { $0.episodeCount > 0 })?.seasonNumber
+                    ?? seasons.first?.seasonNumber
+                    ?? 1
+
+                isLoadingTVEpisodes = true
+                defer { isLoadingTVEpisodes = false }
+                let episodes = try await client.tvSeasonEpisodes(showId: movieId, season: selectedTVSeason)
+                tvEpisodes = episodes
+                selectedTVEpisode = episodes.first
+
                 torrents = []
                 torrentSearchDiagnostics = nil
-                if let episode = loaded.selectedEpisode {
+                if let episode = selectedTVEpisode {
                     await selectEpisode(episode)
                 }
             } else {
-                await searchTorrents()
+                Task { await searchTorrents() }
             }
         } catch let loadError as MovieDetailLoader.LoadError {
             errorMessage = loadError.errorDescription

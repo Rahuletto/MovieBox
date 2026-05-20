@@ -57,3 +57,23 @@ import Testing
     ))
     #expect(selection == nil)
 }
+
+@Test func prefers720pOver360pWhenBothMuxed() {
+    let selection = TrailerStreamPicker.pickPlayable(from: TrailerStreamPicker.Response(
+        videoStreams: [
+            TrailerStreamPicker.Stream(
+                url: "https://player.odycdn.com/v6/streams/abc/360.mp4",
+                format: "MP4",
+                quality: "360p",
+                videoOnly: false
+            ),
+            TrailerStreamPicker.Stream(
+                url: "https://player.odycdn.com/v6/streams/abc/720.mp4",
+                format: "MP4",
+                quality: "720p",
+                videoOnly: false
+            ),
+        ]
+    ))
+    #expect(selection?.url.absoluteString.contains("720") == true)
+}

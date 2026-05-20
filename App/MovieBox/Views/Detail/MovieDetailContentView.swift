@@ -2,6 +2,7 @@ import CoreMetadata
 import CorePlayer
 import CoreStreaming
 import CoreTorrent
+import DesignSystem
 import SwiftUI
 
 struct MovieDetailContentView: View {
@@ -79,32 +80,32 @@ struct MovieDetailContentView: View {
                         .frame(maxWidth: .infinity)
 
                     if !detail.videos.isEmpty {
-                        TrailersClipsSection(
-                            videos: detail.videos,
-                            onPlay: onPlayVideo,
-                            isPreparingStream: isPreparingStream,
-                            preparingVideoURL: preparingVideoURL
-                        )
-                        .frame(maxWidth: .infinity)
-                        .padding(.horizontal, -DetailLayoutMetrics.horizontalPadding)
+                        detailShelfSection {
+                            TrailersClipsSection(
+                                videos: detail.videos,
+                                onPlay: onPlayVideo,
+                                isPreparingStream: isPreparingStream,
+                                preparingVideoURL: preparingVideoURL
+                            )
+                        }
                     }
 
                     if kind == .tv {
-                        TVEpisodesSection(
-                            showId: detail.movie.id,
-                            seasons: tvSeasons,
-                            episodes: tvEpisodes,
-                            selectedSeason: selectedTVSeason,
-                            selectedEpisodeID: selectedTVEpisode?.id,
-                            isLoadingSeasons: isLoadingTVSeasons,
-                            seasonsLoadFailed: tvSeasonsLoadFailed,
-                            isLoadingEpisodes: isLoadingTVEpisodes,
-                            onSeasonChange: onTVSeasonChange,
-                            onEpisodeSelect: onEpisodeSelect,
-                            onRetrySeasons: onRetryTVSeasons
-                        )
-                        .frame(maxWidth: .infinity)
-                        .padding(.horizontal, -DetailLayoutMetrics.horizontalPadding)
+                        detailShelfSection {
+                            TVEpisodesSection(
+                                showId: detail.movie.id,
+                                seasons: tvSeasons,
+                                episodes: tvEpisodes,
+                                selectedSeason: selectedTVSeason,
+                                selectedEpisodeID: selectedTVEpisode?.id,
+                                isLoadingSeasons: isLoadingTVSeasons,
+                                seasonsLoadFailed: tvSeasonsLoadFailed,
+                                isLoadingEpisodes: isLoadingTVEpisodes,
+                                onSeasonChange: onTVSeasonChange,
+                                onEpisodeSelect: onEpisodeSelect,
+                                onRetrySeasons: onRetryTVSeasons
+                            )
+                        }
                     }
 
                     if kind == .tv, selectedTVEpisode != nil, let episode = selectedTVEpisode {
@@ -135,11 +136,11 @@ struct MovieDetailContentView: View {
                     }
 
                     if !detail.cast.isEmpty {
-                        CastSection(cast: detail.cast) { member in
-                            onSelectCastMember(member)
+                        detailShelfSection {
+                            CastSection(cast: detail.cast) { member in
+                                onSelectCastMember(member)
+                            }
                         }
-                        .frame(maxWidth: .infinity)
-                        .padding(.horizontal, -DetailLayoutMetrics.horizontalPadding)
                     }
 
                     SubtitleSection(
@@ -153,8 +154,9 @@ struct MovieDetailContentView: View {
                     .frame(maxWidth: .infinity)
 
                     if !detail.similar.isEmpty {
-                        SimilarMoviesSection(movies: detail.similar)
-                            .frame(maxWidth: .infinity)
+                        detailShelfSection {
+                            SimilarMoviesSection(movies: detail.similar)
+                        }
                     }
 
                     MediaInformationSection(
@@ -169,13 +171,22 @@ struct MovieDetailContentView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(ScrollFillingBlurBackground())
             } else if isLoading {
-                ProgressView("Loading movie...")
-                    .controlSize(.large)
-                    .frame(maxWidth: .infinity, minHeight: 360)
+                LoadingShimmer()
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 420)
+                    .padding(.horizontal, DetailLayoutMetrics.horizontalPadding)
+                    .padding(.top, 24)
             } else {
                 ContentUnavailableView("Movie Not Loaded", systemImage: "film")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func detailShelfSection<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        content()
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, -DetailLayoutMetrics.horizontalPadding)
     }
 }
