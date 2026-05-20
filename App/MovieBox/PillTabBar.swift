@@ -116,7 +116,7 @@ struct PillTabBar: View {
                     // Search Capsule
                     HStack(spacing: 0) {
                         if isSearchExpanded {
-                            HStack(spacing: 10) {
+                            HStack(spacing: 8) {
                                 Image(systemName: "magnifyingglass")
                                     .font(.system(size: 13, weight: .semibold))
                                     .foregroundStyle(.secondary)
@@ -140,7 +140,7 @@ struct PillTabBar: View {
                                     .buttonStyle(.plain)
                                 }
                             }
-                            .padding(.horizontal, 16)
+                            .padding(.horizontal, 10)
                             .padding(.vertical, 8)
                             .frame(width: 402)
                             .transition(.opacity)

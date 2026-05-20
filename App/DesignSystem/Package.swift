@@ -7,8 +7,16 @@ let package = Package(
     products: [
         .library(name: "DesignSystem", targets: ["DesignSystem"])
     ],
+    dependencies: [
+        .package(path: "../CoreMetadata")
+    ],
     targets: [
-        .target(name: "DesignSystem")
+        .target(
+            name: "DesignSystem",
+            dependencies: [
+                "CoreMetadata"
+            ]
+        )
     ],
     swiftLanguageModes: [.v6]
 )

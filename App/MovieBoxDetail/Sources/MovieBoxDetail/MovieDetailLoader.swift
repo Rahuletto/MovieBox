@@ -43,11 +43,24 @@ public enum MovieDetailLoader {
         let subtitles = await loadSubtitles(detail: loadedDetail, settings: settings)
 
         if kind == .tv {
-            let seasons = try await client.tvSeasonSummaries(showId: movieId)
+            let seasons: [TVSeasonSummary]
+            if let cachedSeasons = await MovieDetailCache.shared.tvSeasons(showId: movieId) {
+                seasons = cachedSeasons
+            } else {
+                seasons = try await client.tvSeasonSummaries(showId: movieId)
+                await MovieDetailCache.shared.insertTVSeasons(seasons, showId: movieId)
+            }
             let selectedSeason = seasons.last(where: { $0.episodeCount > 0 })?.seasonNumber
                 ?? seasons.first?.seasonNumber
                 ?? 1
-            let episodes = try await client.tvSeasonEpisodes(showId: movieId, season: selectedSeason)
+            
+            let episodes: [TVEpisode]
+            if let cachedEpisodes = await MovieDetailCache.shared.tvEpisodes(showId: movieId, season: selectedSeason) {
+                episodes = cachedEpisodes
+            } else {
+                episodes = try await client.tvSeasonEpisodes(showId: movieId, season: selectedSeason)
+                await MovieDetailCache.shared.insertTVEpisodes(episodes, showId: movieId, season: selectedSeason)
+            }
             let selectedEpisode = episodes.first
             return LoadedState(
                 detail: loadedDetail,
@@ -95,11 +108,16 @@ public enum MovieDetailLoader {
         showId: Int,
         settings: AppSettings?
     ) async throws -> [TVSeasonSummary] {
+        if let cached = await MovieDetailCache.shared.tvSeasons(showId: showId) {
+            return cached
+        }
         guard let mode = settings?.metadataMode else {
             throw LoadError.metadataNotConfigured
         }
         let client = MetadataClient(mode: mode)
-        return try await client.tvSeasonSummaries(showId: showId)
+        let seasons = try await client.tvSeasonSummaries(showId: showId)
+        await MovieDetailCache.shared.insertTVSeasons(seasons, showId: showId)
+        return seasons
     }
 
     @MainActor
@@ -108,10 +126,15 @@ public enum MovieDetailLoader {
         season: Int,
         settings: AppSettings?
     ) async throws -> [TVEpisode] {
+        if let cached = await MovieDetailCache.shared.tvEpisodes(showId: showId, season: season) {
+            return cached
+        }
         guard let mode = settings?.metadataMode else {
             throw LoadError.metadataNotConfigured
         }
         let client = MetadataClient(mode: mode)
-        return try await client.tvSeasonEpisodes(showId: showId, season: season)
+        let episodes = try await client.tvSeasonEpisodes(showId: showId, season: season)
+        await MovieDetailCache.shared.insertTVEpisodes(episodes, showId: showId, season: season)
+        return episodes
     }
 }

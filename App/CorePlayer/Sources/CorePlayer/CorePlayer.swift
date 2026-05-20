@@ -411,17 +411,23 @@ public final class PlayerState {
         hudPillDismissTask = nil
     }
 
+    private func setHUDStatusPill(_ pill: PlayerHUDStatusPillModel?) {
+        withAnimation(.playerHUDStatusPill) {
+            hudStatusPill = pill
+        }
+    }
+
     private func presentVideoGravityHUDPill() {
         cancelHUDPillDismissTask()
         hudPillDismissGeneration += 1
         let generation = hudPillDismissGeneration
-        hudStatusPill = .videoGravity(title: videoGravityHUDTitle, icon: "aspectratio")
+        setHUDStatusPill(.videoGravity(title: videoGravityHUDTitle, icon: "aspectratio"))
         hudPillDismissTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(2))
             guard !Task.isCancelled else { return }
             guard self.hudPillDismissGeneration == generation else { return }
             if case .videoGravity = self.hudStatusPill {
-                self.hudStatusPill = nil
+                self.setHUDStatusPill(nil)
             }
         }
     }
@@ -639,8 +645,7 @@ public final class PlayerState {
     }
 
     private func stopPlaybackResources() {
-        cancelHUDPillDismissTask()
-        hudStatusPill = nil
+        setHUDStatusPill(nil)
         stopFastScan()
         removeObservers()
         teardownPiP()
@@ -775,10 +780,10 @@ public final class PlayerState {
         isFastScanning = true
         fastScanIsForward = forward
         cancelHUDPillDismissTask()
-        hudStatusPill = .fastScan(
+        setHUDStatusPill(.fastScan(
             icon: forward ? "forward.fill" : "backward.fill",
             multiplier: 2
-        )
+        ))
         fastScanBackwardTask?.cancel()
         player.pause()
         isPlaying = false
@@ -789,7 +794,7 @@ public final class PlayerState {
         guard isFastScanning else { return }
         cancelHUDPillDismissTask()
         isFastScanning = false
-        hudStatusPill = nil
+        setHUDStatusPill(nil)
         fastScanIsForward = false
         fastScanBackwardTask?.cancel()
         fastScanBackwardTask = nil
@@ -808,7 +813,9 @@ public final class PlayerState {
                 let multiplier = ticks >= 7 ? 4 : 2
                 await MainActor.run {
                     let icon = forward ? "forward.fill" : "backward.fill"
-                    self.hudStatusPill = .fastScan(icon: icon, multiplier: multiplier)
+                    withAnimation(.playerHUDStatusPill) {
+                        self.hudStatusPill = .fastScan(icon: icon, multiplier: multiplier)
+                    }
                     let delta = Double(multiplier * 6) * (forward ? 1 : -1)
                     self.seek(by: delta)
                 }
@@ -1110,30 +1117,33 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
                 .ignoresSafeArea()
 
             // Elegant native vignetting overlay when controls are showing to elevate legibility
-            if state.showsControls {
-                ZStack {
-                    Color.black.opacity(0.18)
-                    
-                    LinearGradient(
-                        colors: [Color.black.opacity(0.45), Color.clear],
-                        startPoint: .top,
-                        endPoint: .center
-                    )
-                    .frame(height: 160)
-                    .frame(maxHeight: .infinity, alignment: .top)
-                    
-                    LinearGradient(
-                        colors: [Color.clear, Color.black.opacity(0.55)],
-                        startPoint: .center,
-                        endPoint: .bottom
-                    )
-                    .frame(height: 180)
-                    .frame(maxHeight: .infinity, alignment: .bottom)
+            Group {
+                if state.showsControls {
+                    ZStack {
+                        Color.black.opacity(0.18)
+                        
+                        LinearGradient(
+                            colors: [Color.black.opacity(0.45), Color.clear],
+                            startPoint: .top,
+                            endPoint: .center
+                        )
+                        .frame(height: 160)
+                        .frame(maxHeight: .infinity, alignment: .top)
+                        
+                        LinearGradient(
+                            colors: [Color.clear, Color.black.opacity(0.55)],
+                            startPoint: .center,
+                            endPoint: .bottom
+                        )
+                        .frame(height: 180)
+                        .frame(maxHeight: .infinity, alignment: .bottom)
+                    }
+                    .ignoresSafeArea()
+                    .transition(.opacity)
+                    .allowsHitTesting(false)
                 }
-                .ignoresSafeArea()
-                .transition(.opacity)
-                .allowsHitTesting(false)
             }
+            .animation(Self.hudControlsAnimation, value: state.showsControls)
 
             subtitleOverlay
 
@@ -1147,15 +1157,16 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
                     PlayerHUDStatusPill(model: pill)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                         .padding(.top, 72)
-                        .transition(.scale(scale: 0.52, anchor: .center))
+                        .transition(.playerHUDStatusPillWarp)
                 }
             }
-            .animation(.spring(response: 0.34, dampingFraction: 0.74), value: state.hudStatusPill)
+            .animation(.playerHUDStatusPill, value: state.hudStatusPill)
 
             // Beautiful, floating glassmorphic IINA top bar
             topHUD
                 .opacity(state.showsControls ? 1 : 0)
-                .animation(.easeOut(duration: 0.06), value: state.showsControls)
+                .scaleEffect(state.showsControls ? 1 : 0.96, anchor: .top)
+                .animation(Self.hudControlsAnimation, value: state.showsControls)
 
             // Center play/pause & seek overlay (hidden while buffering)
             if !state.isBuffering && !state.isSwitchingSource {
@@ -1165,7 +1176,8 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
             // Stunning, floating glassmorphic IINA control pod
             bottomHUD
                 .opacity(state.showsControls ? 1 : 0)
-                .animation(.easeOut(duration: 0.06), value: state.showsControls)
+                .scaleEffect(state.showsControls ? 1 : 0.96, anchor: .bottom)
+                .animation(Self.hudControlsAnimation, value: state.showsControls)
 
             if let errorMsg = state.errorMessage {
                 playbackErrorOverlay(message: errorMsg)
@@ -1476,64 +1488,27 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
         }
         .scaleEffect(state.showsControls ? 1.0 : 0.9)
         .opacity(state.showsControls ? 1.0 : 0.0)
-        .animation(.spring(response: 0.08, dampingFraction: 0.92), value: state.showsControls)
+        .animation(Self.hudControlsAnimation, value: state.showsControls)
+    }
+
+    private static var hudControlsAnimation: Animation {
+        .spring(response: 0.32, dampingFraction: 0.85)
     }
 
     private var scrubberTransportControls: some View {
-        let commandFastActive = isCommandHeld || state.isFastScanning
-        let shortSeekActive = isShiftHeld
-        let seekStep = shortSeekActive ? 5.0 : 15.0
-        let backIcon = commandFastActive ? "backward.fill" : (shortSeekActive ? "gobackward.5" : "gobackward.15")
-        let forwardIcon = commandFastActive ? "forward.fill" : (shortSeekActive ? "goforward.5" : "goforward.15")
-
-        return HStack(spacing: 14) {
-            Button {
-                state.seek(by: -seekStep)
-                resetControlFade()
-            } label: {
-                Image(systemName: backIcon)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .contentTransition(commandFastActive ? .identity : .symbolEffect(.replace))
-                    .frame(width: 22, height: 22)
-                    .scaleEffect(commandFastActive ? 1.08 : 1.0)
-            }
-            .buttonStyle(.plain)
-            .animation(.linear(duration: 0.05), value: commandFastActive)
-            .animation(.linear(duration: 0.05), value: shortSeekActive)
-            .help(commandFastActive ? "Fast seek backward" : "Back \(Int(seekStep)) seconds")
-
-            Button {
-                state.togglePlayback()
-                resetControlFade()
-            } label: {
-                Image(systemName: state.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 17, weight: .bold))
-                    .foregroundStyle(.white)
-                    .contentTransition(.symbolEffect(.replace))
-                    .frame(width: 22)
-            }
-            .buttonStyle(.plain)
-            .animation(.spring(response: 0.02, dampingFraction: 0.85), value: state.isPlaying)
-            .help(state.isPlaying ? "Pause" : "Play")
-
-            Button {
-                state.seek(by: seekStep)
-                resetControlFade()
-            } label: {
-                Image(systemName: forwardIcon)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .contentTransition(commandFastActive ? .identity : .symbolEffect(.replace))
-                    .frame(width: 22, height: 22)
-                    .scaleEffect(commandFastActive ? 1.08 : 1.0)
-            }
-            .buttonStyle(.plain)
-            .animation(.linear(duration: 0.05), value: commandFastActive)
-            .animation(.linear(duration: 0.05), value: shortSeekActive)
-            .help(commandFastActive ? "Fast seek forward" : "Forward \(Int(seekStep)) seconds")
+        Button {
+            state.togglePlayback()
+            resetControlFade()
+        } label: {
+            Image(systemName: state.isPlaying ? "pause.fill" : "play.fill")
+                .font(.system(size: 17, weight: .bold))
+                .foregroundStyle(.white)
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: 22)
         }
-        .padding(.trailing, 4)
+        .buttonStyle(.plain)
+        .animation(.spring(response: 0.02, dampingFraction: 0.85), value: state.isPlaying)
+        .help(state.isPlaying ? "Pause" : "Play")
     }
 
     private var bottomHUD: some View {
@@ -1769,13 +1744,17 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
 
     private func resetControlFade() {
         NotificationCenter.default.post(name: .playerReclaimKeyboardFocus, object: nil)
-        state.showsControls = true
+        withAnimation(Self.hudControlsAnimation) {
+            state.showsControls = true
+        }
         controlFadeTask?.cancel()
         controlFadeTask = Task {
             try? await Task.sleep(for: .seconds(3))
             if !Task.isCancelled && !isHoveringHUD && state.isPlaying {
                 await MainActor.run {
-                    state.showsControls = false
+                    withAnimation(Self.hudControlsAnimation) {
+                        state.showsControls = false
+                    }
                 }
             }
         }

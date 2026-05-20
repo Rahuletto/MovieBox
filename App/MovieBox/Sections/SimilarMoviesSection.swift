@@ -18,7 +18,6 @@ struct SimilarMoviesSection: View {
                     ForEach(movies.prefix(12)) { movie in
                         MoviePosterCard(
                             title: movie.title,
-                            subtitle: movie.releaseDate,
                             posterURL: MetadataClient().posterDisplayURL(
                                 posterPath: movie.posterPath,
                                 backdropPath: movie.backdropPath

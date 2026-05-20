@@ -281,25 +281,31 @@ private struct TVEpisodeCard: View {
 private extension TVEpisode {
     var isUpcoming: Bool {
         guard let airDate else { return false }
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd"
-        guard let date = formatter.date(from: airDate) else { return false }
+        guard let date = TVEpisodeDateFormatter.parser.date(from: airDate) else { return false }
         return date > Calendar.current.startOfDay(for: Date())
     }
 
     var formattedAirDate: String? {
         guard let airDate else { return nil }
-        let parser = DateFormatter()
-        parser.calendar = Calendar(identifier: .gregorian)
-        parser.locale = Locale(identifier: "en_US_POSIX")
-        parser.dateFormat = "yyyy-MM-dd"
-        guard let date = parser.date(from: airDate) else { return airDate }
-        let display = DateFormatter()
-        display.dateStyle = .medium
-        display.timeStyle = .none
-        return display.string(from: date)
+        guard let date = TVEpisodeDateFormatter.parser.date(from: airDate) else { return airDate }
+        return TVEpisodeDateFormatter.display.string(from: date)
     }
+}
+
+private enum TVEpisodeDateFormatter {
+    nonisolated(unsafe) static let parser: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
+    
+    nonisolated(unsafe) static let display: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter
+    }()
 }
 

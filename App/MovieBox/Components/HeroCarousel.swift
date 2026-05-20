@@ -58,16 +58,15 @@ struct HeroCarousel: View {
         return AnyView(
             ZStack(alignment: .bottom) {
                 ZStack {
-                    if let backdropPath = currentMovie.backdropPath ?? currentMovie.posterPath {
-                        AsyncImage(url: MetadataClient().imageURL(path: backdropPath, width: 1920)) { phase in
-                            if let image = phase.image {
-                                image
-                                    .resizable()
-                                    .aspectRatio(contentMode: .fill)
-                                    .transition(.opacity.animation(.easeInOut(duration: 0.5)))
-                            } else {
-                                fadeColor
-                            }
+                    if let backdropPath = currentMovie.backdropPath ?? currentMovie.posterPath,
+                       let url = MetadataClient().imageURL(path: backdropPath, width: 1920) {
+                        CachedImageView(url: url) {
+                            fadeColor
+                        } content: { image in
+                            image
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .transition(.opacity.animation(.easeInOut(duration: 0.5)))
                         }
                     } else {
                         fadeColor

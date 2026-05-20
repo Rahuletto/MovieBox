@@ -2,7 +2,6 @@ import CoreMetadata
 import CorePlayer
 import CoreStreaming
 import CoreTorrent
-import DesignSystem
 import SwiftUI
 
 struct MovieDetailContentView: View {
@@ -171,10 +170,10 @@ struct MovieDetailContentView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(ScrollFillingBlurBackground())
             } else if isLoading {
-                LoadingShimmer()
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 420)
-                    .padding(.horizontal, DetailLayoutMetrics.horizontalPadding)
+                ProgressView()
+                    .controlSize(.large)
+                    .tint(.white)
+                    .frame(maxWidth: .infinity, minHeight: 360)
                     .padding(.top, 24)
             } else {
                 ContentUnavailableView("Movie Not Loaded", systemImage: "film")

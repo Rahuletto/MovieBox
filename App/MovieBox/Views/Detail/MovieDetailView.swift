@@ -618,19 +618,29 @@ struct MovieDetailView: View {
 
     private func formattedAirDate(_ raw: String?) -> String? {
         guard let date = parseTMDBDate(raw) else { return nil }
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .none
-        return formatter.string(from: date)
+        return MovieDetailDateFormatter.display.string(from: date)
     }
 
     private func parseTMDBDate(_ raw: String?) -> Date? {
         guard let raw, !raw.isEmpty else { return nil }
+        return MovieDetailDateFormatter.parser.date(from: raw)
+    }
+}
+
+private enum MovieDetailDateFormatter {
+    nonisolated(unsafe) static let parser: DateFormatter = {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.date(from: raw)
-    }
+        return formatter
+    }()
+    
+    nonisolated(unsafe) static let display: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter
+    }()
 }
 

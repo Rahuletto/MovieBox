@@ -228,13 +228,10 @@ private struct TrailerClipCard: View {
     @ViewBuilder
     private var thumbnail: some View {
         if let thumbnailURL = video.thumbnailURL {
-            AsyncImage(url: thumbnailURL) { phase in
-                switch phase {
-                case .success(let image):
-                    image.resizable().scaledToFill()
-                default:
-                    placeholder
-                }
+            CachedImageView(url: thumbnailURL) {
+                placeholder
+            } content: { image in
+                image.resizable().scaledToFill()
             }
         } else {
             placeholder

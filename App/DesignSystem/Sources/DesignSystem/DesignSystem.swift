@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreMetadata
 
 public enum MovieBoxColors {
     public static let background = Color(nsColor: .windowBackgroundColor)
@@ -116,6 +117,9 @@ public struct GlassButton<Label: View>: View {
 }
 
 public struct MoviePosterCard: View {
+    public static let posterWidth: CGFloat = 164
+    public static let posterHeight: CGFloat = 246
+
     private let title: String
     private let subtitle: String
     private let posterURL: URL?
@@ -142,7 +146,7 @@ public struct MoviePosterCard: View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 10) {
                 poster
-                    .frame(width: 150, height: 225)
+                    .frame(width: Self.posterWidth, height: Self.posterHeight)
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .overlay(alignment: .bottomLeading) {
                         LinearGradient(colors: [.clear, Color.black.opacity(0.25)], startPoint: .top, endPoint: .bottom)
@@ -151,16 +155,17 @@ public struct MoviePosterCard: View {
                     .shadow(color: Color.black.opacity(0.28), radius: 12, x: 0, y: 5)
 
                 Text(title)
-                    .font(MovieBoxTypography.caption)
+                    .font(.system(size: 13, weight: .semibold))
                     .lineLimit(2)
                     .foregroundStyle(.primary)
-                    .frame(width: 150, alignment: .leading)
+                    .frame(width: Self.posterWidth, alignment: .leading)
 
                 if !subtitle.isEmpty {
                     Text(subtitle)
-                        .font(.caption)
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
-                        .frame(width: 150, alignment: .leading)
+                        .lineLimit(1)
+                        .frame(width: Self.posterWidth, alignment: .leading)
                 }
             }
         }
@@ -172,17 +177,10 @@ public struct MoviePosterCard: View {
 
     @ViewBuilder private var poster: some View {
         if let posterURL {
-            AsyncImage(url: posterURL) { phase in
-                switch phase {
-                case .success(let image):
-                    image.resizable().scaledToFill()
-                case .failure:
-                    placeholder
-                case .empty:
-                    LoadingShimmer()
-                @unknown default:
-                    placeholder
-                }
+            CachedImageView(url: posterURL) {
+                placeholder
+            } content: { image in
+                image.resizable().scaledToFill()
             }
         } else {
             placeholder

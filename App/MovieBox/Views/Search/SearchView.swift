@@ -15,8 +15,11 @@ struct SearchView: View {
     @State private var resultKinds: [Int: MediaKind] = [:]
     @State private var isSearching = false
     @State private var errorMessage: String?
+    @State private var searchTask: Task<Void, Never>?
 
-    private let columns = [GridItem(.adaptive(minimum: 150, maximum: 170), spacing: 16)]
+    private let columns = [
+        GridItem(.adaptive(minimum: MoviePosterCard.posterWidth, maximum: 186), spacing: 16)
+    ]
 
     var body: some View {
         ZStack {
@@ -93,10 +96,16 @@ struct SearchView: View {
             }
         }
         .onChange(of: router.searchQuery) { _, newValue in
+            searchTask?.cancel()
             if newValue.isEmpty {
                 results = []
+                isSearching = false
             } else {
-                Task { await search() }
+                searchTask = Task {
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                    guard !Task.isCancelled else { return }
+                    await search()
+                }
             }
         }
     }
@@ -137,7 +146,6 @@ struct SearchView: View {
                     ForEach(results) { movie in
                         MoviePosterCard(
                             title: movie.title,
-                            subtitle: movie.releaseDate,
                             posterURL: MetadataClient().posterDisplayURL(
                                 posterPath: movie.posterPath,
                                 backdropPath: movie.backdropPath
@@ -166,18 +174,32 @@ struct SearchView: View {
             async let tv = client.searchMovies(query: query, kind: .tv)
             let movieResults = try await movies
             let tvResults = try await tv
+            
+            guard !Task.isCancelled else { return }
+            
             var kinds: [Int: MediaKind] = [:]
             movieResults.forEach { kinds[$0.id] = .movie }
             tvResults.forEach { kinds[$0.id] = .tv }
-            resultKinds = kinds
+            
             let combined = movieResults + tvResults
             let q = query.lowercased()
-            results = combined.sorted { m1, m2 in
-                let d1 = levenshteinDistance(m1.title.lowercased(), q)
-                let d2 = levenshteinDistance(m2.title.lowercased(), q)
-                return d1 < d2
+            
+            let sortedResults = try await Task.detached(priority: .userInitiated) {
+                return combined.sorted { m1, m2 in
+                    let d1 = SearchView.levenshteinDistance(m1.title.lowercased(), q)
+                    let d2 = SearchView.levenshteinDistance(m2.title.lowercased(), q)
+                    return d1 < d2
+                }
+            }.value
+            
+            guard !Task.isCancelled else { return }
+            
+            await MainActor.run {
+                self.resultKinds = kinds
+                self.results = sortedResults
             }
         } catch {
+            if Task.isCancelled { return }
             if let urlError = error as? URLError, urlError.code == .cancelled {
                 return
             }
@@ -187,7 +209,7 @@ struct SearchView: View {
         isSearching = false
     }
 
-    private func levenshteinDistance(_ s1: String, _ s2: String) -> Int {
+    private static func levenshteinDistance(_ s1: String, _ s2: String) -> Int {
         let empty = [Int](repeating: 0, count: s2.count + 1)
         var last = [Int](0...s2.count)
         var current = empty

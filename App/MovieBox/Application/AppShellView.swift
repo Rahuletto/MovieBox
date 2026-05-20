@@ -33,22 +33,26 @@ struct AppShellView: View {
                 .animation(MovieBoxMotion.player, value: playerState.isPresented)
                 .zIndex(5)
 
-            if playerState.isPresented {
-                PlayerView(state: playerState) {
-                    PlaybackSourcesSidebar(
-                        playerState: playerState,
-                        torrents: appServices.playbackCoordinator.torrents
-                    )
-                } streamStatsAccessory: {
-                    if let session = appServices.activeSession {
-                        TorrentStreamStatsAccessory(session: session)
+            Group {
+                if playerState.isPresented {
+                    PlayerView(state: playerState) {
+                        PlaybackSourcesSidebar(
+                            playerState: playerState,
+                            torrents: appServices.playbackCoordinator.torrents
+                        )
+                    } streamStatsAccessory: {
+                        if let session = appServices.activeSession {
+                            TorrentStreamStatsAccessory(session: session)
+                        }
                     }
-                }
                     .ignoresSafeArea()
                     .opacity(playerState.isPlayerRevealed ? 1 : 0)
                     .animation(MovieBoxMotion.player, value: playerState.isPlayerRevealed)
-                    .zIndex(10)
+                    .transition(.opacity)
+                }
             }
+            .animation(MovieBoxMotion.player, value: playerState.isPresented)
+            .zIndex(10)
 
             AppSettingsPlaybackSync()
                 .allowsHitTesting(false)

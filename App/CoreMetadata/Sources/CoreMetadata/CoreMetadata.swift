@@ -456,7 +456,7 @@ public actor MetadataClient {
 
     public func movies(for category: MetadataCategory, kind: MediaKind = .movie, page: Int = 1) async throws -> [Movie] {
         let response: MovieListResponse = try await request(path: category.tmdbPath(kind: kind), queryItems: [URLQueryItem(name: "page", value: String(page))])
-        return response.results.map(\.movie)
+        return await MovieRegistry.shared.canonicalize(response.results.map(\.movie))
     }
 
     public func searchMovies(query: String, kind: MediaKind = .movie, page: Int = 1) async throws -> [Movie] {
@@ -468,7 +468,7 @@ public actor MetadataClient {
                 URLQueryItem(name: "page", value: String(page))
             ]
         )
-        return response.results.map(\.movie)
+        return await MovieRegistry.shared.canonicalize(response.results.map(\.movie))
     }
 
     public func discoverMovies(genreId: Int, kind: MediaKind = .movie, page: Int = 1) async throws -> [Movie] {
@@ -481,7 +481,7 @@ public actor MetadataClient {
                 URLQueryItem(name: "page", value: String(page))
             ]
         )
-        return response.results.map(\.movie)
+        return await MovieRegistry.shared.canonicalize(response.results.map(\.movie))
     }
 
     public func discoverCurated(kind: MediaKind = .movie, queryItems: [URLQueryItem], page: Int = 1) async throws -> [Movie] {
@@ -489,7 +489,7 @@ public actor MetadataClient {
         var allItems = queryItems
         allItems.append(URLQueryItem(name: "page", value: String(page)))
         let response: MovieListResponse = try await request(path: endpoint, queryItems: allItems)
-        return response.results.map(\.movie)
+        return await MovieRegistry.shared.canonicalize(response.results.map(\.movie))
     }
 
     public func keywordID(matching query: String) async throws -> Int? {
@@ -532,8 +532,12 @@ public actor MetadataClient {
     }
 
     public func movieDetail(id: Int, kind: MediaKind = .movie) async throws -> MovieDetail {
+        if let cached = await MovieDetailCache.shared.detail(id: id, kind: kind) {
+            return cached
+        }
         guard let mode else { throw MetadataError.missingConfiguration }
 
+        let detail: MovieDetail
         // Backend mode: use the bundle endpoint (1 RTT, server resolves credits +
         // similar + external_ids + videos + fanart logo from KV).
         if case .backend(let baseURL, let appToken) = mode {
@@ -546,44 +550,66 @@ public actor MetadataClient {
                 throw MetadataError.upstream(http.statusCode)
             }
             let bundle = try decoder.decode(TitleBundleDTO.self, from: data)
-            let detail = bundle.detail(kind: kind)
+            let rawDetail = bundle.detail(kind: kind)
 
             // Pre-seed LogoCache so AsyncLogoView in the detail header skips its fetch.
-            if let logoURL = detail.logoURL {
+            if let logoURL = rawDetail.logoURL {
                 await LogoCache.shared.seed(kind: kind, id: id, url: logoURL)
             } else {
                 // Negative result is also worth seeding so we don't re-resolve.
                 await LogoCache.shared.seed(kind: kind, id: id, url: nil)
             }
-            return detail
+            
+            let canonicalMovie = await MovieRegistry.shared.canonicalize(rawDetail.movie)
+            let canonicalSimilar = await MovieRegistry.shared.canonicalize(rawDetail.similar)
+            detail = MovieDetail(
+                movie: canonicalMovie,
+                genres: rawDetail.genres,
+                cast: rawDetail.cast,
+                trailerURL: rawDetail.trailerURL,
+                trailerRTStreamURL: rawDetail.trailerRTStreamURL,
+                videos: rawDetail.videos,
+                similar: canonicalSimilar,
+                logoURL: rawDetail.logoURL,
+                imdbId: rawDetail.imdbId,
+                enrichment: rawDetail.enrichment,
+                contentWarnings: rawDetail.contentWarnings
+            )
+        } else {
+            // Direct mode (no backend): fall back to individual TMDB calls.
+            let base = kind == .movie ? "/movie" : "/tv"
+            async let movieResponse: TMDBMovieDTO = request(path: "\(base)/\(id)")
+            async let creditsResponse: CreditsResponse = request(path: "\(base)/\(id)/credits")
+            async let similarResponse: MovieListResponse = request(path: "\(base)/\(id)/similar")
+
+            let contentWarnings: [String]
+            switch kind {
+            case .movie:
+                let releaseDates: TMDBReleaseDatesAppendDTO = try await request(path: "\(base)/\(id)/release_dates")
+                contentWarnings = ContentAdvisoryExtractor.fromMovieReleaseDates(releaseDates.results)
+            case .tv:
+                let ratings: TMDBContentRatingsAppendDTO = try await request(path: "\(base)/\(id)/content_ratings")
+                contentWarnings = ContentAdvisoryExtractor.fromTVContentRatings(ratings.results)
+            }
+
+            let movie = try await movieResponse.movie
+            let credits = try await creditsResponse.cast.prefix(16).map(\.castMember)
+            let similar = try await similarResponse.results.map(\.movie)
+            
+            let canonicalMovie = await MovieRegistry.shared.canonicalize(movie)
+            let canonicalSimilar = await MovieRegistry.shared.canonicalize(similar)
+            
+            detail = MovieDetail(
+                movie: canonicalMovie,
+                genres: try await movieResponse.genres ?? [],
+                cast: Array(credits),
+                similar: canonicalSimilar,
+                contentWarnings: contentWarnings
+            )
         }
 
-        // Direct mode (no backend): fall back to individual TMDB calls.
-        let base = kind == .movie ? "/movie" : "/tv"
-        async let movieResponse: TMDBMovieDTO = request(path: "\(base)/\(id)")
-        async let creditsResponse: CreditsResponse = request(path: "\(base)/\(id)/credits")
-        async let similarResponse: MovieListResponse = request(path: "\(base)/\(id)/similar")
-
-        let contentWarnings: [String]
-        switch kind {
-        case .movie:
-            let releaseDates: TMDBReleaseDatesAppendDTO = try await request(path: "\(base)/\(id)/release_dates")
-            contentWarnings = ContentAdvisoryExtractor.fromMovieReleaseDates(releaseDates.results)
-        case .tv:
-            let ratings: TMDBContentRatingsAppendDTO = try await request(path: "\(base)/\(id)/content_ratings")
-            contentWarnings = ContentAdvisoryExtractor.fromTVContentRatings(ratings.results)
-        }
-
-        let movie = try await movieResponse.movie
-        let credits = try await creditsResponse.cast.prefix(16).map(\.castMember)
-        let similar = try await similarResponse.results.map(\.movie)
-        return MovieDetail(
-            movie: movie,
-            genres: try await movieResponse.genres ?? [],
-            cast: Array(credits),
-            similar: similar,
-            contentWarnings: contentWarnings
-        )
+        await MovieDetailCache.shared.insertDetail(detail, id: id, kind: kind)
+        return detail
     }
 
     /// Season list for a TV show (excludes specials / season 0).
@@ -1472,6 +1498,104 @@ public actor SubtitleClient {
     }
 }
 
+import AppKit
+
+public final class DecodedImageCache: @unchecked Sendable {
+    public static let shared = DecodedImageCache()
+    private let cache = NSCache<NSURL, NSImage>()
+    
+    private init() {
+        cache.countLimit = 150
+    }
+    
+    public func image(for url: URL) -> NSImage? {
+        return cache.object(forKey: url as NSURL)
+    }
+    
+    public func insert(_ image: NSImage, for url: URL) {
+        cache.setObject(image, forKey: url as NSURL)
+    }
+    
+    public func clear() {
+        cache.removeAllObjects()
+    }
+}
+
+public actor MovieRegistry {
+    public static let shared = MovieRegistry()
+    private var registry: [Int: Movie] = [:]
+    
+    public func canonicalize(_ movie: Movie) -> Movie {
+        if let existing = registry[movie.id] {
+            let merged = mergedMovie(existing, with: movie)
+            registry[movie.id] = merged
+            return merged
+        } else {
+            registry[movie.id] = movie
+            return movie
+        }
+    }
+    
+    public func canonicalize(_ list: [Movie]) -> [Movie] {
+        return list.map { canonicalize($0) }
+    }
+    
+    private func mergedMovie(_ primary: Movie, with fallback: Movie) -> Movie {
+        Movie(
+            id: primary.id,
+            title: primary.title.isEmpty ? fallback.title : primary.title,
+            overview: primary.overview.isEmpty ? fallback.overview : primary.overview,
+            posterPath: primary.posterPath ?? fallback.posterPath,
+            backdropPath: primary.backdropPath ?? fallback.backdropPath,
+            releaseDate: primary.releaseDate.isEmpty ? fallback.releaseDate : primary.releaseDate,
+            voteAverage: max(primary.voteAverage, fallback.voteAverage),
+            genreIds: primary.genreIds.isEmpty ? fallback.genreIds : primary.genreIds,
+            runtime: primary.runtime ?? fallback.runtime
+        )
+    }
+}
+
+public actor MovieDetailCache {
+    public static let shared = MovieDetailCache()
+    private var detailCache: [String: MovieDetail] = [:]
+    private var seasonsCache: [Int: [TVSeasonSummary]] = [:]
+    private var episodesCache: [String: [TVEpisode]] = [:] // key: "showId:seasonNumber"
+    
+    public func detail(id: Int, kind: MediaKind) -> MovieDetail? {
+        let key = "\(kind.rawValue):\(id)"
+        return detailCache[key]
+    }
+    
+    public func insertDetail(_ detail: MovieDetail, id: Int, kind: MediaKind) {
+        let key = "\(kind.rawValue):\(id)"
+        detailCache[key] = detail
+    }
+    
+    public func tvSeasons(showId: Int) -> [TVSeasonSummary]? {
+        return seasonsCache[showId]
+    }
+    
+    public func insertTVSeasons(_ seasons: [TVSeasonSummary], showId: Int) {
+        seasonsCache[showId] = seasons
+    }
+    
+    public func tvEpisodes(showId: Int, season: Int) -> [TVEpisode]? {
+        let key = "\(showId):\(season)"
+        return episodesCache[key]
+    }
+    
+    public func insertTVEpisodes(_ episodes: [TVEpisode], showId: Int, season: Int) {
+        let key = "\(showId):\(season)"
+        episodesCache[key] = episodes
+    }
+    
+    public func clear() {
+        detailCache.removeAll()
+        seasonsCache.removeAll()
+        episodesCache.removeAll()
+    }
+}
+
 public struct CachedImageView<Content: View, Placeholder: View>: View {
     let url: URL?
     let loader: ImageLoader
@@ -1490,6 +1614,12 @@ public struct CachedImageView<Content: View, Placeholder: View>: View {
         self.loader = loader ?? ImageLoader.shared()
         self.placeholder = placeholder
         self.content = content
+        
+        if let url = url, let cachedImage = DecodedImageCache.shared.image(for: url) {
+            self._image = State(initialValue: Image(nsImage: cachedImage))
+        } else {
+            self._image = State(initialValue: nil)
+        }
     }
 
     public var body: some View {
@@ -1505,9 +1635,16 @@ public struct CachedImageView<Content: View, Placeholder: View>: View {
 
     private func loadImage() async {
         guard let url else { return }
+        if let cached = DecodedImageCache.shared.image(for: url) {
+            await MainActor.run {
+                image = Image(nsImage: cached)
+            }
+            return
+        }
         do {
             let data = try await loader.data(for: url)
             guard let nsImage = NSImage(data: data) else { return }
+            DecodedImageCache.shared.insert(nsImage, for: url)
             await MainActor.run {
                 image = Image(nsImage: nsImage)
             }

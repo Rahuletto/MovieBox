@@ -55,7 +55,6 @@ struct CatalogView: View {
                                 HorizontalMovieRow(title: category.displayTitle(for: kind), items: items) { movie in
                                     MoviePosterCard(
                                         title: movie.title,
-                                        subtitle: movie.releaseDate,
                                         posterURL: MetadataClient().posterDisplayURL(
                                             posterPath: movie.posterPath,
                                             backdropPath: movie.backdropPath
@@ -77,7 +76,6 @@ struct CatalogView: View {
                                 HorizontalMovieRow(title: section.title, items: section.items) { movie in
                                     MoviePosterCard(
                                         title: movie.title,
-                                        subtitle: movie.releaseDate,
                                         posterURL: MetadataClient().posterDisplayURL(
                                             posterPath: movie.posterPath,
                                             backdropPath: movie.backdropPath

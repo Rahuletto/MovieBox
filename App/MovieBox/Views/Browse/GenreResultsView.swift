@@ -69,11 +69,13 @@ struct GenreResultsView: View {
             Text(title)
                 .font(MovieBoxTypography.title)
 
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 140, maximum: 170), spacing: 16)], spacing: 22) {
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: MoviePosterCard.posterWidth, maximum: 186), spacing: 16)],
+                spacing: 22
+            ) {
                 ForEach(items) { movie in
                     MoviePosterCard(
                         title: movie.title,
-                        subtitle: movie.releaseDate,
                         posterURL: MetadataClient().posterDisplayURL(
                             posterPath: movie.posterPath,
                             backdropPath: movie.backdropPath

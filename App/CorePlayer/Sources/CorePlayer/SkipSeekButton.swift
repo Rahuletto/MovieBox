@@ -113,6 +113,9 @@ struct SkipSeekButton: View {
         pulseTrigger += 1
     }
 
+    private static let holdThresholdMs: UInt64 = 220
+    private static let holdRepeatIntervalMs: UInt64 = 280
+
     private func beginHold() {
         onActivity()
         if isCommandHeld {
@@ -124,19 +127,22 @@ struct SkipSeekButton: View {
             return
         }
 
-        didHoldRepeat = true
-        state.seek(by: direction.holdDelta)
-        pulseTrigger += 1
-
         repeatTask = Task {
-            try? await Task.sleep(for: .milliseconds(320))
+            try? await Task.sleep(for: .milliseconds(Self.holdThresholdMs))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                didHoldRepeat = true
+                state.seek(by: direction.holdDelta)
+                pulseTrigger += 1
+            }
             while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(Self.holdRepeatIntervalMs))
+                guard !Task.isCancelled else { return }
                 await MainActor.run {
                     state.seek(by: direction.holdDelta)
                     pulseTrigger += 1
                     onActivity()
                 }
-                try? await Task.sleep(for: .milliseconds(280))
             }
         }
     }

@@ -12,7 +12,7 @@ struct PersonFilmographySection: View {
     }
 
     private let gridColumns = [
-        GridItem(.adaptive(minimum: 140, maximum: 170), spacing: 16)
+        GridItem(.adaptive(minimum: MoviePosterCard.posterWidth, maximum: 186), spacing: 16)
     ]
 
     var body: some View {

@@ -32,6 +32,12 @@ public enum PlaybackLog {
 private enum PlaybackFileLog {
     private static let fileQueue = DispatchQueue(label: "moviebox.playback.filelog", qos: .utility)
 
+    nonisolated(unsafe) private static let isoFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
     private static var logFileURL: URL {
         let base = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first?
             .appendingPathComponent("Logs/MovieBox", isDirectory: true)
@@ -43,9 +49,7 @@ private enum PlaybackFileLog {
         let sanitized = message
             .replacingOccurrences(of: "\r\n", with: " ")
             .replacingOccurrences(of: "\n", with: " ")
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let ts = formatter.string(from: Date())
+        let ts = isoFormatter.string(from: Date())
         let line = "[\(ts)] [\(level)] [playback] \(sanitized)\n"
         fileQueue.async {
             try? FileManager.default.createDirectory(

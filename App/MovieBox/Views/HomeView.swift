@@ -89,7 +89,6 @@ struct HomeView: View {
                                 HorizontalMovieRow(title: "Recommended For You", items: recommended) { movie in
                                     MoviePosterCard(
                                         title: movie.title,
-                                        subtitle: movie.releaseDate,
                                         posterURL: posterURL(for: movie)
                                     ) {
                                         router.showDetail(id: movie.id, kind: kindByID[movie.id] ?? .movie)
@@ -102,7 +101,6 @@ struct HomeView: View {
                                     HorizontalMovieRow(title: category.rawValue, items: movies) { movie in
                                         MoviePosterCard(
                                             title: movie.title,
-                                            subtitle: movie.releaseDate,
                                             posterURL: posterURL(for: movie)
                                         ) {
                                             router.showDetail(id: movie.id, kind: kindByID[movie.id] ?? .movie)
@@ -116,7 +114,6 @@ struct HomeView: View {
                                     HorizontalMovieRow(title: section.title, items: section.items) { movie in
                                         MoviePosterCard(
                                             title: movie.title,
-                                            subtitle: movie.releaseDate,
                                             posterURL: posterURL(for: movie)
                                         ) {
                                             router.showDetail(

@@ -1,7 +1,52 @@
 import CoreMetadata
 import Foundation
 
-public struct HomeCatalogPayload {
+public actor CatalogCache {
+    public static let shared = CatalogCache()
+    
+    private var cachedHomePayload: HomeCatalogPayload?
+    private var homePayloadTime: Date?
+    
+    private var cachedCatalogPayloads: [String: CatalogPayload] = [:]
+    private var catalogPayloadTimes: [String: Date] = [:]
+    
+    private let cacheDuration: TimeInterval = 300 // 5 minutes cache TTL
+    
+    public func getHomePayload() -> HomeCatalogPayload? {
+        guard let time = homePayloadTime, Date().timeIntervalSince(time) < cacheDuration else {
+            return nil
+        }
+        return cachedHomePayload
+    }
+    
+    public func setHomePayload(_ payload: HomeCatalogPayload) {
+        cachedHomePayload = payload
+        homePayloadTime = Date()
+    }
+    
+    public func getCatalogPayload(kind: MediaKind) -> CatalogPayload? {
+        let key = kind.rawValue
+        guard let time = catalogPayloadTimes[key], Date().timeIntervalSince(time) < cacheDuration else {
+            return nil
+        }
+        return cachedCatalogPayloads[key]
+    }
+    
+    public func setCatalogPayload(_ payload: CatalogPayload, kind: MediaKind) {
+        let key = kind.rawValue
+        cachedCatalogPayloads[key] = payload
+        catalogPayloadTimes[key] = Date()
+    }
+    
+    public func clear() {
+        cachedHomePayload = nil
+        homePayloadTime = nil
+        cachedCatalogPayloads.removeAll()
+        catalogPayloadTimes.removeAll()
+    }
+}
+
+public struct HomeCatalogPayload: Sendable {
     public let rows: [MetadataCategory: [Movie]]
     public let kindsByID: [Int: MediaKind]
     public let extraSections: [HomeExtraSection]
@@ -138,6 +183,11 @@ public enum CatalogLoader {
         AsyncThrowingStream(CatalogPayload.self, bufferingPolicy: .unbounded) { continuation in
             let task = Task {
                 do {
+                    if let cached = await CatalogCache.shared.getCatalogPayload(kind: kind) {
+                        continuation.yield(cached)
+                        continuation.finish()
+                        return
+                    }
                     let client = MetadataClient(mode: mode)
                     async let trending = client.movies(for: .trending, kind: kind)
                     async let popular = client.movies(for: .popular, kind: kind)
@@ -163,6 +213,7 @@ public enum CatalogLoader {
                         canonical: canonical,
                         baseRows: rows
                     )
+                    await CatalogCache.shared.setCatalogPayload(fullPayload, kind: kind)
                     continuation.yield(fullPayload)
                     continuation.finish()
                 } catch {
@@ -379,6 +430,11 @@ public enum CatalogLoader {
         AsyncThrowingStream(HomeCatalogPayload.self, bufferingPolicy: .unbounded) { continuation in
             let task = Task {
                 do {
+                    if let cached = await CatalogCache.shared.getHomePayload() {
+                        continuation.yield(cached)
+                        continuation.finish()
+                        return
+                    }
                     let client = MetadataClient(mode: mode)
 
                     async let moviesTrending = client.movies(for: .trending, kind: .movie)
@@ -489,7 +545,9 @@ public enum CatalogLoader {
                         )
                     }
 
-                    continuation.yield(HomeCatalogPayload(rows: rows, kindsByID: kindsByID, extraSections: extraSections))
+                    let finalPayload = HomeCatalogPayload(rows: rows, kindsByID: kindsByID, extraSections: extraSections)
+                    await CatalogCache.shared.setHomePayload(finalPayload)
+                    continuation.yield(finalPayload)
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)

@@ -76,10 +76,14 @@ public enum MovieBoxFileLogger {
 
     // MARK: - Private
 
-    private static func formatLine(level: Level, category: String, message: String) -> String {
+    nonisolated(unsafe) private static let isoFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let ts = formatter.string(from: Date())
+        return formatter
+    }()
+
+    private static func formatLine(level: Level, category: String, message: String) -> String {
+        let ts = isoFormatter.string(from: Date())
         return "[\(ts)] [\(level.rawValue)] [\(category)] \(message)"
     }
 

@@ -6,6 +6,19 @@ public enum PlayerHUDStatusPillModel: Equatable, Sendable {
     case videoGravity(title: String, icon: String = "aspectratio")
 }
 
+extension Animation {
+    /// Scale warp for the top-center status pill (fast scan, fit mode, etc.).
+    static var playerHUDStatusPill: Animation {
+        .spring(response: 0.34, dampingFraction: 0.74)
+    }
+}
+
+extension AnyTransition {
+    static var playerHUDStatusPillWarp: AnyTransition {
+        .scale(scale: 0.52, anchor: .center)
+    }
+}
+
 /// IINA / QuickTime–style status capsule: scale “warp” for show/hide and content changes (no soft fade).
 public struct PlayerHUDStatusPill: View {
     public let model: PlayerHUDStatusPillModel
@@ -37,6 +50,6 @@ public struct PlayerHUDStatusPill: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 7)
         .nativeGlassEffect()
-        .animation(.spring(response: 0.32, dampingFraction: 0.76), value: model)
+        .animation(.playerHUDStatusPill, value: model)
     }
 }
