@@ -17,6 +17,10 @@ export const TitleRouteParamsSchema = z.object({
 
 export const LogoRouteParamsSchema = TitleRouteParamsSchema
 
+export const PersonRouteParamsSchema = z.object({
+  id: TmdbIdParamSchema,
+})
+
 /** Info hash: 40 hex chars, optional urn prefix stripped by client. */
 export const InfoHashQuerySchema = z.object({
   hash: z
@@ -98,6 +102,8 @@ export const PipedStreamResponseSchema = z.object({
         url: z.string().min(1).optional(),
         format: z.string().optional(),
         quality: z.string().optional(),
+        videoOnly: z.boolean().optional(),
+        mimeType: z.string().optional(),
       })
     )
     .optional(),

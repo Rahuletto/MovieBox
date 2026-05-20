@@ -17,6 +17,7 @@ import {
   SubtitleDownloadQuerySchema,
   SubtitleSearchQuerySchema,
   TitleRouteParamsSchema,
+  PersonRouteParamsSchema,
   TorrentMetadataQuerySchema,
   TorrentSearchQuerySchema,
   TrailerResolveQuerySchema,
@@ -25,6 +26,11 @@ import { parseParams, parseQuery } from './validate'
 import { resolveTrailerStreamURL } from './trailer-resolve'
 import { buildTMDBUpstreamURL, tmdbPathFromRequest } from './tmdb-upstream'
 import { kvGet, kvGetBuffer, kvPut } from './kv-cache'
+import {
+  buildRottenTomatoesStatsFromOmdb,
+  fetchRottenTomatoesStats,
+  type RottenTomatoesStats,
+} from './rotten-tomatoes'
 
 type Bindings = {
   TMDB_TOKEN: string
@@ -696,7 +702,8 @@ app.get('/api/title/:kind/:id', async (c) => {
     if (route instanceof Response) return route
     const { kind, id } = route
 
-    const cacheKey = `title:${kind}:${id}`
+    // v3: bundles include RT Tomatometer breakdown + TMDB content advisories.
+    const cacheKey = `title:v3:${kind}:${id}`
     const cached = await kvGet(c.env.MOVIEBOX_CACHE,cacheKey)
     if (cached) {
       return c.json(JSON.parse(cached), {
@@ -704,7 +711,11 @@ app.get('/api/title/:kind/:id', async (c) => {
       })
     }
 
-    const url = `https://api.themoviedb.org/3/${kind}/${id}?append_to_response=credits,similar,external_ids,videos`
+    const append =
+      kind === 'movie'
+        ? 'credits,similar,external_ids,videos,release_dates'
+        : 'credits,similar,external_ids,videos,content_ratings'
+    const url = `https://api.themoviedb.org/3/${kind}/${id}?append_to_response=${append}`
     const response = await fetch(url, {
       headers: { Authorization: `Bearer ${c.env.TMDB_TOKEN}` },
     })
@@ -743,6 +754,15 @@ app.get('/api/title/:kind/:id', async (c) => {
       return fetchOmdbByTitle(c, title, year, kind === 'movie' ? 'movie' : 'series')
     })()
 
+    const rtTask = title
+      ? fetchRottenTomatoesStats(c.env.MOVIEBOX_CACHE, {
+          kind: kind === 'movie' ? 'movie' : 'tv',
+          title,
+          year,
+          imdbId: extIds.imdb_id ?? null,
+        })
+      : Promise.resolve(null)
+
     // For TV with tvdb_id we can already start fanart in parallel; for movies we
     // need the imdb_id, which may come from OMDB. So run a two-track race:
     //   - tv+tvdb: kick off fanart now
@@ -763,7 +783,7 @@ app.get('/api/title/:kind/:id', async (c) => {
       return null
     })()
 
-    const [omdb, fanart] = await Promise.all([omdbTask, fanartTask])
+    const [omdb, fanart, rtStatsFromWeb] = await Promise.all([omdbTask, fanartTask, rtTask])
     const omdbImdbId = extIds.imdb_id ?? (omdb?.Response === 'True' ? (omdb.imdbID ?? null) : null)
 
     const logoUrl = fanart ? pickBestLogo(fanart) : null
@@ -779,38 +799,37 @@ app.get('/api/title/:kind/:id', async (c) => {
 
     detail.moviebox_logo = proxiedLogo
 
-    // Merge OMDB enrichment into the bundle under a dedicated namespace so the
-    // raw TMDB shape stays untouched.
-    if (omdb && omdb.Response === 'True') {
-      const omdbRuntime = parseOmdbRuntime(omdb.Runtime)
-      // All OMDB-sourced data lives under `moviebox_enrichment`. The recovered
-      // `imdb_id` (when TMDB didn't have one) is merged into `external_ids` below.
+    // Merge OMDB + RT enrichment under `moviebox_enrichment`.
+    const omdbOk = omdb?.Response === 'True'
+    const omdbRuntime = omdbOk ? parseOmdbRuntime(omdb.Runtime) : null
+    const omdbRtPercent = omdbOk ? findOmdbRating(omdb.Ratings, 'Rotten Tomatoes') : null
+    const rtStats: RottenTomatoesStats | null =
+      rtStatsFromWeb ?? buildRottenTomatoesStatsFromOmdb(omdbRtPercent)
+
+    if (omdbOk || rtStats) {
       detail.moviebox_enrichment = {
-        imdb_rating: parseOmdbFloat(omdb.imdbRating),
-        imdb_votes: parseOmdbInt(omdb.imdbVotes),
-        metascore: parseOmdbInt(omdb.Metascore),
-        rotten_tomatoes: findOmdbRating(omdb.Ratings, 'Rotten Tomatoes'),
+        imdb_rating: omdbOk ? parseOmdbFloat(omdb.imdbRating) : null,
+        imdb_votes: omdbOk ? parseOmdbInt(omdb.imdbVotes) : null,
+        metascore: omdbOk ? parseOmdbInt(omdb.Metascore) : null,
+        rotten_tomatoes: rtStats?.percentage ?? omdbRtPercent,
+        rotten_tomatoes_stats: rtStats,
         runtime_min: omdbRuntime,
-        rated: omdb.Rated && omdb.Rated !== 'N/A' ? omdb.Rated : null,
-        released: omdb.Released && omdb.Released !== 'N/A' ? omdb.Released : null,
-        director: omdb.Director && omdb.Director !== 'N/A' ? omdb.Director : null,
-        writer: omdb.Writer && omdb.Writer !== 'N/A' ? omdb.Writer : null,
-        actors: omdb.Actors && omdb.Actors !== 'N/A' ? omdb.Actors : null,
-        awards: omdb.Awards && omdb.Awards !== 'N/A' ? omdb.Awards : null,
-        country: omdb.Country && omdb.Country !== 'N/A' ? omdb.Country : null,
-        language: omdb.Language && omdb.Language !== 'N/A' ? omdb.Language : null,
-        box_office: omdb.BoxOffice && omdb.BoxOffice !== 'N/A' ? omdb.BoxOffice : null,
-        production: omdb.Production && omdb.Production !== 'N/A' ? omdb.Production : null,
-        genre: omdb.Genre && omdb.Genre !== 'N/A' ? omdb.Genre : null,
+        rated: omdbOk && omdb.Rated && omdb.Rated !== 'N/A' ? omdb.Rated : null,
+        released: omdbOk && omdb.Released && omdb.Released !== 'N/A' ? omdb.Released : null,
+        director: omdbOk && omdb.Director && omdb.Director !== 'N/A' ? omdb.Director : null,
+        writer: omdbOk && omdb.Writer && omdb.Writer !== 'N/A' ? omdb.Writer : null,
+        actors: omdbOk && omdb.Actors && omdb.Actors !== 'N/A' ? omdb.Actors : null,
+        awards: omdbOk && omdb.Awards && omdb.Awards !== 'N/A' ? omdb.Awards : null,
+        country: omdbOk && omdb.Country && omdb.Country !== 'N/A' ? omdb.Country : null,
+        language: omdbOk && omdb.Language && omdb.Language !== 'N/A' ? omdb.Language : null,
+        box_office: omdbOk && omdb.BoxOffice && omdb.BoxOffice !== 'N/A' ? omdb.BoxOffice : null,
+        production: omdbOk && omdb.Production && omdb.Production !== 'N/A' ? omdb.Production : null,
+        genre: omdbOk && omdb.Genre && omdb.Genre !== 'N/A' ? omdb.Genre : null,
       }
-      // Use OMDB runtime as a fallback only if TMDB didn't have one.
       if (!detail.runtime && omdbRuntime) detail.runtime = omdbRuntime
-      // Use OMDB plot as a fallback only if TMDB overview is empty.
-      if ((!detail.overview || !detail.overview.trim()) && omdb.Plot && omdb.Plot !== 'N/A') {
+      if (omdbOk && (!detail.overview || !detail.overview.trim()) && omdb.Plot && omdb.Plot !== 'N/A') {
         detail.overview = omdb.Plot
       }
-      // If TMDB external_ids was empty but OMDB found the id, expose it inline
-      // so the iOS client picks it up via the existing external_ids path.
       if (!extIds.imdb_id && omdbImdbId) {
         detail.external_ids = { ...detail.external_ids, imdb_id: omdbImdbId }
       }
@@ -819,6 +838,57 @@ app.get('/api/title/:kind/:id', async (c) => {
     // Cache the full bundle for 6h (TMDB rarely changes for the lifetime of a session).
     const bundleTTL = 60 * 60 * 6
     await kvPut(c.env.MOVIEBOX_CACHE,cacheKey, JSON.stringify(detail), { expirationTtl: bundleTTL })
+
+    return c.json(detail, {
+      headers: { 'X-Cache': 'MISS', 'Cache-Control': `public, max-age=${bundleTTL}` },
+    })
+  } catch (error) {
+    return c.json(
+      {
+        error: 'proxy_failed',
+        message: error instanceof Error ? error.message : 'Unknown proxy error',
+      },
+      502
+    )
+  }
+})
+
+// Person bundle: profile + combined_credits + external_ids in one RTT (KV cached).
+app.get('/api/person/:id', async (c) => {
+  try {
+    const route = parseParams(c, PersonRouteParamsSchema, c.req.param())
+    if (route instanceof Response) return route
+    const { id } = route
+
+    const cacheKey = `person:${id}`
+    const cached = await kvGet(c.env.MOVIEBOX_CACHE, cacheKey)
+    if (cached) {
+      return c.json(JSON.parse(cached), {
+        headers: { 'X-Cache': 'HIT', 'Cache-Control': 'public, max-age=21600' },
+      })
+    }
+
+    const url = `https://api.themoviedb.org/3/person/${id}?append_to_response=combined_credits,external_ids`
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${c.env.TMDB_TOKEN}` },
+    })
+
+    if (!response.ok) {
+      const body = await response.text()
+      return c.json(
+        {
+          error: 'upstream_error',
+          message: `TMDB returned ${response.status}`,
+          status: response.status,
+          body,
+        },
+        response.status
+      )
+    }
+
+    const detail = await response.json()
+    const bundleTTL = 60 * 60 * 6
+    await kvPut(c.env.MOVIEBOX_CACHE, cacheKey, JSON.stringify(detail), { expirationTtl: bundleTTL })
 
     return c.json(detail, {
       headers: { 'X-Cache': 'MISS', 'Cache-Control': `public, max-age=${bundleTTL}` },
