@@ -54,6 +54,64 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   ])
 }
 
+/** Run indexers in parallel; emit each indexer's outcome as it completes (SSE-friendly). */
+export async function runIndexersStreaming(
+  ctx: SearchContext,
+  enabledIds: Set<string>,
+  onBatch: (batch: {
+    id: string
+    rows: TorrentSearchHit[]
+    error?: string
+  }) => Promise<void>
+): Promise<{
+  results: TorrentSearchHit[]
+  counts: Record<string, number>
+  errors: Record<string, string>
+}> {
+  const active = INDEXERS.filter((i) => enabledIds.has(i.id) && i.supports(ctx))
+  const counts: Record<string, number> = {}
+  const errors: Record<string, string> = {}
+
+  const byHash = new Map<string, TorrentSearchHit>()
+  const unhashed: TorrentSearchHit[] = []
+
+  const mergeRows = (rows: TorrentSearchHit[]) => {
+    for (const row of rows) {
+      const key = row.infoHash?.toLowerCase()
+      if (!key) {
+        unhashed.push(row)
+        continue
+      }
+      const existing = byHash.get(key)
+      if (!existing || (row.seeders ?? 0) > (existing.seeders ?? 0)) {
+        byHash.set(key, row)
+      }
+    }
+  }
+
+  await Promise.allSettled(
+    active.map(async (indexer) => {
+      try {
+        const rows = await withTimeout(indexer.search(ctx), INDEXER_TIMEOUT_MS)
+        counts[indexer.id] = rows.length
+        mergeRows(rows)
+        await onBatch({ id: indexer.id, rows })
+      } catch (reason) {
+        const message = reason instanceof Error ? reason.message : String(reason)
+        errors[indexer.id] = message
+        counts[indexer.id] = 0
+        await onBatch({ id: indexer.id, rows: [], error: message })
+      }
+    })
+  )
+
+  const merged = [...byHash.values(), ...unhashed].toSorted(
+    (a, b) => (b.seeders ?? 0) - (a.seeders ?? 0)
+  )
+
+  return { results: merged, counts, errors }
+}
+
 /** Run indexers in parallel (Torrents-Api COMBO-style Promise.allSettled). */
 export async function runIndexers(
   ctx: SearchContext,

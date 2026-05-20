@@ -3,8 +3,10 @@ import { cors } from 'hono/cors'
 import { timing } from 'hono/timing'
 import { logger } from 'hono/logger'
 import { secureHeaders } from 'hono/secure-headers'
+import { streamSSE } from 'hono/streaming'
 import {
   searchAllTorrents,
+  streamAllTorrents,
   fetchTorrentFileBytes,
   TORRENT_API_VERSION,
   INDEXER_CATALOG,
@@ -611,6 +613,45 @@ app.get('/api/logo/:kind/:id', async (c) => {
       502
     )
   }
+})
+
+app.get('/api/torrent/search/stream', async (c) => {
+  const search = parseQuery(c, TorrentSearchQuerySchema, c.req.query())
+  if (search instanceof Response) return search
+
+  c.header('Content-Encoding', 'identity')
+  c.header('Cache-Control', 'no-cache, no-transform')
+  c.header('Connection', 'keep-alive')
+  c.header('X-Accel-Buffering', 'no')
+
+  return streamSSE(c, async (stream) => {
+    const write = async (event: string, data: Record<string, unknown>) => {
+      await stream.writeSSE({
+        event,
+        data: JSON.stringify(data),
+      })
+      // Flush each event promptly (important on Cloudflare Workers).
+      await stream.sleep(0)
+    }
+
+    try {
+      await write('ready', { ok: true })
+      await streamAllTorrents(
+        {
+          query: search.q,
+          year: search.year,
+          imdbId: search.imdbId,
+          kind: search.kind,
+          enabledIndexerIDs: search.enabled ?? search.indexers ?? null,
+        },
+        write
+      )
+    } catch (error) {
+      await write('error', {
+        message: error instanceof Error ? error.message : 'Torrent search failed',
+      })
+    }
+  })
 })
 
 // All torrent sources (Torrentio, YTS/ytsweb, EZTV, TPB, 1337x) — change indexers here, not in the app.

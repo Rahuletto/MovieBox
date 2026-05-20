@@ -1,6 +1,8 @@
 export { fetchTorrentFileBytes } from './metadata'
 export { DEFAULT_TRACKERS } from './utils'
 export { searchAllTorrents, searchTorrentIndexers } from './search'
+export { streamAllTorrents } from './search-stream'
+export type { TorrentSearchSSEWriter } from './search-stream'
 export { TORRENT_API_VERSION } from './types'
 export {
   INDEXER_IDS,
