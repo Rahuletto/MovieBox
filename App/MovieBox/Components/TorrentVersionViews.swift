@@ -1,5 +1,6 @@
 import CoreTorrent
 import DesignSystem
+import MovieBoxCore
 import SwiftUI
 
 // MARK: - Display model
@@ -38,9 +39,10 @@ struct TorrentCardModel: Identifiable, Hashable {
 
 // MARK: - List
 
-enum TorrentVersionListMode {
+enum TorrentVersionListMode: Equatable {
     case detail(
         busyTorrentID: UUID?,
+        bufferingByID: [UUID: TorrentRowBufferingSnapshot],
         cardErrors: [UUID: String],
         onStream: (UUID) -> Void,
         onDownload: (UUID) -> Void,
@@ -51,6 +53,17 @@ enum TorrentVersionListMode {
         isSwitching: Bool,
         onSelect: (UUID) -> Void
     )
+
+    static func == (lhs: TorrentVersionListMode, rhs: TorrentVersionListMode) -> Bool {
+        switch (lhs, rhs) {
+        case let (.detail(lBusy, lBuf, lErr, _, _, _), .detail(rBusy, rBuf, rErr, _, _, _)):
+            lBusy == rBusy && lBuf == rBuf && lErr == rErr
+        case let (.player(lSel, lSw, _), .player(rSel, rSw, _)):
+            lSel == rSel && lSw == rSw
+        default:
+            false
+        }
+    }
 }
 
 struct TorrentVersionSectionGroup: Identifiable {
@@ -119,8 +132,9 @@ struct TorrentVersionRow: View, Equatable {
 
     private var modeKey: String {
         switch mode {
-        case .detail(let busy, let errors, _, _, _):
-            "detail-\(busy?.uuidString ?? "")-\(errors[model.id] ?? "")"
+        case .detail(let busy, let buffering, let errors, _, _, _):
+            let buf = buffering[model.id].map { "\($0.progress)-\($0.phase)" } ?? ""
+            return "detail-\(busy?.uuidString ?? "")-\(buf)-\(errors[model.id] ?? "")"
         case .player(let selected, let switching, _):
             "player-\(selected?.uuidString ?? "")-\(switching)"
         }
@@ -131,9 +145,10 @@ struct TorrentVersionRow: View, Equatable {
             switch mode {
             case .player(let selectedID, let isSwitching, let onSelect):
                 playerRow(selectedID: selectedID, isSwitching: isSwitching, onSelect: onSelect)
-            case .detail(let busyID, let errors, let onStream, let onDownload, let onCopyError):
+            case .detail(let busyID, let buffering, let errors, let onStream, let onDownload, let onCopyError):
                 detailRow(
                     busyID: busyID,
+                    buffering: buffering[model.id],
                     errorMessage: errors[model.id],
                     onStream: { onStream(model.id) },
                     onDownload: { onDownload(model.id) },
@@ -169,6 +184,7 @@ struct TorrentVersionRow: View, Equatable {
 
     private func detailRow(
         busyID: UUID?,
+        buffering: TorrentRowBufferingSnapshot?,
         errorMessage: String?,
         onStream: @escaping () -> Void,
         onDownload: @escaping () -> Void,
@@ -176,6 +192,7 @@ struct TorrentVersionRow: View, Equatable {
     ) -> some View {
         let isBusy = busyID == model.id
         return rowContent(
+            buffering: isBusy ? buffering : nil,
             trailing: {
                 HStack(spacing: 4) {
                     Button(action: onStream) {
@@ -198,12 +215,6 @@ struct TorrentVersionRow: View, Equatable {
                 }
                 .frame(width: 64, alignment: .trailing)
                 .opacity(isBusy ? 0.35 : 1)
-                .overlay {
-                    if isBusy {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                }
                 .disabled(isBusy)
             },
             errorMessage: errorMessage,
@@ -212,6 +223,7 @@ struct TorrentVersionRow: View, Equatable {
     }
 
     private func rowContent<Trailing: View>(
+        buffering: TorrentRowBufferingSnapshot? = nil,
         @ViewBuilder trailing: () -> Trailing,
         errorMessage: String?,
         onCopyError: (() -> Void)? = nil
@@ -223,6 +235,11 @@ struct TorrentVersionRow: View, Equatable {
                     if !model.techKinds.isEmpty {
                         MediaTechBadgeRow(kinds: model.techKinds, context: .hero, size: .list)
                     }
+                    if let buffering {
+                        Text("\(Int(buffering.progress * 100))%")
+                            .font(.caption.weight(.semibold).monospacedDigit())
+                            .foregroundStyle(.primary.opacity(0.85))
+                    }
                 }
 
                 Text(model.title)
@@ -231,7 +248,21 @@ struct TorrentVersionRow: View, Equatable {
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
 
-                metadataRow
+                if let buffering {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(buffering.phase)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.primary)
+                        if !buffering.detail.isEmpty {
+                            Text(buffering.detail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                    }
+                } else {
+                    metadataRow
+                }
 
                 if let errorMessage {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -257,6 +288,19 @@ struct TorrentVersionRow: View, Equatable {
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            if let buffering {
+                GeometryReader { proxy in
+                    ZStack(alignment: .leading) {
+                        Color.clear
+                        Rectangle()
+                            .fill(Color.white.opacity(0.14))
+                            .frame(width: max(0, proxy.size.width * buffering.progress))
+                    }
+                }
+                .animation(.easeInOut(duration: 0.25), value: buffering.progress)
+            }
+        }
         .contentShape(Rectangle())
         .background(isHovering ? Color.primary.opacity(0.06) : Color.clear)
         .onHover { hovering in

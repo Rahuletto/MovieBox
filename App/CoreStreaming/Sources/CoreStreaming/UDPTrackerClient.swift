@@ -148,7 +148,7 @@ public actor UDPTrackerClient {
 
             connection.start(queue: queue)
 
-            queue.asyncAfter(deadline: .now() + 15) {
+            queue.asyncAfter(deadline: .now() + 6) {
                 gate.finish(throwing: UDPTrackerError.timeout)
             }
         }

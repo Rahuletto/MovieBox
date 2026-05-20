@@ -28,6 +28,7 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
     @Published public private(set) var state: State = .idle
     @Published public private(set) var downloadSpeed: Double = 0
     @Published public private(set) var peerCount: Int = 0
+    @Published public private(set) var transferringPeerCount: Int = 0
     @Published public private(set) var bufferedPieces: Int = 0
     @Published public private(set) var bufferedBytes: Int64 = 0
     /// Seeders reported by the indexer (Jackett/Prowlarr) — not the same as live peer connections.
@@ -71,6 +72,7 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
                         guard let self else { return }
                         self.downloadSpeed = speed
                         self.peerCount = peers
+                        self.transferringPeerCount = await orchestrator.transferringPeerCount()
                         await self.refreshBufferMetrics()
                         await self.updatePlaybackReadiness(progress: progress)
                     }
@@ -103,30 +105,70 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
         bufferedBytes = max(verifiedBytes, headBytes)
     }
 
+    private func tailBufferProgress() async -> (verified: Int, total: Int) {
+        guard await orchestrator.streamTargetNeedsTailProbe() else { return (1, 1) }
+        if let engine = orchestrator as? StreamingOrchestrator {
+            let verified = await engine.streamTailPiecesVerified()
+            let total = await engine.streamTailPieceCount()
+            return (verified, max(1, total))
+        }
+        let ready = await orchestrator.isStreamTailPieceReady()
+        return (ready ? 1 : 0, 1)
+    }
+
+    private func bufferingWatchdogSeconds() async -> UInt64 {
+        guard await orchestrator.streamTargetNeedsTailProbe() else { return 120 }
+        if let engine = orchestrator as? StreamingOrchestrator {
+            let tailTotal = await engine.streamTailPieceCount()
+            return UInt64(max(180, 90 + tailTotal * 18))
+        }
+        return 180
+    }
+
     private func startBufferingWatchdog() {
         bufferingWatchdogTask?.cancel()
         bufferingWatchdogTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            try? await Task.sleep(for: .seconds(90))
+            let timeout = await self.bufferingWatchdogSeconds()
+            try? await Task.sleep(for: .seconds(timeout))
             guard !Task.isCancelled else { return }
             if case .ready = state { return }
             switch state {
             case .preparing, .buffering:
-                // Snapshot before stop — peerCount drops to 0 after engine teardown (was misreported as "no peers").
                 let peersSnapshot = await orchestrator.peerCount()
-                let headKB = await orchestrator.streamHeadContiguousBytes() / 1024
-                await orchestrator.stop()
+                let transferringSnapshot = await orchestrator.transferringPeerCount()
+                let verifiedKB = await orchestrator.contiguousBytesFromStreamStart() / 1024
+                let inFlightKB = await orchestrator.streamHeadContiguousBytes() / 1024
+                let needsTail = await orchestrator.streamTargetNeedsTailProbe()
+                let hasTail = needsTail ? await orchestrator.isStreamTailPieceReady() : true
                 let minKB = StreamPlaybackThreshold.minimumHeadBytes / 1024
+                let (tailVerified, tailTotal) = await tailBufferProgress()
+                await orchestrator.stop()
                 let message: String
-                if headKB > 0 {
+                if verifiedKB == 0, inFlightKB == 0 {
+                    if transferringSnapshot == 0, peersSnapshot > 0 {
+                        message =
+                            "Peers connected but none are sending data (0 transferring / \(peersSnapshot) live). The swarm may be stale or blocking leechers — try another release."
+                    } else if peersSnapshot == 0 {
+                        message =
+                            "No peers returned data — trackers may be unreachable or this swarm is dead. Try another version."
+                    } else {
+                        message =
+                            "Buffering timed out with no data received (\(transferringSnapshot) transferring / \(peersSnapshot) live peer(s)). Try another release."
+                    }
+                } else if needsTail, !hasTail {
+                    let indexLabel = await orchestrator.streamIndexProbeLabel()
                     message =
-                        "Buffering stalled at \(headKB) KB (need ~\(minKB) KB at file start). Had \(peersSnapshot) peer(s). Try another release or wait for more seeders."
+                        "Buffering stalled — waiting for \(indexLabel) (\(tailVerified)/\(tailTotal) tail pieces, \(verifiedKB) KB verified head). Try another release."
+                } else if verifiedKB < minKB {
+                    message =
+                        "Buffering stalled at \(verifiedKB) KB verified head (need ~\(minKB) KB). \(inFlightKB) KB received but not hash-verified yet. \(transferringSnapshot) transferring / \(peersSnapshot) live peer(s)."
                 } else if peersSnapshot == 0 {
                     message =
                         "No peers returned data — trackers may be unreachable or this swarm is dead. Try another version."
                 } else {
                     message =
-                        "Buffering timed out (\(peersSnapshot) peer(s), 0 KB at file start). Try another release."
+                        "Buffering timed out (\(transferringSnapshot) transferring / \(peersSnapshot) live peer(s)). Try another release."
                 }
                 TorrentLog.warn("[StreamSession] buffering watchdog — \(message)")
                 state = .failed(error: message)
@@ -166,9 +208,11 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
                 let progress = await orchestrator.progress()
                 let speed = await orchestrator.downloadSpeed()
                 let peers = await orchestrator.peerCount()
+                let transferring = await orchestrator.transferringPeerCount()
 
                 downloadSpeed = speed
                 peerCount = peers
+                transferringPeerCount = transferring
                 await refreshBufferMetrics()
                 await updatePlaybackReadiness(progress: progress)
 
@@ -184,27 +228,36 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
         }
 
         let hasVerifiedHead = bufferedPieces >= 1
-        let hasContiguousHead = bufferedBytes >= StreamPlaybackThreshold.minimumHeadBytes
+        let verifiedHeadBytes = await orchestrator.contiguousBytesFromStreamStart()
+        let hasEnoughVerifiedHead = verifiedHeadBytes >= StreamPlaybackThreshold.minimumHeadBytes
         let needsTail = await orchestrator.streamTargetNeedsTailProbe()
         let hasTail = needsTail ? await orchestrator.isStreamTailPieceReady() : true
 
-        if (hasVerifiedHead || hasContiguousHead), hasTail {
+        if hasVerifiedHead, hasEnoughVerifiedHead, hasTail {
             if case .ready = state {} else {
+                let (tailVerified, tailTotal) = await tailBufferProgress()
                 TorrentLog.info(
-                    "[StreamSession] buffer ready — \(bufferedBytes / 1024) KB head (need \(StreamPlaybackThreshold.minimumHeadBytes / 1024) KB), tailReady=\(hasTail), \(bufferedPieces) verified piece(s), \(peerCount) connected peers"
+                    "[StreamSession] buffer ready — \(verifiedHeadBytes / 1024) KB verified head (need \(StreamPlaybackThreshold.minimumHeadBytes / 1024) KB), tail=\(tailVerified)/\(tailTotal) pieces, \(bufferedPieces) contiguous head piece(s), \(peerCount) live peers (\(transferringPeerCount) transferring)"
                 )
                 state = .ready(streamURL: url)
             }
         } else {
-            let fraction = min(1, Double(bufferedBytes) / Double(StreamPlaybackThreshold.minimumHeadBytes))
-            let hint = max(progress, fraction * 0.9, 0.02)
+            let headProgress = min(1, Double(verifiedHeadBytes) / Double(StreamPlaybackThreshold.minimumHeadBytes))
+            let (tailVerified, tailTotal) = await tailBufferProgress()
+            let tailProgress = needsTail ? min(1, Double(tailVerified) / Double(tailTotal)) : 1
+            let hint = max(progress, headProgress * 0.45 + tailProgress * 0.45, 0.02)
             if case .preparing = state {
                 TorrentLog.info(
-                    "[StreamSession] buffering — \(bufferedBytes / 1024)/\(StreamPlaybackThreshold.minimumHeadBytes / 1024) KB head, \(peerCount) connected peers (indexer: \(swarmSeeders) seeders), \(Int(downloadSpeed / 1024)) KB/s"
+                    "[StreamSession] buffering — \(verifiedHeadBytes / 1024)/\(StreamPlaybackThreshold.minimumHeadBytes / 1024) KB verified head, \(peerCount) live peers (\(transferringPeerCount) transferring, indexer: \(swarmSeeders) seeders), \(Int(downloadSpeed / 1024)) KB/s"
                 )
             }
             state = .buffering(progress: hint)
         }
+    }
+
+    /// Verified bytes from the stream file start (hash-checked). Safe to call from app modules.
+    public func verifiedHeadBytes() async -> Int64 {
+        await orchestrator.contiguousBytesFromStreamStart()
     }
 
     var activeStreamURL: URL? {
@@ -222,6 +275,65 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
         case .failed(let e): "failed(\(e.prefix(80)))"
         case .cancelled: "cancelled"
         }
+    }
+
+    public func rowBufferingMetrics() async -> StreamRowBufferingMetrics {
+        let progress: Double
+        let isPreparing: Bool
+        let isReady: Bool
+        let failedMessage: String?
+
+        switch state {
+        case .idle:
+            progress = 0.04
+            isPreparing = true
+            isReady = false
+            failedMessage = nil
+        case .preparing:
+            progress = 0.08
+            isPreparing = true
+            isReady = false
+            failedMessage = nil
+        case .buffering(let hint):
+            progress = hint
+            isPreparing = false
+            isReady = false
+            failedMessage = nil
+        case .ready:
+            progress = 1
+            isPreparing = false
+            isReady = true
+            failedMessage = nil
+        case .failed(let error):
+            progress = 0
+            isPreparing = false
+            isReady = false
+            failedMessage = error
+        case .cancelled:
+            progress = 0
+            isPreparing = false
+            isReady = false
+            failedMessage = nil
+        }
+
+        let needsTail = await orchestrator.streamTargetNeedsTailProbe()
+        let tailTotal = needsTail ? max(1, await orchestrator.streamTailPieceCount()) : 1
+        let tailVerified = needsTail ? await orchestrator.streamTailPiecesVerified() : tailTotal
+
+        return StreamRowBufferingMetrics(
+            progress: progress,
+            peerCount: peerCount,
+            transferringPeerCount: transferringPeerCount,
+            downloadSpeed: downloadSpeed,
+            verifiedHeadBytes: await verifiedHeadBytes(),
+            tailVerified: tailVerified,
+            tailTotal: tailTotal,
+            needsTailProbe: needsTail,
+            indexProbeLabel: await orchestrator.streamIndexProbeLabel(),
+            isReady: isReady,
+            isPreparing: isPreparing,
+            failedMessage: failedMessage
+        )
     }
 }
 

@@ -195,6 +195,14 @@ public actor PieceStore {
         return bytes
     }
 
+    /// Verified media bytes available from the start of the streamed file.
+    public func verifiedMediaBytesFromStart() -> Int64 {
+        let torrentBytes = contiguousBytesFromStreamStart()
+        let pieceBase = Int64(streamFirstPiece) * pieceSize
+        let prefix = max(0, streamMediaByteOffset - pieceBase)
+        return max(0, torrentBytes - prefix)
+    }
+
     /// Contiguous media bytes at the file head (includes in-flight blocks written before verify).
     public func streamHeadContiguousBytes() -> Int64 {
         streamHeadContiguousEnd
@@ -237,26 +245,44 @@ public actor PieceStore {
         var position = offset
         while position < end {
             let pieceIndex = Int(position / pieceSize)
+            guard hasPiece(pieceIndex) else {
+                return false
+            }
             let pieceStart = Int64(pieceIndex) * pieceSize
             let pieceEnd = min(end, pieceStart + pieceSize(for: pieceIndex))
-
-            if hasPiece(pieceIndex) {
-                position = pieceEnd
-                continue
-            }
-
-            let mediaStart = max(0, pieceStart - streamMediaByteOffset)
-            let mediaEnd = pieceEnd - streamMediaByteOffset
-            guard mediaEnd > 0, mediaEnd <= streamHeadContiguousEnd else {
-                return false
-            }
-            if mediaStart > 0, mediaStart > streamHeadContiguousEnd {
-                return false
-            }
-
             position = pieceEnd
         }
         return true
+    }
+
+    /// Drops unverified bytes for a piece after hash failure so AVPlayer cannot read stale data.
+    public func invalidatePiece(_ pieceIndex: Int) async throws {
+        guard pieceIndex >= 0, pieceIndex < pieceCount else {
+            throw PieceStoreError.invalidPieceIndex(pieceIndex)
+        }
+        guard let writeHandle else {
+            throw PieceStoreError.ioError("Write handle unavailable")
+        }
+
+        let offset = Int64(pieceIndex) * pieceSize
+        let length = Int(pieceSize(for: pieceIndex))
+        try writeHandle.seek(toOffset: UInt64(offset))
+        writeHandle.write(Data(repeating: 0, count: length))
+        bitmap[pieceIndex] = false
+        recomputeStreamHeadContiguousEnd()
+    }
+
+    private func recomputeStreamHeadContiguousEnd() {
+        var end: Int64 = 0
+        for index in streamFirstPiece..<pieceCount {
+            guard hasPiece(index) else { break }
+            let pieceStart = Int64(index) * pieceSize
+            let mediaStart = pieceStart - streamMediaByteOffset
+            guard mediaStart >= 0 else { continue }
+            let mediaEnd = mediaStart + pieceSize(for: index)
+            end = max(end, mediaEnd)
+        }
+        streamHeadContiguousEnd = end
     }
 
     private func pieceSize(for pieceIndex: Int) -> Int64 {

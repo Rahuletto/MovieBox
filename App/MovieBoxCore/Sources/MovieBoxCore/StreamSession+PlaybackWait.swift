@@ -20,8 +20,9 @@ public extension TorrentStreamSession {
 
             if Date().timeIntervalSince(lastHeartbeat) >= 5 {
                 lastHeartbeat = Date()
+                let verifiedKB = await verifiedHeadBytes() / 1024
                 PlaybackLog.log(
-                    "…still buffering — \(stateLabel), \(bufferedBytes / 1024) KB head, \(peerCount) connected peers (indexer swarm: \(swarmSeeders) seeders), \(Int(downloadSpeed / 1024)) KB/s"
+                    "…still buffering — \(stateLabel), \(verifiedKB) KB verified head, \(peerCount) live peers (\(transferringPeerCount) transferring, indexer swarm: \(swarmSeeders) seeders), \(Int(downloadSpeed / 1024)) KB/s"
                 )
             }
 

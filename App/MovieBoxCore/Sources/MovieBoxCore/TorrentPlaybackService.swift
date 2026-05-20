@@ -15,6 +15,7 @@ public enum TorrentPlaybackService {
     let displayTitle: String?
     let resumePosition: Double?
     let waitTimeout: TimeInterval
+    let onBufferingUpdate: (@MainActor (TorrentRowBufferingSnapshot) -> Void)?
 
     public init(
       torrent: TorrentResult,
@@ -25,7 +26,8 @@ public enum TorrentPlaybackService {
       episodeTitle: String? = nil,
       displayTitle: String? = nil,
       resumePosition: Double? = nil,
-      waitTimeout: TimeInterval = 180
+      waitTimeout: TimeInterval = 180,
+      onBufferingUpdate: (@MainActor (TorrentRowBufferingSnapshot) -> Void)? = nil
     ) {
       self.torrent = torrent
       self.allTorrents = allTorrents ?? [torrent]
@@ -36,6 +38,7 @@ public enum TorrentPlaybackService {
       self.displayTitle = displayTitle
       self.resumePosition = resumePosition
       self.waitTimeout = waitTimeout
+      self.onBufferingUpdate = onBufferingUpdate
     }
   }
 
@@ -52,7 +55,13 @@ public enum TorrentPlaybackService {
     let session = await coordinator.startSession(for: request.torrent)
     appServices.registerActiveSession(session)
 
+    let monitorTask = startRowBufferingMonitor(
+      session: session,
+      onUpdate: request.onBufferingUpdate
+    )
+
     await session.waitForPlayback(timeout: request.waitTimeout)
+    monitorTask.cancel()
 
     if case .failed(let message) = session.state {
       PlaybackLog.error("play(single) stream failed — \(message)")
@@ -168,6 +177,29 @@ public enum TorrentPlaybackService {
     let summary = lastError ?? "Could not prepare any release for streaming. Try another version."
     PlaybackLog.error("playBestAvailable exhausted — \(summary)")
     throw TorrentPlaybackError.streamingFailed(summary)
+  }
+
+  @MainActor
+  private static func startRowBufferingMonitor(
+    session: TorrentStreamSession,
+    onUpdate: (@MainActor (TorrentRowBufferingSnapshot) -> Void)?
+  ) -> Task<Void, Never> {
+    guard let onUpdate else {
+      return Task {}
+    }
+    return Task { @MainActor in
+      onUpdate(.starting)
+      while !Task.isCancelled {
+        onUpdate(await session.rowBufferingSnapshot())
+        switch session.state {
+        case .ready, .failed, .cancelled:
+          return
+        default:
+          break
+        }
+        try? await Task.sleep(for: .milliseconds(200))
+      }
+    }
   }
 
   @MainActor

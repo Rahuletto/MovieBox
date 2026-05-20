@@ -19,17 +19,22 @@ enum PieceIngestion {
             TorrentLog.warn("[PieceIngestion] Block write failed p\(pieceIndex) @\(offset): \(error)")
         }
 
-        let pieceComplete = await pieceManager.markBlockReceived(
+        let outcome = await pieceManager.markBlockReceived(
             pieceIndex: pieceIndex,
             offset: offset,
             block: block
         )
 
-        if pieceComplete {
+        switch outcome {
+        case .verified:
             _ = await pieceManager.takePieceData(pieceIndex)
             await pieceStore.markPieceVerified(pieceIndex: Int(pieceIndex))
+            return true
+        case .rejected:
+            try? await pieceStore.invalidatePiece(Int(pieceIndex))
+            return false
+        case .incomplete:
+            return false
         }
-
-        return pieceComplete
     }
 }

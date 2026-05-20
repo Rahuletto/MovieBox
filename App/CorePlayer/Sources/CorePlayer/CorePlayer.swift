@@ -308,7 +308,7 @@ public final class PlayerState {
                 self.startPlayback(subtitleURL: subtitleURL)
             }
         }
-        Task { @MainActor in work() }
+        DispatchQueue.main.async(execute: work)
     }
 
     private func startPlayback(subtitleURL: URL?) {
@@ -325,11 +325,10 @@ public final class PlayerState {
 
     private func revealPlayerWithTransition(onRevealed: @escaping () -> Void) {
         presentationTransitionTask?.cancel()
-        isPresented = true
-        isPlayerRevealed = false
-
         presentationTransitionTask = Task { @MainActor in
-            withAnimation(.easeInOut(duration: 0.38)) {}
+            await Task.yield()
+            isPresented = true
+            isPlayerRevealed = false
             try? await Task.sleep(for: .milliseconds(220))
             guard !Task.isCancelled else { return }
             withAnimation(.easeInOut(duration: 0.38)) {
@@ -351,6 +350,9 @@ public final class PlayerState {
             PlaybackLog.log(
                 "AVPlayerItem underlying domain=\(underlying.domain) code=\(underlying.code) desc=\(underlying.localizedDescription)"
             )
+            if underlying.domain == NSOSStatusErrorDomain, underlying.code == -12935 {
+                return "This file cannot be streamed yet — the torrent buffer was incomplete or corrupt. Wait for more buffering or try another release."
+            }
         }
         let trimmed = ns.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty || trimmed.lowercased() == "unknown error" {
@@ -857,32 +859,34 @@ public final class PlayerState {
             forInterval: CMTime(seconds: Self.timeObserverInterval, preferredTimescale: 600),
             queue: .main
         ) { [weak self] time in
-            guard let self else { return }
-            let seconds = time.seconds
-            currentTime = seconds
-            if let item = player.currentItem {
-                bufferedTimeRanges = item.loadedTimeRanges.compactMap { value in
-                    let range = value.timeRangeValue
-                    let start = CMTimeGetSeconds(range.start)
-                    let end = CMTimeGetSeconds(CMTimeAdd(range.start, range.duration))
-                    guard start.isFinite, end.isFinite, end > start else { return nil }
-                    return start...end
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                let seconds = time.seconds
+                self.currentTime = seconds
+                if let item = self.player.currentItem {
+                    self.bufferedTimeRanges = item.loadedTimeRanges.compactMap { value in
+                        let range = value.timeRangeValue
+                        let start = CMTimeGetSeconds(range.start)
+                        let end = CMTimeGetSeconds(CMTimeAdd(range.start, range.duration))
+                        guard start.isFinite, end.isFinite, end > start else { return nil }
+                        return start...end
+                    }
+                } else {
+                    self.bufferedTimeRanges = []
                 }
-            } else {
-                bufferedTimeRanges = []
-            }
-            updateSubtitle(at: seconds)
+                self.updateSubtitle(at: seconds)
 
-            guard movieId != 0, duration > 0 else { return }
-            let now = Date()
-            let positionDelta = abs(seconds - lastReportedPosition)
-            let elapsed = now.timeIntervalSince(lastPositionReportTime)
-            guard elapsed >= Self.positionReportInterval || positionDelta >= Self.positionReportMinimumDelta else {
-                return
+                guard self.movieId != 0, self.duration > 0 else { return }
+                let now = Date()
+                let positionDelta = abs(seconds - self.lastReportedPosition)
+                let elapsed = now.timeIntervalSince(self.lastPositionReportTime)
+                guard elapsed >= Self.positionReportInterval || positionDelta >= Self.positionReportMinimumDelta else {
+                    return
+                }
+                self.lastPositionReportTime = now
+                self.lastReportedPosition = seconds
+                self.onPositionUpdate?(self.movieId, seconds, self.duration)
             }
-            lastPositionReportTime = now
-            lastReportedPosition = seconds
-            onPositionUpdate?(movieId, seconds, duration)
         }
 
         guard let currentItem = player.currentItem else { return }
@@ -901,7 +905,7 @@ public final class PlayerState {
         }
 
         itemStatusObserver = currentItem.observe(\.status, options: [.new]) { [weak self] item, _ in
-            Task { @MainActor in
+            DispatchQueue.main.async { [weak self] in
                 guard let self, item === self.observedPlayerItem else { return }
                 switch item.status {
                 case .failed:
@@ -933,7 +937,7 @@ public final class PlayerState {
         }
 
         playbackBufferObserver = currentItem.observe(\.isPlaybackBufferEmpty, options: [.new, .initial]) { [weak self] item, _ in
-            Task { @MainActor in
+            DispatchQueue.main.async { [weak self] in
                 guard let self, item === self.observedPlayerItem else { return }
                 self.updateBufferingState(for: item)
             }
@@ -944,13 +948,13 @@ public final class PlayerState {
             object: currentItem,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
+            DispatchQueue.main.async { [weak self] in
                 self?.playNextEpisode()
             }
         }
 
         presentationSizeObserver = currentItem.observe(\.presentationSize, options: [.new, .initial]) { [weak self] item, _ in
-            Task { @MainActor in
+            DispatchQueue.main.async { [weak self] in
                 guard let self, item === self.observedPlayerItem else { return }
                 let size = item.presentationSize
                 guard size.width > 1, size.height > 1 else { return }
@@ -961,7 +965,7 @@ public final class PlayerState {
         player.publisher(for: \.timeControlStatus)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] status in
-                Task { @MainActor in
+                DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     let playing = status == .playing
                     if self.isPlaying != playing {
@@ -1114,7 +1118,9 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
     @State private var skipForwardTrigger: Int = 0
     @State private var isCommandHeld = false
     @State private var isShiftHeld = false
-    @State private var nerdStats: PlayerNerdStats?
+    @State private var nerdStatsPresented = false
+    @State private var nerdStatsSnapshot = DiagnosticsPanelSnapshot.empty
+    @State private var nerdStatsRefreshTask: Task<Void, Never>?
 
     public init(
         state: PlayerState,
@@ -1212,9 +1218,6 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
         .task {
             resetControlFade()
             NotificationCenter.default.post(name: .playerReclaimKeyboardFocus, object: nil)
-        }
-        .sheet(item: $nerdStats) { stats in
-            PlayerNerdStatsSheet(stats: stats)
         }
         .clipShape(
             RoundedRectangle(
@@ -1397,16 +1400,28 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
                 HStack(spacing: 12) {
                     if state.movieId == 0 {
                         Button {
-                            Task { await showNerdStats() }
+                            nerdStatsPresented.toggle()
                         } label: {
                             Image(systemName: "gauge.with.dots.needle.67percent")
                                 .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.85))
+                                .foregroundStyle(.white.opacity(nerdStatsPresented ? 1.0 : 0.85))
                                 .frame(width: 30, height: 30)
                                 .nativeGlassEffect()
                         }
                         .buttonStyle(.plain)
                         .help("Nerd stats")
+                        .popover(isPresented: $nerdStatsPresented, arrowEdge: .bottom) {
+                            DiagnosticsStatsPopover(snapshot: nerdStatsSnapshot)
+                                .onAppear { startNerdStatsRefresh() }
+                                .onDisappear { stopNerdStatsRefresh() }
+                        }
+                        .onChange(of: nerdStatsPresented) { _, presented in
+                            if presented {
+                                startNerdStatsRefresh()
+                            } else {
+                                stopNerdStatsRefresh()
+                            }
+                        }
                     } else {
                         streamStatsAccessory()
                     }
@@ -1844,17 +1859,52 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
                 }
             }
         }
-        nerdStats = PlayerNerdStats(
-            title: state.seriesName.isEmpty ? state.title : state.seriesName,
-            format: format,
-            quality: quality,
-            bitrate: bitrate,
-            codec: codec,
-            observedBitrate: observedBitrate,
-            indicatedBitrate: indicatedBitrate,
-            switchBitrate: switchBitrate,
-            url: streamURL.absoluteString
+        let title = state.seriesName.isEmpty ? state.title : state.seriesName
+        let capturedAt = Date()
+        nerdStatsSnapshot = DiagnosticsPanelSnapshot(
+            title: "Nerd Stats",
+            subtitle: "Updated \(capturedAt.formatted(date: .omitted, time: .standard))",
+            capturedAt: capturedAt,
+            sections: [
+                DiagnosticsPanelSnapshot.Section(
+                    title: "Playback",
+                    rows: [
+                        .init(label: "Title", value: title),
+                        .init(label: "Format", value: format),
+                        .init(label: "Quality", value: quality),
+                        .init(label: "Bitrate", value: bitrate),
+                        .init(label: "Codec", value: codec),
+                        .init(label: "Observed", value: observedBitrate),
+                        .init(label: "Indicated", value: indicatedBitrate),
+                        .init(label: "Switch", value: switchBitrate),
+                    ]
+                ),
+                DiagnosticsPanelSnapshot.Section(
+                    title: "Source",
+                    rows: [
+                        .init(label: "URL", value: streamURL.absoluteString),
+                    ]
+                ),
+            ],
+            emptyTitle: "No playback data",
+            emptyDescription: "Stats appear while a trailer or clip is playing.",
+            emptySystemImage: "play.rectangle"
         )
+    }
+
+    private func startNerdStatsRefresh() {
+        nerdStatsRefreshTask?.cancel()
+        nerdStatsRefreshTask = Task { @MainActor in
+            while !Task.isCancelled {
+                await showNerdStats()
+                try? await Task.sleep(for: .milliseconds(400))
+            }
+        }
+    }
+
+    private func stopNerdStatsRefresh() {
+        nerdStatsRefreshTask?.cancel()
+        nerdStatsRefreshTask = nil
     }
 
     private func fourCCString(_ code: FourCharCode) -> String {
@@ -2024,61 +2074,6 @@ private struct HLSVariant {
     let bandwidth: Int
     let quality: String?
     let codec: String?
-}
-
-private struct PlayerNerdStats: Identifiable {
-    let id = UUID()
-    let title: String
-    let format: String
-    let quality: String
-    let bitrate: String
-    let codec: String
-    let observedBitrate: String
-    let indicatedBitrate: String
-    let switchBitrate: String
-    let url: String
-}
-
-private struct PlayerNerdStatsSheet: View {
-    let stats: PlayerNerdStats
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                Text(stats.title)
-                    .font(.title3.weight(.bold))
-                row("Format", stats.format)
-                row("Quality", stats.quality)
-                row("Bitrate", stats.bitrate)
-                row("Codec", stats.codec)
-                row("Observed", stats.observedBitrate)
-                row("Indicated", stats.indicatedBitrate)
-                row("Switch", stats.switchBitrate)
-                row("URL", stats.url, monospaced: true)
-            }
-            .padding(20)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .frame(minWidth: 560, minHeight: 340)
-    }
-
-    @ViewBuilder
-    private func row(_ label: String, _ value: String, monospaced: Bool = false) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Text(label)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 90, alignment: .leading)
-            if monospaced {
-                Text(value)
-                    .font(.system(.footnote, design: .monospaced))
-                    .textSelection(.enabled)
-            } else {
-                Text(value)
-                    .font(.subheadline)
-            }
-        }
-    }
 }
 
 struct HUDButtonStyle: ButtonStyle {

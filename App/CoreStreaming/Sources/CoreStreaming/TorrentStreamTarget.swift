@@ -27,8 +27,20 @@ public struct TorrentStreamTarget: Sendable {
         self.contentType = contentType
     }
 
+    /// AVPlayer probes the end of the file for container indexes (MKV cues, MP4 `moov`, etc.).
     public var needsTailProbeForPlayback: Bool {
-        contentType.contains("matroska") || file.relativePath.lowercased().hasSuffix(".mkv")
+        let ext = file.relativePath.lowercased()
+        if ext.hasSuffix(".mkv") { return true }
+        if ext.hasSuffix(".mp4") || ext.hasSuffix(".m4v") || ext.hasSuffix(".mov") { return true }
+        if ext.hasSuffix(".webm") { return true }
+        return contentType.contains("matroska")
+    }
+
+    /// Containers where readiness requires a complete MP4 `moov` atom in the tail window.
+    public var needsMP4MoovTailProbe: Bool {
+        let ext = (file.relativePath as NSString).pathExtension.lowercased()
+        if ext == "mp4" || ext == "m4v" || ext == "mov" { return true }
+        return contentType.contains("mp4") || contentType.contains("quicktime")
     }
 
     public static func selectPrimary(from metadata: TorrentMetadata) -> TorrentStreamTarget {

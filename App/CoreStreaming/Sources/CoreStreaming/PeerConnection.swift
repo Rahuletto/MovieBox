@@ -167,9 +167,12 @@ public final class PeerConnection: ObservableObject {
     private var onPieceReceived: ((UInt32, UInt32, Data) async -> Void)?
     private var outstandingRequests: Set<BlockRequest> = []
     private var requestSentAt: [BlockRequest: Date] = [:]
+    private var keepaliveTask: Task<Void, Never>?
+    private var connectionStarted = Date.now
 
-    private let maxOutstanding = 8
+    private let maxOutstanding = 12
     private let requestTimeout: TimeInterval = 20
+    private let peerQueue = DispatchQueue(label: "com.moviebox.peer-connection", qos: .userInitiated)
 
     public init(peerInfo: PeerInfo, connectionPeerId: String) {
         self.peerInfo = peerInfo
@@ -184,6 +187,7 @@ public final class PeerConnection: ObservableObject {
         self.pieceManager = pieceManager
         self.onPieceReceived = onPieceReceived
         state = .connecting
+        connectionStarted = Date.now
 
         guard peerInfo.port > 0, peerInfo.port < 65536,
               let port = NWEndpoint.Port(rawValue: UInt16(peerInfo.port)) else {
@@ -211,17 +215,36 @@ public final class PeerConnection: ObservableObject {
 
         guard case .connected = state else { return }
 
+        let pieceCount = await pieceManager.pieceCount
+        sendLeecherBitfield(pieceCount: pieceCount)
+        await sendInterested()
+
         while let message = parseNextMessage() {
             await handleMessage(message)
+            guard isActive else { return }
         }
 
-        await sendInterested()
+        if isActive, !isChoked {
+            await requestPieces()
+        }
+
+        guard isActive else { return }
+
         await startReceiving()
+        startKeepalive()
+    }
+
+    public var handshakeAge: TimeInterval {
+        Date.now.timeIntervalSince(connectionStarted)
     }
 
     public func disconnect() {
+        keepaliveTask?.cancel()
+        keepaliveTask = nil
         recycleOutstandingRequests()
+        buffer.removeAll(keepingCapacity: false)
         connection?.cancel()
+        connection = nil
         state = .disconnected
     }
 
@@ -272,7 +295,7 @@ public final class PeerConnection: ObservableObject {
                 }
             }
 
-            connection.start(queue: .main)
+            connection.start(queue: peerQueue)
 
             DispatchQueue.global().asyncAfter(deadline: .now() + 8) { [weak self] in
                 Task { @MainActor in
@@ -384,8 +407,32 @@ public final class PeerConnection: ObservableObject {
         }
     }
 
+    private func sendLeecherBitfield(pieceCount: Int) {
+        guard pieceCount > 0 else { return }
+        let length = (pieceCount + 7) / 8
+        let field = Data(repeating: 0, count: length)
+        connection?.send(content: WireMessage.bitfield(field).encode(), completion: .contentProcessed { _ in })
+    }
+
     private func sendInterested() async {
         connection?.send(content: WireMessage.interested.encode(), completion: .contentProcessed { _ in })
+        if !isChoked {
+            await requestPieces()
+        }
+    }
+
+    private func startKeepalive() {
+        keepaliveTask?.cancel()
+        keepaliveTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(120))
+                guard let self, isActive else { return }
+                self.connection?.send(
+                    content: WireMessage.keepAlive.encode(),
+                    completion: .contentProcessed { _ in }
+                )
+            }
+        }
     }
 
     private func startReceiving() async {
@@ -405,11 +452,10 @@ public final class PeerConnection: ObservableObject {
 
                 if let data, !data.isEmpty {
                     self.buffer.append(data)
-                    while let message = self.parseNextMessage() {
+                    while self.isActive, let message = self.parseNextMessage() {
                         await self.handleMessage(message)
                     }
-                    if case .disconnected = self.state { return }
-                    if case .error = self.state { return }
+                    guard self.isActive else { return }
                 }
 
                 if isComplete {
@@ -418,20 +464,31 @@ public final class PeerConnection: ObservableObject {
                     return
                 }
 
+                guard self.isActive else { return }
                 await self.receiveMessages()
             }
         }
     }
 
+    private static let maxWireBufferBytes = 512 * 1024
+
     private func parseNextMessage() -> WireMessage? {
         guard buffer.count >= 4 else { return nil }
+
+        if buffer.count > Self.maxWireBufferBytes {
+            TorrentLog.warn(
+                "[PeerConnection] Wire buffer exceeded \(Self.maxWireBufferBytes) bytes from \(peerInfo.ip):\(peerInfo.port) — disconnecting"
+            )
+            disconnect()
+            return nil
+        }
 
         let start = buffer.startIndex
         let length = UInt32(buffer[start]) << 24 | UInt32(buffer[start + 1]) << 16
             | UInt32(buffer[start + 2]) << 8 | UInt32(buffer[start + 3])
 
         if length == 0 {
-            buffer.removeFirst(4)
+            buffer.removeSubrange(0..<4)
             return .keepAlive
         }
 
@@ -444,11 +501,19 @@ public final class PeerConnection: ObservableObject {
         }
 
         let totalLength = 4 + Int(length)
-        guard buffer.count >= totalLength else { return nil }
+        guard totalLength > 4, buffer.count >= totalLength else { return nil }
 
         let messageData = Data(buffer[start..<(start + totalLength)])
-        buffer.removeFirst(totalLength)
-        return WireMessage.decode(messageData)
+        guard let message = WireMessage.decode(messageData) else {
+            TorrentLog.warn(
+                "[PeerConnection] Undecodable \(totalLength)B wire frame from \(peerInfo.ip):\(peerInfo.port) — disconnecting (stream desync)"
+            )
+            disconnect()
+            return nil
+        }
+
+        buffer.removeSubrange(0..<totalLength)
+        return message
     }
 
     private func handleMessage(_ message: WireMessage) async {
@@ -489,6 +554,12 @@ public final class PeerConnection: ObservableObject {
             peerBitfield.append(contentsOf: [UInt8](repeating: 0, count: byteIndex - peerBitfield.count + 1))
         }
         peerBitfield[byteIndex] |= (1 << (7 - bitIndex))
+    }
+
+    /// Request more blocks using current `PieceManager` priority (e.g. after AVPlayer seek).
+    public func scheduleAdditionalRequests() {
+        guard isActive else { return }
+        Task { await requestPieces() }
     }
 
     private func requestPieces() async {

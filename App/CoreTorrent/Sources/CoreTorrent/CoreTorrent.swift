@@ -298,6 +298,18 @@ public enum ReleaseParser {
     }
 }
 
+public struct TorrentSearchProgress: Sendable {
+    public let torrents: [TorrentResult]
+    public let diagnostics: TorrentSearchDiagnostics?
+    public let isComplete: Bool
+
+    public init(torrents: [TorrentResult], diagnostics: TorrentSearchDiagnostics?, isComplete: Bool) {
+        self.torrents = torrents
+        self.diagnostics = diagnostics
+        self.isComplete = isComplete
+    }
+}
+
 public actor TorrentSearchAggregator {
     private let backendSearcher: BackendTorrentSearcher?
     private let torrentioFallback: TorrentioClient
@@ -323,29 +335,49 @@ public actor TorrentSearchAggregator {
         kind: TorrentioClient.MediaKind = .movie,
         enabledIndexerIDs: Set<String> = TorrentIndexerPreferences.defaultIDs,
         queryOverride: String? = nil
-    ) -> AsyncStream<[TorrentResult]> {
+    ) -> AsyncStream<TorrentSearchProgress> {
         AsyncStream { continuation in
             Task {
                 let query = queryOverride ?? TorrentSearchQuery.make(title: movieTitle, year: year)
 
                 if let backendSearcher {
-                    do {
-                        let response = try await backendSearcher.search(
-                            query: query,
-                            year: year,
-                            imdbId: imdbId,
-                            kind: kind,
-                            enabledIndexerIDs: enabledIndexerIDs
-                        )
-                        lastDiagnostics = response.diagnostics
-                        continuation.yield(Self.sorted(response.results))
-                    } catch {
-                        var diagnostics = TorrentSearchDiagnostics()
-                        diagnostics.queryUsed = query
-                        diagnostics.nativeErrors["backend"] = error.localizedDescription
-                        lastDiagnostics = diagnostics
-                        NSLog("Backend torrent search failed: \(error)")
-                        continuation.yield([])
+                    var batches: [[TorrentResult]] = []
+                    let streamSucceeded = await consumeBackendStream(
+                        backendSearcher: backendSearcher,
+                        query: query,
+                        year: year,
+                        imdbId: imdbId,
+                        kind: kind,
+                        enabledIndexerIDs: enabledIndexerIDs,
+                        batches: &batches,
+                        continuation: continuation
+                    )
+                    if !streamSucceeded {
+                        do {
+                            let response = try await backendSearcher.search(
+                                query: query,
+                                year: year,
+                                imdbId: imdbId,
+                                kind: kind,
+                                enabledIndexerIDs: enabledIndexerIDs
+                            )
+                            lastDiagnostics = response.diagnostics
+                            continuation.yield(TorrentSearchProgress(
+                                torrents: Self.sorted(response.results),
+                                diagnostics: response.diagnostics,
+                                isComplete: true
+                            ))
+                        } catch {
+                            var diagnostics = TorrentSearchDiagnostics()
+                            diagnostics.queryUsed = query
+                            diagnostics.nativeErrors["backend"] = error.localizedDescription
+                            lastDiagnostics = diagnostics
+                            continuation.yield(TorrentSearchProgress(
+                                torrents: [],
+                                diagnostics: diagnostics,
+                                isComplete: true
+                            ))
+                        }
                     }
                     continuation.finish()
                     return
@@ -368,10 +400,93 @@ public actor TorrentSearchAggregator {
                 }
 
                 lastDiagnostics = diagnostics
-                continuation.yield(Self.sorted(results))
+                let sorted = Self.sorted(results)
+                continuation.yield(TorrentSearchProgress(
+                    torrents: sorted,
+                    diagnostics: diagnostics,
+                    isComplete: true
+                ))
                 continuation.finish()
             }
         }
+    }
+
+    private func consumeBackendStream(
+        backendSearcher: BackendTorrentSearcher,
+        query: String,
+        year: Int?,
+        imdbId: String?,
+        kind: TorrentioClient.MediaKind,
+        enabledIndexerIDs: Set<String>,
+        batches: inout [[TorrentResult]],
+        continuation: AsyncStream<TorrentSearchProgress>.Continuation
+    ) async -> Bool {
+        do {
+            for try await event in backendSearcher.searchStream(
+                query: query,
+                year: year,
+                imdbId: imdbId,
+                kind: kind,
+                enabledIndexerIDs: enabledIndexerIDs
+            ) {
+                switch event {
+                case .batch(_, let results):
+                    guard !results.isEmpty else { continue }
+                    batches.append(results)
+                    let merged = Self.sorted(Self.merged(batches))
+                    continuation.yield(TorrentSearchProgress(
+                        torrents: merged,
+                        diagnostics: nil,
+                        isComplete: false
+                    ))
+                case .done(let diagnostics, _):
+                    self.lastDiagnostics = diagnostics
+                    let merged = Self.sorted(Self.merged(batches))
+                    continuation.yield(TorrentSearchProgress(
+                        torrents: merged,
+                        diagnostics: diagnostics,
+                        isComplete: true
+                    ))
+                    return true
+                case .fatal(let message):
+                    var diagnostics = TorrentSearchDiagnostics()
+                    diagnostics.queryUsed = query
+                    diagnostics.nativeErrors["backend"] = message
+                    self.lastDiagnostics = diagnostics
+                    continuation.yield(TorrentSearchProgress(
+                        torrents: Self.sorted(Self.merged(batches)),
+                        diagnostics: diagnostics,
+                        isComplete: true
+                    ))
+                    return true
+                }
+            }
+            return !batches.isEmpty
+        } catch {
+            NSLog("Backend torrent SSE failed, falling back to batch search: \(error)")
+            return false
+        }
+    }
+
+    private static func merged(_ batches: [[TorrentResult]]) -> [TorrentResult] {
+        var byHash: [String: TorrentResult] = [:]
+        var unhashed: [TorrentResult] = []
+        for batch in batches {
+            for result in batch {
+                if let hash = result.infoHash?.lowercased() {
+                    if let existing = byHash[hash] {
+                        if result.seeders > existing.seeders {
+                            byHash[hash] = result
+                        }
+                    } else {
+                        byHash[hash] = result
+                    }
+                } else {
+                    unhashed.append(result)
+                }
+            }
+        }
+        return Array(byHash.values) + unhashed
     }
 
     private static func sorted(_ results: [TorrentResult]) -> [TorrentResult] {

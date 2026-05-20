@@ -68,12 +68,23 @@ public enum TorrentMetadataFetcher {
     ]
 
     public static func fetch(infoHash: String, magnetTrackers: [String] = []) async throws -> TorrentMetadata {
+        let normalized = infoHash.lowercased()
         do {
             return try await TaskTimeout.withTimeout(seconds: 55) {
-                try await fetchResolved(infoHash: infoHash, magnetTrackers: magnetTrackers)
+                try await TorrentMetadataCache.shared.fetch(infoHash: normalized, magnetTrackers: magnetTrackers) {
+                    try await fetchResolved(infoHash: normalized, magnetTrackers: magnetTrackers)
+                }
             }
         } catch is TaskTimeoutError {
             throw FetchError.torrentFileUnavailable
+        }
+    }
+
+    /// Fire-and-forget: warms metadata cache while the user browses releases on the detail page.
+    public static func prewarm(infoHash: String, magnetTrackers: [String] = []) {
+        let normalized = infoHash.lowercased()
+        Task {
+            _ = try? await fetch(infoHash: normalized, magnetTrackers: magnetTrackers)
         }
     }
 
@@ -93,47 +104,50 @@ public enum TorrentMetadataFetcher {
         }
 
         let backend = await TorrentMetadataBackend.shared.currentConfig()
-        let useBackendOnly = backend != nil
-
-        if let backend {
-            do {
-                let data = try await fetchTorrentBytesFromBackend(hash: normalized, config: backend)
-                return try parseTorrentData(data, expectedHash: normalized, trackers: trackers)
-            } catch let error as FetchError {
-                if case .infoHashMismatch = error { throw error }
-            } catch {
-                // Fall through to peer metadata (skip broken client mirrors when backend is configured).
-            }
-        }
-
-        if !useBackendOnly {
-            if let metadata = try? await fetchFirstMirror(hash: normalized, trackers: trackers) {
-                return metadata
-            }
-        }
-
         let peerId = BitTorrentPeerID.make()
         let trackerList = trackers
-        do {
-            return try await TaskTimeout.withTimeout(seconds: useBackendOnly ? 45 : 30) {
-                try await UTMetadataFetcher.fetch(
-                    infoHash: normalized,
-                    trackers: trackerList,
-                    peerId: String(peerId)
-                )
+
+        return try await withThrowingTaskGroup(of: TorrentMetadata.self) { group in
+            if let backend {
+                group.addTask {
+                    let data = try await fetchTorrentBytesFromBackend(hash: normalized, config: backend)
+                    return try parseTorrentData(data, expectedHash: normalized, trackers: trackerList)
+                }
             }
-        } catch let error as FetchError {
-            throw error
-        } catch is TaskTimeoutError {
-            if useBackendOnly {
-                throw FetchError.backendMetadataFailed
+
+            group.addTask {
+                try await TaskTimeout.withTimeout(seconds: 35) {
+                    try await UTMetadataFetcher.fetch(
+                        infoHash: normalized,
+                        trackers: trackerList,
+                        peerId: String(peerId)
+                    )
+                }
             }
-            throw FetchError.torrentFileUnavailable
-        } catch {
-            if useBackendOnly {
-                throw FetchError.backendMetadataFailed
+
+            group.addTask {
+                try await fetchFirstMirror(hash: normalized, trackers: trackerList)
             }
-            throw FetchError.torrentFileUnavailable
+
+            var lastError: Error = FetchError.torrentFileUnavailable
+
+            while let result = await group.nextResult() {
+                switch result {
+                case .success(let metadata):
+                    group.cancelAll()
+                    return metadata
+                case .failure(let error as FetchError):
+                    if case .infoHashMismatch = error {
+                        group.cancelAll()
+                        throw error
+                    }
+                    lastError = error
+                case .failure(let error):
+                    lastError = error
+                }
+            }
+
+            throw lastError
         }
     }
 

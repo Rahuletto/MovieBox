@@ -46,7 +46,7 @@ public actor TrackerClient {
         }
 
         var request = URLRequest(url: url)
-        request.timeoutInterval = 30
+        request.timeoutInterval = 8
         request.setValue("BitTorrent/1.0", forHTTPHeaderField: "User-Agent")
 
         let (data, response) = try await session.data(for: request)

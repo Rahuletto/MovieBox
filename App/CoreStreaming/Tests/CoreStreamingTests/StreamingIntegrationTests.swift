@@ -43,9 +43,13 @@ final class MockStreamingOrchestrator: StreamingOrchestration, @unchecked Sendab
     var needsTailProbe = false
     var tailPieceReady = true
     func streamTargetNeedsTailProbe() async -> Bool { needsTailProbe }
+    func streamIndexProbeLabel() async -> String { "file index" }
+    func streamTailPieceCount() async -> Int { needsTailProbe ? 3 : 1 }
+    func streamTailPiecesVerified() async -> Int { tailPieceReady ? (needsTailProbe ? 3 : 1) : 0 }
     func isStreamTailPieceReady() async -> Bool { tailPieceReady }
     func downloadSpeed() async -> Double { speed }
     func peerCount() async -> Int { peers }
+    func transferringPeerCount() async -> Int { peers > 0 ? 1 : 0 }
 
     func emitProgress() {
         progressHandler?(overallProgress, speed, peers)
@@ -81,12 +85,18 @@ final class LocalStreamingHarness {
             totalSize: metadata.totalSize,
             piecesHash: metadata.pieces,
             streamFirstPiece: target.firstPieceIndex,
-            streamLastPiece: target.lastPieceIndex
+            streamTailPieces: StreamTailPlanner.tailPieceIndicesForDownload(
+                target: target,
+                pieceLength: metadata.pieceLength,
+                pieceCount: metadata.pieceCount
+            ),
+            streamMediaByteOffset: target.byteOffset,
+            streamMediaByteLength: target.byteLength
         )
     }
 
     func startHTTPServer() async throws -> URL {
-        try await server.start(pieceStore: store, streamTarget: target)
+        try await server.start(pieceStore: store, streamTarget: target, pieceManager: manager)
     }
 
     func ingestBlock(pieceIndex: UInt32, offset: UInt32, block: Data) async -> Bool {
@@ -132,6 +142,7 @@ final class StreamSessionIntegrationTests: XCTestCase {
         let mock = MockStreamingOrchestrator()
         mock.streamURL = URL(string: "http://127.0.0.1:8080/stream")!
         mock.headBytes = StreamPlaybackThreshold.minimumHeadBytes
+        mock.verifiedPieces = 1
         mock.peers = 3
 
         let session = StreamSession(orchestrator: mock)
@@ -161,6 +172,24 @@ final class StreamSessionIntegrationTests: XCTestCase {
             // expected
         } else {
             XCTFail("Expected buffering, got \(session.state)")
+        }
+    }
+
+    func testStaysBufferingWhenOnlyTailIsVerified() async throws {
+        let mock = MockStreamingOrchestrator()
+        mock.streamURL = URL(string: "http://127.0.0.1:8083/stream")!
+        mock.needsTailProbe = true
+        mock.tailPieceReady = true
+        mock.headBytes = StreamPlaybackThreshold.minimumHeadBytes * 2
+        mock.verifiedPieces = 0
+
+        let session = StreamSession(orchestrator: mock)
+        await session.start(torrent: makeTestTorrent())
+
+        if case .buffering = session.state {
+            // expected — unverified head must not start playback
+        } else {
+            XCTFail("Expected buffering when only tail is verified, got \(session.state)")
         }
     }
 

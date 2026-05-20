@@ -11,18 +11,28 @@ public final class HTTPRangeServer {
 
     private var listener: NWListener?
     private var pieceStore: PieceStore?
+    private var pieceManager: PieceManager?
     private var streamByteOffset: Int64 = 0
     private var streamByteLength: Int64 = 0
     private var contentType = "application/octet-stream"
 
+    /// Invoked after AVPlayer byte ranges are parsed (e.g. to nudge peer requests).
+    public var onPlayerRead: (@Sendable (Int64, Int) async -> Void)?
+
     private static let maxRangeBytes = 2 * 1024 * 1024
-    private static let readTimeoutSeconds: UInt64 = 12
+    /// How long to wait for torrent pieces before returning 503 (AVPlayer treats short timeouts as fatal).
+    private static let readTimeoutSeconds: UInt64 = 90
 
     public init() {}
 
     /// Configures stream byte mapping without starting the TCP listener (unit tests).
-    func configureForTests(pieceStore: PieceStore, streamTarget: TorrentStreamTarget) {
+    func configureForTests(
+        pieceStore: PieceStore,
+        streamTarget: TorrentStreamTarget,
+        pieceManager: PieceManager? = nil
+    ) {
         self.pieceStore = pieceStore
+        self.pieceManager = pieceManager
         streamByteOffset = streamTarget.byteOffset
         streamByteLength = streamTarget.byteLength
         contentType = streamTarget.contentType
@@ -31,17 +41,19 @@ public final class HTTPRangeServer {
     public func start(
         pieceStore: PieceStore,
         streamTarget: TorrentStreamTarget,
+        pieceManager: PieceManager? = nil,
         preferredPort: UInt16 = 0
     ) async throws -> URL {
         self.pieceStore = pieceStore
+        self.pieceManager = pieceManager
         self.streamByteOffset = streamTarget.byteOffset
         self.streamByteLength = streamTarget.byteLength
         self.contentType = streamTarget.contentType
 
         let parameters = NWParameters.tcp
         let nwPort: NWEndpoint.Port
-        if preferredPort > 0 {
-            nwPort = NWEndpoint.Port(rawValue: preferredPort)!
+        if preferredPort > 0, let port = NWEndpoint.Port(rawValue: preferredPort) {
+            nwPort = port
         } else {
             nwPort = NWEndpoint.Port.any
         }
@@ -99,6 +111,8 @@ public final class HTTPRangeServer {
         listener?.cancel()
         listener = nil
         pieceStore = nil
+        pieceManager = nil
+        onPlayerRead = nil
     }
 
     private func handleConnection(_ connection: NWConnection) async {
@@ -187,14 +201,29 @@ public final class HTTPRangeServer {
             if rangeParts.count == 2 {
                 let byteRange = rangeParts[1]
                 let rangeComponents = byteRange.components(separatedBy: "-")
-                if let startStr = rangeComponents.first, let mediaStart = Int64(startStr) {
-                    var mediaEnd: Int64
-                    if let endStr = rangeComponents.last, !endStr.isEmpty, let parsedEnd = Int64(endStr) {
+                let startStr = rangeComponents.first ?? ""
+                let endStr = rangeComponents.count > 1 ? rangeComponents[1] : ""
+
+                let mediaStart: Int64
+                let mediaEnd: Int64
+                if startStr.isEmpty, !endStr.isEmpty, let suffixLength = Int64(endStr) {
+                    // Suffix range: bytes=-500 (common for end-of-file index probes).
+                    let clampedSuffix = min(suffixLength, mediaLength)
+                    mediaStart = max(0, mediaLength - clampedSuffix)
+                    mediaEnd = mediaLength - 1
+                } else if let parsedStart = Int64(startStr) {
+                    mediaStart = parsedStart
+                    if !endStr.isEmpty, let parsedEnd = Int64(endStr) {
                         mediaEnd = min(parsedEnd, mediaLength - 1)
                     } else {
                         mediaEnd = mediaLength - 1
                     }
+                } else {
+                    mediaStart = -1
+                    mediaEnd = -1
+                }
 
+                if mediaStart >= 0 {
                     guard mediaStart < mediaLength, mediaEnd >= mediaStart else {
                         return HTTPResponse(status: 416, body: "Range Not Satisfiable")
                     }
@@ -202,11 +231,12 @@ public final class HTTPRangeServer {
                     // AVPlayer often sends open-ended ranges (e.g. bytes=0-). Cap the span
                     // instead of 416 — oversized ranges surface as "unknown error" in AVFoundation.
                     let maxSpan = Int64(Self.maxRangeBytes)
-                    if mediaEnd - mediaStart + 1 > maxSpan {
-                        mediaEnd = mediaStart + maxSpan - 1
+                    var cappedEnd = mediaEnd
+                    if cappedEnd - mediaStart + 1 > maxSpan {
+                        cappedEnd = mediaStart + maxSpan - 1
                     }
 
-                    let span = mediaEnd &- mediaStart
+                    let span = cappedEnd &- mediaStart
                     let spanPlusOne = span &+ 1
                     guard spanPlusOne > 0 else {
                         return HTTPResponse(status: 416, body: "Range Not Satisfiable")
@@ -215,18 +245,29 @@ public final class HTTPRangeServer {
                     length = min(length, Self.maxRangeBytes)
                     let torrentOffset = streamByteOffset + mediaStart
 
+                    await notifyPlayerRead(mediaOffset: mediaStart, length: length)
+
                     do {
                         bodyData = try await readBytes(
                             pieceStore: pieceStore,
                             offset: torrentOffset,
                             length: length
                         )
+                        if bodyData.count < length {
+                            TorrentLog.warn(
+                                "[HTTPRangeServer] Short read \(bodyData.count)/\(length) at \(mediaStart) — still buffering"
+                            )
+                            return HTTPResponse(status: 503, body: "Buffering", retryAfterSeconds: 2)
+                        }
                         let servedEnd = mediaStart + Int64(bodyData.count) - 1
                         statusCode = 206
                         contentRange = "bytes \(mediaStart)-\(servedEnd)/\(mediaLength)"
                         contentLength = Int64(bodyData.count)
                     } catch is HTTPRangeReadTimeout {
-                        return HTTPResponse(status: 503, body: "Buffering", retryAfterSeconds: 1)
+                        TorrentLog.warn(
+                            "[HTTPRangeServer] Range \(mediaStart)-\(mediaEnd) timed out after \(Self.readTimeoutSeconds)s — still buffering"
+                        )
+                        return HTTPResponse(status: 503, body: "Buffering", retryAfterSeconds: 2)
                     } catch {
                         TorrentLog.warn("[HTTPRangeServer] Range read failed: \(error.localizedDescription)")
                         return HTTPResponse(status: 500, body: "Internal Server Error")
@@ -234,11 +275,12 @@ public final class HTTPRangeServer {
                 }
             }
         } else if method == "GET" {
-            let headAvailable = await pieceStore.streamHeadContiguousBytes()
-            let length = min(512 * 1024, Int(mediaLength), Int(headAvailable))
+            let verifiedMedia = await pieceStore.verifiedMediaBytesFromStart()
+            let length = min(512 * 1024, Int(mediaLength), Int(verifiedMedia))
             guard length > 0 else {
-                return HTTPResponse(status: 503, body: "Buffering")
+                return HTTPResponse(status: 503, body: "Buffering", retryAfterSeconds: 2)
             }
+            await notifyPlayerRead(mediaOffset: 0, length: length)
             do {
                 bodyData = try await readBytes(
                     pieceStore: pieceStore,
@@ -282,6 +324,11 @@ public final class HTTPRangeServer {
         }
 
         return HTTPResponse(status: statusCode, data: response, retryAfterSeconds: retryAfterSeconds)
+    }
+
+    private func notifyPlayerRead(mediaOffset: Int64, length: Int) async {
+        await pieceManager?.notePlayerRead(mediaOffset: mediaOffset, length: length)
+        await onPlayerRead?(mediaOffset, length)
     }
 
     private func readBytes(pieceStore: PieceStore, offset: Int64, length: Int) async throws -> Data {

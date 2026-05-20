@@ -30,6 +30,7 @@ struct TorrentSection: View {
     private var downloadManager: DownloadManager { appServices.downloadManager }
     @State private var currentPage = 0
     @State private var busyTorrentID: UUID?
+    @State private var rowBufferingByID: [UUID: TorrentRowBufferingSnapshot] = [:]
     @State private var cardErrors: [UUID: String] = [:]
     @State private var errorDismissTasks: [UUID: Task<Void, Never>] = [:]
     @State private var downloadWatchTask: Task<Void, Never>?
@@ -71,7 +72,7 @@ struct TorrentSection: View {
         VStack(alignment: .leading, spacing: 12) {
             header
 
-            if isLoading {
+            if isLoading && torrents.isEmpty {
                 HStack(spacing: 10) {
                     ProgressView()
                         .controlSize(.small)
@@ -88,6 +89,16 @@ struct TorrentSection: View {
                 )
                 .frame(maxWidth: .infinity, minHeight: 160)
             } else {
+                if isLoading {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Still searching for more…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 if seededTorrents.isEmpty && !unseededTorrents.isEmpty {
                     Text("No seeded releases right now. Unseeded copies may not stream.")
                         .font(.caption)
@@ -98,6 +109,7 @@ struct TorrentSection: View {
                     models: visibleCardModels,
                     mode: .detail(
                         busyTorrentID: busyTorrentID,
+                        bufferingByID: rowBufferingByID,
                         cardErrors: cardErrors,
                         onStream: { startStream(for: $0) },
                         onDownload: { startDownload(for: $0) },
@@ -207,6 +219,7 @@ struct TorrentSection: View {
 
     private func startStream(_ torrent: TorrentResult) {
         busyTorrentID = torrent.id
+        rowBufferingByID[torrent.id] = .starting
         clearError(for: torrent.id)
 
         let playback = PlaybackSettings(
@@ -218,6 +231,7 @@ struct TorrentSection: View {
             defer {
                 withAnimation(MovieBoxMotion.player) {
                     busyTorrentID = nil
+                    rowBufferingByID.removeValue(forKey: torrent.id)
                 }
             }
             do {
@@ -238,7 +252,10 @@ struct TorrentSection: View {
                         playback: playback,
                         episodeTitle: episodeLabel,
                         displayTitle: movie.title,
-                        resumePosition: WatchProgressStore.resumePosition(for: movie.id, in: storedMovies)
+                        resumePosition: WatchProgressStore.resumePosition(for: movie.id, in: storedMovies),
+                        onBufferingUpdate: { snapshot in
+                            rowBufferingByID[torrent.id] = snapshot
+                        }
                     ),
                     appServices: appServices,
                     playerState: playerState

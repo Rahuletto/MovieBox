@@ -1,4 +1,5 @@
 import CoreStreaming
+import CoreTorrent
 import Foundation
 import Observation
 
@@ -31,5 +32,15 @@ public final class AppServices {
 
     public func registerActiveSession(_ session: TorrentStreamSession?) {
         activeSession = session
+    }
+
+    /// Warms torrent metadata cache for the best release while the user is on the detail page.
+    public func prewarmStreamingMetadata(for torrents: [TorrentResult]) {
+        let candidates = torrents.filter { $0.seeders > 0 }
+        let ordered = (candidates.isEmpty ? torrents : candidates).sorted { $0.seeders > $1.seeders }
+        guard let torrent = ordered.first else { return }
+        let magnet = MagnetURI(from: torrent.magnetURI)
+        guard let infoHash = torrent.infoHash ?? magnet?.infoHash, !infoHash.isEmpty else { return }
+        TorrentMetadataFetcher.prewarm(infoHash: infoHash, magnetTrackers: magnet?.trackers ?? [])
     }
 }

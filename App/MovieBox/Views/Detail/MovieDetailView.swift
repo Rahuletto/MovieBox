@@ -39,6 +39,7 @@ struct MovieDetailView: View {
     @State private var isLoadingTVSeasons = false
     @State private var isLoadingTVEpisodes = false
     @State private var isLoadingTorrents = false
+    @State private var torrentSearchTask: Task<Void, Never>?
     @State private var tvSeasonsLoadFailed = false
     private let movieId: Int
     private let kind: MediaKind
@@ -211,7 +212,7 @@ struct MovieDetailView: View {
                     await selectEpisode(episode)
                 }
             } else {
-                Task { await searchTorrents() }
+                Task { startTorrentSearch() }
             }
         } catch let loadError as MovieDetailLoader.LoadError {
             errorMessage = loadError.errorDescription
@@ -290,27 +291,47 @@ struct MovieDetailView: View {
     private func selectEpisode(_ episode: TVEpisode) async {
         selectedTVEpisode = episode
         if isUpcomingEpisode(episode) {
+            torrentSearchTask?.cancel()
             torrents = []
             return
         }
-        await searchTorrents(episode: episode)
+        startTorrentSearch(episode: episode)
+    }
+
+    private func startTorrentSearch(episode: TVEpisode? = nil) {
+        torrentSearchTask?.cancel()
+        torrentSearchTask = Task {
+            await searchTorrents(episode: episode)
+        }
     }
 
     private func searchTorrents(episode: TVEpisode? = nil) async {
         guard let detail else { return }
+        guard !Task.isCancelled else { return }
+
         isLoadingTorrents = true
         torrents = []
         torrentSearchDiagnostics = nil
-        defer { isLoadingTorrents = false }
 
-        let result = await MovieDetailTorrentSearch.search(
+        for await update in MovieDetailTorrentSearch.searchStream(
             detail: detail,
             kind: kind,
             settings: settings.first,
             episode: episode
-        )
-        torrents = result.torrents
-        torrentSearchDiagnostics = result.diagnostics
+        ) {
+            guard !Task.isCancelled else { break }
+            torrents = update.torrents
+            if let diagnostics = update.diagnostics {
+                torrentSearchDiagnostics = diagnostics
+            }
+            if update.isComplete {
+                isLoadingTorrents = false
+                appServices.prewarmStreamingMetadata(for: torrents)
+            }
+        }
+
+        if Task.isCancelled { return }
+        isLoadingTorrents = false
     }
 
     private func addToMyList(_ movie: Movie) {

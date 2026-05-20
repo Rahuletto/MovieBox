@@ -61,8 +61,95 @@ final class ProgressiveStreamingTests: XCTestCase {
         }
     }
 
+    func testPieceManagerPrioritizesPlayerSeekRange() async {
+        let pieceLength: Int64 = 1 * 1024 * 1024
+        let manager = PieceManager(
+            pieceCount: 10,
+            pieceLength: pieceLength,
+            totalSize: pieceLength * 10,
+            piecesHash: Data(repeating: 0, count: 10 * 20),
+            streamMediaByteLength: pieceLength * 10
+        )
+
+        await manager.notePlayerRead(mediaOffset: 5 * 1024 * 1024, length: 64 * 1024)
+        guard let seekRequest = await manager.getNextRequest() else {
+            XCTFail("Expected a block request after seek notification")
+            return
+        }
+        XCTAssertEqual(seekRequest.pieceIndex, 5, "Seek to 5 MB should prioritize piece 5 before piece 0")
+    }
+
     func testPlaybackReadinessThreshold() {
         XCTAssertEqual(StreamPlaybackThreshold.minimumHeadBytes, 192 * 1024)
+    }
+
+    func testTailPlannerRequestsMultipleEndPieces() {
+        let metadata = TorrentMetadata(
+            infoHash: String(repeating: "a", count: 40),
+            name: "sample.mp4",
+            totalSize: 10 * 1024 * 1024,
+            pieceLength: 2 * 1024 * 1024,
+            pieces: Data(repeating: 0, count: 5 * 20),
+            files: [TorrentFile(relativePath: "sample.mp4", length: 10 * 1024 * 1024)],
+            trackers: []
+        )
+        let target = TorrentStreamTarget.selectPrimary(from: metadata)
+        let tail = StreamTailPlanner.tailPieceIndices(
+            target: target,
+            pieceLength: metadata.pieceLength,
+            pieceCount: metadata.pieceCount
+        )
+        XCTAssertGreaterThanOrEqual(tail.count, 2)
+        XCTAssertTrue(tail.contains(target.lastPieceIndex))
+    }
+
+    func testFastStartMP4Detection() {
+        var data = Data()
+        data.append(contentsOf: [0, 0, 0, 32])
+        data.append(contentsOf: "ftyp".utf8)
+        data.append(contentsOf: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        data.append(contentsOf: [0, 0, 0, 40])
+        data.append(contentsOf: "moov".utf8)
+        data.append(contentsOf: Data(repeating: 0, count: 32))
+        XCTAssertTrue(StreamTailPlanner.isFastStartMP4(in: data))
+    }
+
+    func testMoovTailProbeCompleteAtEOF() {
+        var data = Data()
+        let moovPayload = Data(repeating: 0xAB, count: 40)
+        let moovSize = 8 + moovPayload.count
+        data.append(contentsOf: UInt32(moovSize).bigEndianBytes)
+        data.append(contentsOf: "moov".utf8)
+        data.append(moovPayload)
+        XCTAssertEqual(StreamTailPlanner.moovTailProbe(in: data, endsAtFileEOF: true), .complete)
+    }
+
+    func testMoovTailProbeIncompleteWhenTruncated() {
+        var full = Data()
+        let moovSize = 128
+        full.append(contentsOf: UInt32(moovSize).bigEndianBytes)
+        full.append(contentsOf: "moov".utf8)
+        full.append(Data(repeating: 0, count: moovSize - 8))
+        let truncated = full.prefix(64)
+        XCTAssertEqual(StreamTailPlanner.moovTailProbe(in: truncated, endsAtFileEOF: true), .incomplete)
+    }
+
+    func testLargeFileUsesWiderInitialTailSpan() {
+        let span = StreamTailPlanner.tailByteSpan(byteLength: 3_095_505_925, pieceLength: 2 * 1024 * 1024)
+        XCTAssertGreaterThanOrEqual(span, 32 * 1024 * 1024)
+    }
+
+    func testMoovSubstringInsideMdatIsNotFastStart() {
+        var data = Data()
+        data.append(contentsOf: [0, 0, 0, 32])
+        data.append(contentsOf: "ftyp".utf8)
+        data.append(contentsOf: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        data.append(contentsOf: [0, 0, 0, 48])
+        data.append(contentsOf: "mdat".utf8)
+        // Random payload that happens to contain "moov" bytes — must not qualify as fast-start.
+        data.append(contentsOf: [0x6D, 0x6F, 0x6F, 0x76, 0, 0, 0, 0])
+        data.append(contentsOf: Data(repeating: 0, count: 32))
+        XCTAssertFalse(StreamTailPlanner.isFastStartMP4(in: data))
     }
 }
 
@@ -109,11 +196,20 @@ final class HTTPRangeServerTests: XCTestCase {
             )
         }
 
+        let manager = PieceManager(
+            pieceCount: 2,
+            pieceLength: pieceSize,
+            totalSize: fileLength,
+            piecesHash: Data(repeating: 0, count: 40),
+            streamMediaByteLength: fileLength
+        )
         let server = HTTPRangeServer()
-        server.configureForTests(pieceStore: store, streamTarget: target)
+        server.configureForTests(pieceStore: store, streamTarget: target, pieceManager: manager)
 
         let request = "GET /stream HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=0-16383\r\n\r\n"
         let response = await server.handleRequest(request, pieceStore: store)
+        let hotCount = await manager.playerHotPieceCount()
+        XCTAssertGreaterThan(hotCount, 0)
 
         XCTAssertEqual(response.status, 206)
         let headerEnd = response.data.range(of: Data("\r\n\r\n".utf8))!

@@ -18,6 +18,7 @@ struct SearchView: View {
     @State private var errorMessage: String?
     @State private var searchTask: Task<Void, Never>?
     @State private var suggestedQuery: String?
+    @State private var genreImages: [Int: URL] = [:]
 
     private let columns = [
         GridItem(.adaptive(minimum: MoviePosterCard.posterWidth, maximum: 186), spacing: 16)
@@ -124,11 +125,14 @@ struct SearchView: View {
 
             LazyVGrid(columns: columns, spacing: 16) {
                 ForEach(GenreCard.movieGenres) { genre in
-                    GenreCardView(genre: genre) {
+                    GenreCardView(genre: genre, imageURL: genreImages[genre.id]) {
                         router.selectedGenre = genre
                     }
                 }
             }
+        }
+        .task {
+            await loadGenreImages()
         }
     }
 
@@ -438,6 +442,24 @@ struct SearchView: View {
         withAnimation {
             modelContext.delete(item)
             try? modelContext.save()
+        }
+    }
+
+    private func loadGenreImages() async {
+        guard genreImages.isEmpty else { return }
+        guard let mode = MetadataSettings.mode(from: settings) else { return }
+        let client = MetadataClient(mode: mode)
+        
+        var resolved: [Int: URL] = [:]
+        for genre in GenreCard.movieGenres {
+            if let path = genre.staticBackdropPath,
+               let url = client.imageURL(path: path, width: 780) {
+                resolved[genre.id] = url
+            }
+        }
+        
+        await MainActor.run {
+            self.genreImages = resolved
         }
     }
 }

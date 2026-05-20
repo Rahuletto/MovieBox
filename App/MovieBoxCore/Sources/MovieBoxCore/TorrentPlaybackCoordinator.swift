@@ -68,18 +68,30 @@ public final class TorrentPlaybackCoordinator {
 
         PlaybackLog.log("finishPlayback → loading player url=\(MovieBoxFileLogger.redactURL(url)) movieId=\(movieId) hdr=\(torrent.hdrType?.rawValue ?? "none")")
         let hudTitle = displayTitle.map { PlaybackDisplayTitle.clean($0) }
-        Task { @MainActor in
+        let loadPayload = (
+            url: url,
+            title: torrent.title,
+            movieId: movieId,
+            subtitleURL: subtitleURL,
+            hdr: playerHDRType(from: torrent.hdrType),
+            appearance: subtitleAppearance,
+            fontSize: subtitleFontSize,
+            episodeTitle: episodeTitle,
+            hudTitle: hudTitle,
+            resume: resumePosition
+        )
+        DispatchQueue.main.async {
             playerState.load(
-                url: url,
-                title: torrent.title,
-                movieId: movieId,
-                subtitleURL: subtitleURL,
-                hdrType: playerHDRType(from: torrent.hdrType),
-                subtitleAppearance: subtitleAppearance,
-                subtitleFontSize: subtitleFontSize,
-                episodeTitle: episodeTitle,
-                displayTitle: hudTitle,
-                resumePosition: resumePosition
+                url: loadPayload.url,
+                title: loadPayload.title,
+                movieId: loadPayload.movieId,
+                subtitleURL: loadPayload.subtitleURL,
+                hdrType: loadPayload.hdr,
+                subtitleAppearance: loadPayload.appearance,
+                subtitleFontSize: loadPayload.fontSize,
+                episodeTitle: loadPayload.episodeTitle,
+                displayTitle: loadPayload.hudTitle,
+                resumePosition: loadPayload.resume
             )
         }
     }

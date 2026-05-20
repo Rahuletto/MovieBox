@@ -3,6 +3,12 @@ import CryptoKit
 
 // MARK: - Piece Manager (Streaming Priority)
 
+public enum PieceReceiveOutcome: Sendable {
+    case incomplete
+    case verified
+    case rejected
+}
+
 public actor PieceManager {
     public let pieceCount: Int
     public let pieceLength: Int64
@@ -10,12 +16,20 @@ public actor PieceManager {
     public let blockSize: UInt32 = 16384
     public let streamFirstPiece: Int
     public let streamLastPiece: Int
+    public let streamTailPieces: [Int]
+    public let streamMediaByteOffset: Int64
+    public let streamMediaByteLength: Int64
 
     private var pieceHashes: [Data] = []
     private var downloadedPieces: Set<UInt32> = []
     private var pendingRequests: Set<BlockRequest> = []
     private var pieceBuffers: [UInt32: Data] = [:]
     private var receivedBlockOffsets: [UInt32: Set<UInt32>] = [:]
+    /// Pieces AVPlayer recently requested via HTTP ranges (newest first).
+    private var playerHotPieces: [UInt32] = []
+
+    private static let maxHotPieces = 32
+    private static let readAheadPieceCount = 3
 
     public init(
         pieceCount: Int,
@@ -23,13 +37,25 @@ public actor PieceManager {
         totalSize: Int64,
         piecesHash: Data,
         streamFirstPiece: Int = 0,
-        streamLastPiece: Int? = nil
+        streamLastPiece: Int? = nil,
+        streamTailPieces: [Int]? = nil,
+        streamMediaByteOffset: Int64 = 0,
+        streamMediaByteLength: Int64? = nil
     ) {
         self.pieceCount = pieceCount
         self.pieceLength = pieceLength
         self.totalSize = totalSize
         self.streamFirstPiece = streamFirstPiece
-        self.streamLastPiece = streamLastPiece ?? max(0, pieceCount - 1)
+        self.streamMediaByteOffset = streamMediaByteOffset
+        self.streamMediaByteLength = streamMediaByteLength ?? max(0, totalSize - streamMediaByteOffset)
+        if let streamTailPieces, !streamTailPieces.isEmpty {
+            self.streamTailPieces = streamTailPieces
+            self.streamLastPiece = streamTailPieces.max() ?? max(0, pieceCount - 1)
+        } else {
+            let last = streamLastPiece ?? max(0, pieceCount - 1)
+            self.streamLastPiece = last
+            self.streamTailPieces = [last]
+        }
 
         let cleanHash = Data(piecesHash)
         var index = 0
@@ -69,7 +95,7 @@ public actor PieceManager {
         }
     }
 
-    public func markBlockReceived(pieceIndex: UInt32, offset: UInt32, block: Data) -> Bool {
+    public func markBlockReceived(pieceIndex: UInt32, offset: UInt32, block: Data) -> PieceReceiveOutcome {
         pendingRequests.remove(BlockRequest(pieceIndex: pieceIndex, offset: offset, length: 0))
 
         let expectedSize = Int(pieceSize(for: pieceIndex))
@@ -77,11 +103,11 @@ public actor PieceManager {
             pieceBuffers[pieceIndex] = Data(count: expectedSize)
         }
 
-        guard var buffer = pieceBuffers[pieceIndex] else { return false }
+        guard var buffer = pieceBuffers[pieceIndex] else { return .incomplete }
 
         let start = Int(offset)
         let end = start + block.count
-        guard start >= 0, end <= buffer.count else { return false }
+        guard start >= 0, end <= buffer.count else { return .incomplete }
 
         buffer.replaceSubrange(start..<end, with: block)
         pieceBuffers[pieceIndex] = buffer
@@ -91,10 +117,14 @@ public actor PieceManager {
         receivedBlockOffsets[pieceIndex] = offsets
 
         guard isPieceFullyReceived(pieceIndex: pieceIndex, expectedSize: expectedSize) else {
-            return false
+            return .incomplete
         }
 
-        return verifyPiece(pieceIndex: pieceIndex, data: buffer)
+        guard verifyPiece(pieceIndex: pieceIndex, data: buffer) else {
+            return .rejected
+        }
+
+        return .verified
     }
 
     public func cancelPendingRequests() -> [BlockRequest] {
@@ -125,20 +155,57 @@ public actor PieceManager {
         return pieceBuffers[pieceIndex]
     }
 
-    /// Head, then tail (MKV cues), then sequential — so AVPlayer's end-of-file probes can be served.
-    private func earliestIncompletePiece(peerBitfield: Data) -> UInt32? {
-        var priority: [UInt32] = [UInt32(streamFirstPiece)]
-        let last = UInt32(streamLastPiece)
-        if last != UInt32(streamFirstPiece) {
-            priority.append(last)
-        }
-        for i in streamFirstPiece..<pieceCount {
-            let index = UInt32(i)
-            if !priority.contains(index) {
-                priority.append(index)
+    /// Called when AVPlayer requests a byte range — boosts torrent piece priority for that span.
+    public func notePlayerRead(mediaOffset: Int64, length: Int) {
+        let indices = pieceIndicesCovering(mediaOffset: mediaOffset, length: length)
+        guard !indices.isEmpty else { return }
+
+        var expanded = indices
+        if let last = indices.last {
+            for ahead in 1...Self.readAheadPieceCount {
+                let next = last + UInt32(ahead)
+                guard Int(next) < pieceCount else { break }
+                expanded.append(next)
             }
         }
 
+        for index in expanded.reversed() {
+            playerHotPieces.removeAll { $0 == index }
+            playerHotPieces.insert(index, at: 0)
+        }
+        if playerHotPieces.count > Self.maxHotPieces {
+            playerHotPieces.removeLast(playerHotPieces.count - Self.maxHotPieces)
+        }
+    }
+
+    public func playerHotPieceCount() -> Int {
+        playerHotPieces.count
+    }
+
+    /// Until head + tail index pieces are verified, never fall back to middle-of-file pieces
+    /// (peers without end-of-file in bitfield would otherwise pull piece 1, 2, … forever).
+    private func earliestIncompletePiece(peerBitfield: Data) -> UInt32? {
+        let bootstrap = buildBootstrapPriorityOrder()
+        if needsIndexBootstrap() {
+            if let index = firstIncompletePiece(in: bootstrap, peerBitfield: peerBitfield) {
+                return index
+            }
+            return firstIncompletePiece(in: bootstrap, peerBitfield: Data())
+        }
+
+        let priority = buildFullPriorityOrder()
+        if let index = firstIncompletePiece(in: priority, peerBitfield: peerBitfield) {
+            return index
+        }
+        return firstIncompletePiece(in: priority, peerBitfield: Data())
+    }
+
+    private func needsIndexBootstrap() -> Bool {
+        guard downloadedPieces.contains(UInt32(streamFirstPiece)) else { return true }
+        return streamTailPieces.contains { !downloadedPieces.contains(UInt32($0)) }
+    }
+
+    private func firstIncompletePiece(in priority: [UInt32], peerBitfield: Data) -> UInt32? {
         for index in priority {
             guard !downloadedPieces.contains(index) else { continue }
             if !peerBitfield.isEmpty, !peerHasPiece(index, in: peerBitfield) {
@@ -147,6 +214,49 @@ public actor PieceManager {
             return index
         }
         return nil
+    }
+
+    private func buildBootstrapPriorityOrder() -> [UInt32] {
+        var priority: [UInt32] = []
+        func append(_ index: UInt32) {
+            guard !priority.contains(index) else { return }
+            priority.append(index)
+        }
+
+        for index in playerHotPieces {
+            append(index)
+        }
+        append(UInt32(streamFirstPiece))
+        for piece in streamTailPieces {
+            append(UInt32(piece))
+        }
+        return priority
+    }
+
+    private func buildFullPriorityOrder() -> [UInt32] {
+        var priority = buildBootstrapPriorityOrder()
+        func append(_ index: UInt32) {
+            guard !priority.contains(index) else { return }
+            priority.append(index)
+        }
+
+        for i in streamFirstPiece..<pieceCount {
+            append(UInt32(i))
+        }
+        return priority
+    }
+
+    private func pieceIndicesCovering(mediaOffset: Int64, length: Int) -> [UInt32] {
+        guard length > 0, mediaOffset >= 0 else { return [] }
+        let span = min(Int64(length), streamMediaByteLength - mediaOffset)
+        guard span > 0 else { return [] }
+
+        let torrentStart = streamMediaByteOffset + mediaOffset
+        let torrentEnd = torrentStart + span - 1
+        let first = max(0, Int(torrentStart / pieceLength))
+        let last = min(pieceCount - 1, Int(torrentEnd / pieceLength))
+        guard first <= last else { return [] }
+        return (first...last).map { UInt32($0) }
     }
 
     private func isPieceFullyReceived(pieceIndex: UInt32, expectedSize: Int) -> Bool {
