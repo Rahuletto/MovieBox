@@ -22,15 +22,7 @@ struct HomeView: View {
 
     var body: some View {
         ZStack {
-            // Ambient subtle background gradient for an elite glow
-            RadialGradient(
-                colors: [Color.red.opacity(0.12), Color.clear],
-                center: .topLeading,
-                startRadius: 20,
-                endRadius: 480
-            )
-            .ignoresSafeArea()
-            
+            AmbientTopGlow(color: MovieBoxColors.homeGlow)
 
 
             if metadataMode == nil {

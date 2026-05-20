@@ -3,6 +3,7 @@ import SwiftUI
 /// Transient glass pill shown near the top of the player (fast scan speed, video fit mode, etc.).
 public enum PlayerHUDStatusPillModel: Equatable, Sendable {
     case fastScan(icon: String, multiplier: Int)
+    case playbackRate(rate: Double)
     case videoGravity(title: String, icon: String = "aspectratio")
 }
 
@@ -35,6 +36,14 @@ public struct PlayerHUDStatusPill: View {
                     .font(.system(size: 12, weight: .bold))
                     .contentTransition(.symbolEffect(.replace))
                 Text("\(multiplier)x")
+                    .font(.system(size: 13, weight: .semibold))
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+            case .playbackRate(let rate):
+                Image(systemName: "timer")
+                    .font(.system(size: 12, weight: .bold))
+                    .contentTransition(.symbolEffect(.replace))
+                Text("\(rate, specifier: "%g")x")
                     .font(.system(size: 13, weight: .semibold))
                     .monospacedDigit()
                     .contentTransition(.numericText())

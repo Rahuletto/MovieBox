@@ -418,15 +418,32 @@ public final class PlayerState {
     }
 
     private func presentVideoGravityHUDPill() {
+        presentTransientHUDPill(.videoGravity(title: videoGravityHUDTitle, icon: "aspectratio")) { pill in
+            if case .videoGravity = pill { return true }
+            return false
+        }
+    }
+
+    private func presentPlaybackRateHUDPill() {
+        presentTransientHUDPill(.playbackRate(rate: playbackRate)) { pill in
+            if case .playbackRate = pill { return true }
+            return false
+        }
+    }
+
+    private func presentTransientHUDPill(
+        _ pill: PlayerHUDStatusPillModel,
+        shouldDismiss: @escaping (PlayerHUDStatusPillModel) -> Bool
+    ) {
         cancelHUDPillDismissTask()
         hudPillDismissGeneration += 1
         let generation = hudPillDismissGeneration
-        setHUDStatusPill(.videoGravity(title: videoGravityHUDTitle, icon: "aspectratio"))
+        setHUDStatusPill(pill)
         hudPillDismissTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(2))
             guard !Task.isCancelled else { return }
             guard self.hudPillDismissGeneration == generation else { return }
-            if case .videoGravity = self.hudStatusPill {
+            if let current = self.hudStatusPill, shouldDismiss(current) {
                 self.setHUDStatusPill(nil)
             }
         }
@@ -764,6 +781,7 @@ public final class PlayerState {
         guard !isFastScanning else { return }
         playbackRate = rate
         player.rate = Float(rate)
+        presentPlaybackRateHUDPill()
     }
 
     public func startFastScan(forward: Bool) {
@@ -1117,33 +1135,30 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
                 .ignoresSafeArea()
 
             // Elegant native vignetting overlay when controls are showing to elevate legibility
-            Group {
-                if state.showsControls {
-                    ZStack {
-                        Color.black.opacity(0.18)
-                        
-                        LinearGradient(
-                            colors: [Color.black.opacity(0.45), Color.clear],
-                            startPoint: .top,
-                            endPoint: .center
-                        )
-                        .frame(height: 160)
-                        .frame(maxHeight: .infinity, alignment: .top)
-                        
-                        LinearGradient(
-                            colors: [Color.clear, Color.black.opacity(0.55)],
-                            startPoint: .center,
-                            endPoint: .bottom
-                        )
-                        .frame(height: 180)
-                        .frame(maxHeight: .infinity, alignment: .bottom)
-                    }
-                    .ignoresSafeArea()
-                    .transition(.opacity)
-                    .allowsHitTesting(false)
+            if state.showsControls {
+                ZStack {
+                    Color.black.opacity(0.18)
+                    
+                    LinearGradient(
+                        colors: [Color.black.opacity(0.45), Color.clear],
+                        startPoint: .top,
+                        endPoint: .center
+                    )
+                    .frame(height: 160)
+                    .frame(maxHeight: .infinity, alignment: .top)
+                    
+                    LinearGradient(
+                        colors: [Color.clear, Color.black.opacity(0.55)],
+                        startPoint: .center,
+                        endPoint: .bottom
+                    )
+                    .frame(height: 180)
+                    .frame(maxHeight: .infinity, alignment: .bottom)
                 }
+                .ignoresSafeArea()
+                .transition(.opacity)
+                .allowsHitTesting(false)
             }
-            .animation(Self.hudControlsAnimation, value: state.showsControls)
 
             subtitleOverlay
 
@@ -1152,21 +1167,17 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
                     .transition(.opacity)
             }
 
-            Group {
-                if let pill = state.hudStatusPill {
-                    PlayerHUDStatusPill(model: pill)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                        .padding(.top, 72)
-                        .transition(.playerHUDStatusPillWarp)
-                }
+            if let pill = state.hudStatusPill {
+                PlayerHUDStatusPill(model: pill)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 72)
+                    .transition(.playerHUDStatusPillWarp)
             }
-            .animation(.playerHUDStatusPill, value: state.hudStatusPill)
 
             // Beautiful, floating glassmorphic IINA top bar
             topHUD
                 .opacity(state.showsControls ? 1 : 0)
-                .scaleEffect(state.showsControls ? 1 : 0.96, anchor: .top)
-                .animation(Self.hudControlsAnimation, value: state.showsControls)
+                .animation(state.showsControls ? Self.hudShowAnimation : Self.hudHideAnimation, value: state.showsControls)
 
             // Center play/pause & seek overlay (hidden while buffering)
             if !state.isBuffering && !state.isSwitchingSource {
@@ -1176,8 +1187,7 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
             // Stunning, floating glassmorphic IINA control pod
             bottomHUD
                 .opacity(state.showsControls ? 1 : 0)
-                .scaleEffect(state.showsControls ? 1 : 0.96, anchor: .bottom)
-                .animation(Self.hudControlsAnimation, value: state.showsControls)
+                .animation(state.showsControls ? Self.hudShowAnimation : Self.hudHideAnimation, value: state.showsControls)
 
             if let errorMsg = state.errorMessage {
                 playbackErrorOverlay(message: errorMsg)
@@ -1488,11 +1498,15 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
         }
         .scaleEffect(state.showsControls ? 1.0 : 0.9)
         .opacity(state.showsControls ? 1.0 : 0.0)
-        .animation(Self.hudControlsAnimation, value: state.showsControls)
+        .animation(.spring(response: 0.08, dampingFraction: 0.92), value: state.showsControls)
     }
 
-    private static var hudControlsAnimation: Animation {
-        .spring(response: 0.32, dampingFraction: 0.85)
+    private static var hudShowAnimation: Animation {
+        .easeIn(duration: 0.18)
+    }
+
+    private static var hudHideAnimation: Animation {
+        .easeOut(duration: 0.06)
     }
 
     private var scrubberTransportControls: some View {
@@ -1744,17 +1758,13 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
 
     private func resetControlFade() {
         NotificationCenter.default.post(name: .playerReclaimKeyboardFocus, object: nil)
-        withAnimation(Self.hudControlsAnimation) {
-            state.showsControls = true
-        }
+        state.showsControls = true
         controlFadeTask?.cancel()
         controlFadeTask = Task {
             try? await Task.sleep(for: .seconds(3))
             if !Task.isCancelled && !isHoveringHUD && state.isPlaying {
                 await MainActor.run {
-                    withAnimation(Self.hudControlsAnimation) {
-                        state.showsControls = false
-                    }
+                    state.showsControls = false
                 }
             }
         }

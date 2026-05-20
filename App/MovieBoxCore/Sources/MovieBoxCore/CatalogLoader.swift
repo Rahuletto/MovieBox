@@ -257,15 +257,9 @@ public enum CatalogLoader {
                     URLQueryItem(name: "vote_count.lte", value: "1400"),
                 ]
             )
-            async let oscarCandidatesTask = collectAwardCandidates(
+            async let oscarNomineesTask = OscarNominationsCatalog.moviesForShelf(
                 client: client,
-                kind: .movie,
-                keywordQueries: [
-                    "academy award winner",
-                    "academy award",
-                    "oscar winner",
-                    "best picture winner",
-                ]
+                canonical: canonical
             )
 
             var sections: [HomeExtraSection] = []
@@ -306,14 +300,14 @@ public enum CatalogLoader {
                 )
             }
 
-            if let winners = try? await oscarCandidatesTask, !winners.isEmpty {
-                let hydrated = hydrate(winners, using: canonical)
+            let oscarNominees = await oscarNomineesTask
+            if !oscarNominees.isEmpty {
                 sections.append(
                     HomeExtraSection(
                         id: "movie-oscar-winners",
                         title: "Oscar Nominees",
-                        items: Array(hydrated.prefix(20)),
-                        kindByID: Dictionary(uniqueKeysWithValues: hydrated.map { ($0.id, MediaKind.movie) })
+                        items: oscarNominees,
+                        kindByID: Dictionary(uniqueKeysWithValues: oscarNominees.map { ($0.id, MediaKind.movie) })
                     )
                 )
             }
@@ -495,15 +489,9 @@ public enum CatalogLoader {
                             URLQueryItem(name: "vote_count.gte", value: "750"),
                         ]
                     )
-                    async let oscarCandidatesTask = collectAwardCandidates(
+                    async let oscarNomineesTask = OscarNominationsCatalog.moviesForShelf(
                         client: client,
-                        kind: .movie,
-                        keywordQueries: [
-                            "academy award winner",
-                            "academy award",
-                            "oscar winner",
-                            "best picture winner",
-                        ]
+                        canonical: movieCanonical
                     )
 
                     var extraSections: [HomeExtraSection] = []
@@ -532,15 +520,14 @@ public enum CatalogLoader {
                         )
                     }
 
-                    if let oscarWinners = try? await oscarCandidatesTask,
-                       !oscarWinners.isEmpty {
-                        let hydrated = hydrate(oscarWinners, using: movieCanonical)
+                    let oscarNominees = await oscarNomineesTask
+                    if !oscarNominees.isEmpty {
                         extraSections.append(
                             HomeExtraSection(
                                 id: "oscar-winners",
                                 title: "Oscar Nominees",
-                                items: Array(hydrated.prefix(20)),
-                                kindByID: Dictionary(uniqueKeysWithValues: hydrated.map { ($0.id, MediaKind.movie) })
+                                items: oscarNominees,
+                                kindByID: Dictionary(uniqueKeysWithValues: oscarNominees.map { ($0.id, MediaKind.movie) })
                             )
                         )
                     }

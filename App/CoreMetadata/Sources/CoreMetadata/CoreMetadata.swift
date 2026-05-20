@@ -456,7 +456,7 @@ public actor MetadataClient {
 
     public func movies(for category: MetadataCategory, kind: MediaKind = .movie, page: Int = 1) async throws -> [Movie] {
         let response: MovieListResponse = try await request(path: category.tmdbPath(kind: kind), queryItems: [URLQueryItem(name: "page", value: String(page))])
-        return await MovieRegistry.shared.canonicalize(response.results.map(\.movie))
+        return await MovieRegistry.shared.canonicalize(response.results.map(\.movie), kind: kind)
     }
 
     public func searchMovies(query: String, kind: MediaKind = .movie, page: Int = 1) async throws -> [Movie] {
@@ -468,7 +468,7 @@ public actor MetadataClient {
                 URLQueryItem(name: "page", value: String(page))
             ]
         )
-        return await MovieRegistry.shared.canonicalize(response.results.map(\.movie))
+        return await MovieRegistry.shared.canonicalize(response.results.map(\.movie), kind: kind)
     }
 
     public func discoverMovies(genreId: Int, kind: MediaKind = .movie, page: Int = 1) async throws -> [Movie] {
@@ -481,7 +481,7 @@ public actor MetadataClient {
                 URLQueryItem(name: "page", value: String(page))
             ]
         )
-        return await MovieRegistry.shared.canonicalize(response.results.map(\.movie))
+        return await MovieRegistry.shared.canonicalize(response.results.map(\.movie), kind: kind)
     }
 
     public func discoverCurated(kind: MediaKind = .movie, queryItems: [URLQueryItem], page: Int = 1) async throws -> [Movie] {
@@ -489,7 +489,7 @@ public actor MetadataClient {
         var allItems = queryItems
         allItems.append(URLQueryItem(name: "page", value: String(page)))
         let response: MovieListResponse = try await request(path: endpoint, queryItems: allItems)
-        return await MovieRegistry.shared.canonicalize(response.results.map(\.movie))
+        return await MovieRegistry.shared.canonicalize(response.results.map(\.movie), kind: kind)
     }
 
     public func keywordID(matching query: String) async throws -> Int? {
@@ -506,6 +506,12 @@ public actor MetadataClient {
             queryItems: [URLQueryItem(name: "with_keywords", value: String(keywordID))],
             page: page
         )
+    }
+
+    public func movieSummary(id: Int, kind: MediaKind = .movie) async throws -> Movie {
+        let base = kind == .movie ? "/movie" : "/tv"
+        let dto: TMDBMovieDTO = try await request(path: "\(base)/\(id)")
+        return await MovieRegistry.shared.canonicalize(dto.movie, kind: kind)
     }
 
     public func personDetail(id: Int) async throws -> PersonDetail {
@@ -560,8 +566,8 @@ public actor MetadataClient {
                 await LogoCache.shared.seed(kind: kind, id: id, url: nil)
             }
             
-            let canonicalMovie = await MovieRegistry.shared.canonicalize(rawDetail.movie)
-            let canonicalSimilar = await MovieRegistry.shared.canonicalize(rawDetail.similar)
+            let canonicalMovie = await MovieRegistry.shared.canonicalize(rawDetail.movie, kind: kind)
+            let canonicalSimilar = await MovieRegistry.shared.canonicalize(rawDetail.similar, kind: kind)
             detail = MovieDetail(
                 movie: canonicalMovie,
                 genres: rawDetail.genres,
@@ -596,8 +602,8 @@ public actor MetadataClient {
             let credits = try await creditsResponse.cast.prefix(16).map(\.castMember)
             let similar = try await similarResponse.results.map(\.movie)
             
-            let canonicalMovie = await MovieRegistry.shared.canonicalize(movie)
-            let canonicalSimilar = await MovieRegistry.shared.canonicalize(similar)
+            let canonicalMovie = await MovieRegistry.shared.canonicalize(movie, kind: kind)
+            let canonicalSimilar = await MovieRegistry.shared.canonicalize(similar, kind: kind)
             
             detail = MovieDetail(
                 movie: canonicalMovie,
@@ -1358,6 +1364,7 @@ private struct TMDBMovieDTO: Decodable, Sendable {
     let posterPath: String?
     let backdropPath: String?
     let releaseDate: String?
+    let firstAirDate: String?
     let voteAverage: Double?
     let genreIds: [Int]?
     let runtime: Int?
@@ -1370,7 +1377,7 @@ private struct TMDBMovieDTO: Decodable, Sendable {
             overview: overview ?? "",
             posterPath: posterPath,
             backdropPath: backdropPath,
-            releaseDate: releaseDate ?? "",
+            releaseDate: releaseDate ?? firstAirDate ?? "",
             voteAverage: voteAverage ?? 0,
             genreIds: genreIds ?? genres?.map(\.id) ?? [],
             runtime: runtime
@@ -1524,8 +1531,10 @@ public final class DecodedImageCache: @unchecked Sendable {
 public actor MovieRegistry {
     public static let shared = MovieRegistry()
     private var registry: [Int: Movie] = [:]
+    private var kinds: [Int: MediaKind] = [:]
     
-    public func canonicalize(_ movie: Movie) -> Movie {
+    public func canonicalize(_ movie: Movie, kind: MediaKind) -> Movie {
+        kinds[movie.id] = kind
         if let existing = registry[movie.id] {
             let merged = mergedMovie(existing, with: movie)
             registry[movie.id] = merged
@@ -1536,8 +1545,16 @@ public actor MovieRegistry {
         }
     }
     
-    public func canonicalize(_ list: [Movie]) -> [Movie] {
-        return list.map { canonicalize($0) }
+    public func canonicalize(_ list: [Movie], kind: MediaKind) -> [Movie] {
+        return list.map { canonicalize($0, kind: kind) }
+    }
+    
+    public func allMovies() -> [Movie] {
+        return Array(registry.values)
+    }
+    
+    public func kind(for id: Int) -> MediaKind? {
+        return kinds[id]
     }
     
     private func mergedMovie(_ primary: Movie, with fallback: Movie) -> Movie {

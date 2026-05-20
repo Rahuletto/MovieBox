@@ -31,3 +31,9 @@ public extension DownloadRecord {
         MediaKind(storageValue: mediaKind) ?? .movie
     }
 }
+
+public extension SearchOpenedRecord {
+    var mediaKindEnum: MediaKind {
+        MediaKind(storageValue: mediaKind) ?? .movie
+    }
+}

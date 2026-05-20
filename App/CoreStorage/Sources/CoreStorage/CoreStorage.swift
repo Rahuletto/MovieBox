@@ -239,6 +239,41 @@ public final class SearchHistoryRecord {
     }
 }
 
+@Model
+public final class SearchOpenedRecord {
+    @Attribute(.unique) public var recordID: String
+    public var tmdbId: Int
+    public var mediaKind: String
+    public var title: String
+    public var posterPath: String?
+    public var backdropPath: String?
+    public var searchQuery: String
+    public var openedAt: Date
+
+    public init(
+        tmdbId: Int,
+        mediaKind: String,
+        title: String,
+        posterPath: String? = nil,
+        backdropPath: String? = nil,
+        searchQuery: String,
+        openedAt: Date = Date()
+    ) {
+        self.recordID = Self.makeRecordID(tmdbId: tmdbId, mediaKind: mediaKind)
+        self.tmdbId = tmdbId
+        self.mediaKind = mediaKind
+        self.title = title
+        self.posterPath = posterPath
+        self.backdropPath = backdropPath
+        self.searchQuery = searchQuery
+        self.openedAt = openedAt
+    }
+
+    public static func makeRecordID(tmdbId: Int, mediaKind: String) -> String {
+        "\(mediaKind)_\(tmdbId)"
+    }
+}
+
 public enum DownloadState: String, Sendable, Codable, CaseIterable {
     case queued
     case downloading
@@ -253,7 +288,8 @@ public enum MovieBoxSchema {
         RatingRecord.self,
         DownloadRecord.self,
         AppSettings.self,
-        SearchHistoryRecord.self
+        SearchHistoryRecord.self,
+        SearchOpenedRecord.self
     ]
 }
 

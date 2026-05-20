@@ -10,12 +10,14 @@ struct SearchView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var settings: [AppSettings]
     @Query(sort: \SearchHistoryRecord.searchedAt, order: .reverse) private var searchHistory: [SearchHistoryRecord]
+    @Query(sort: \SearchOpenedRecord.openedAt, order: .reverse) private var searchOpened: [SearchOpenedRecord]
 
     @State private var results: [Movie] = []
     @State private var resultKinds: [Int: MediaKind] = [:]
     @State private var isSearching = false
     @State private var errorMessage: String?
     @State private var searchTask: Task<Void, Never>?
+    @State private var suggestedQuery: String?
 
     private let columns = [
         GridItem(.adaptive(minimum: MoviePosterCard.posterWidth, maximum: 186), spacing: 16)
@@ -39,6 +41,9 @@ struct SearchView: View {
                 VStack(alignment: .leading, spacing: 24) {
                     if !searchHistory.isEmpty {
                         recentSearchesSection
+                    }
+                    if !searchOpened.isEmpty {
+                        searchedForSection
                     }
                     categoriesGrid
                 }
@@ -97,6 +102,7 @@ struct SearchView: View {
         }
         .onChange(of: router.searchQuery) { _, newValue in
             searchTask?.cancel()
+            suggestedQuery = nil
             if newValue.isEmpty {
                 results = []
                 isSearching = false
@@ -135,8 +141,35 @@ struct SearchView: View {
         } else if errorMessage != nil {
             Color.clear.frame(height: 1)
         } else if results.isEmpty {
-            ContentUnavailableView.search(text: router.searchQuery)
-                .frame(maxWidth: .infinity, minHeight: 220)
+            VStack(spacing: 18) {
+                ContentUnavailableView.search(text: router.searchQuery)
+                
+                if let suggestedQuery {
+                    Button(action: {
+                        router.searchQuery = suggestedQuery
+                    }) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "sparkles")
+                                .foregroundColor(.yellow)
+                            Text("Did you mean:")
+                                .foregroundColor(.secondary)
+                            Text(suggestedQuery)
+                                .fontWeight(.semibold)
+                                .foregroundColor(.primary)
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Color.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .transition(.opacity.combined(with: .scale))
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: 220)
         } else {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Search Results")
@@ -151,8 +184,7 @@ struct SearchView: View {
                                 backdropPath: movie.backdropPath
                             )
                         ) {
-                            commitCurrentSearch()
-                            router.showDetail(id: movie.id, kind: resultKinds[movie.id] ?? .movie)
+                            openSearchResult(movie, kind: resultKinds[movie.id] ?? .movie)
                         }
                     }
                 }
@@ -184,19 +216,62 @@ struct SearchView: View {
             let combined = movieResults + tvResults
             let q = query.lowercased()
             
-            let sortedResults = try await Task.detached(priority: .userInitiated) {
-                return combined.sorted { m1, m2 in
-                    let d1 = SearchView.levenshteinDistance(m1.title.lowercased(), q)
-                    let d2 = SearchView.levenshteinDistance(m2.title.lowercased(), q)
-                    return d1 < d2
+            var finalResults = combined
+            var suggestion: String? = nil
+            
+            if combined.isEmpty {
+                let cachedMovies = await MovieRegistry.shared.allMovies()
+                if !cachedMovies.isEmpty {
+                    let (fuzzyMatches, bestSuggestion) = try await Task.detached(priority: .userInitiated) { () -> ([Movie], String?) in
+                        var matches: [(movie: Movie, dist: Int)] = []
+                        var bestMovie: Movie?
+                        var minDistance = Int.max
+                        
+                        for movie in cachedMovies {
+                            let title = movie.title.lowercased()
+                            guard !title.isEmpty else { continue }
+                            let dist = SearchView.levenshteinDistance(title, q)
+                            
+                            // Collect any movies within distance <= 3 and <= half the title's length
+                            if dist <= 3 && dist <= title.count / 2 {
+                                matches.append((movie, dist))
+                                if dist < minDistance {
+                                    minDistance = dist
+                                    bestMovie = movie
+                                }
+                            }
+                        }
+                        
+                        let sortedFuzzy = matches.sorted(by: { $0.dist < $1.dist }).map { $0.movie }
+                        return (sortedFuzzy, bestMovie?.title)
+                    }.value
+                    
+                    finalResults = fuzzyMatches
+                    suggestion = bestSuggestion
+                    
+                    // For any fuzzy matches, retrieve their kinds from the registry
+                    for match in fuzzyMatches {
+                        if let kind = await MovieRegistry.shared.kind(for: match.id) {
+                            kinds[match.id] = kind
+                        }
+                    }
                 }
-            }.value
+            } else {
+                finalResults = try await Task.detached(priority: .userInitiated) {
+                    return combined.sorted { m1, m2 in
+                        let d1 = SearchView.levenshteinDistance(m1.title.lowercased(), q)
+                        let d2 = SearchView.levenshteinDistance(m2.title.lowercased(), q)
+                        return d1 < d2
+                    }
+                }.value
+            }
             
             guard !Task.isCancelled else { return }
             
             await MainActor.run {
                 self.resultKinds = kinds
-                self.results = sortedResults
+                self.results = finalResults
+                self.suggestedQuery = suggestion
             }
         } catch {
             if Task.isCancelled { return }
@@ -290,6 +365,53 @@ struct SearchView: View {
         }
     }
 
+    private var searchedForSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Searched For")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Button(action: clearAllOpened) {
+                    Text("Clear All")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.tint)
+                }
+                .buttonStyle(.plain)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: 18) {
+                    ForEach(searchOpened.prefix(12)) { item in
+                        MoviePosterCard(
+                            title: item.title,
+                            posterURL: MetadataClient().posterDisplayURL(
+                                posterPath: item.posterPath,
+                                backdropPath: item.backdropPath
+                            )
+                        ) {
+                            router.showDetail(id: item.tmdbId, kind: item.mediaKindEnum)
+                        }
+                    }
+                }
+                .padding(.bottom, 4)
+            }
+        }
+    }
+
+    private func openSearchResult(_ movie: Movie, kind: MediaKind) {
+        commitCurrentSearch()
+        SearchOpenedStore.save(
+            movie: movie,
+            kind: kind,
+            query: router.searchQuery,
+            in: modelContext
+        )
+        router.showDetail(id: movie.id, kind: kind)
+    }
+
     private func commitCurrentSearch() {
         SearchHistoryStore.save(query: router.searchQuery, in: modelContext)
     }
@@ -297,6 +419,15 @@ struct SearchView: View {
     private func clearAllHistory() {
         withAnimation {
             for item in searchHistory {
+                modelContext.delete(item)
+            }
+            try? modelContext.save()
+        }
+    }
+
+    private func clearAllOpened() {
+        withAnimation {
+            for item in searchOpened {
                 modelContext.delete(item)
             }
             try? modelContext.save()

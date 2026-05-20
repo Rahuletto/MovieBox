@@ -24,9 +24,14 @@ struct CatalogView: View {
         rows.values.contains { !$0.isEmpty } || extraSections.contains { !$0.items.isEmpty }
     }
 
+    private var ambientGlowColor: Color {
+        kind == .movie ? MovieBoxColors.movieGlow : MovieBoxColors.showGlow
+    }
+
     var body: some View {
         ZStack {
-            // Main content scroll view
+            AmbientTopGlow(color: ambientGlowColor)
+
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 36) {
 

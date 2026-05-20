@@ -6,6 +6,12 @@ public enum MovieBoxColors {
     public static let groupedBackground = Color(nsColor: .controlBackgroundColor)
     public static let panel = Color(nsColor: .controlBackgroundColor)
     public static let accent = Color(red: 0.98, green: 0.36, blue: 0.18)
+    /// #007AFF — home tab ambient glow
+    public static let homeGlow = Color(red: 0, green: 122 / 255, blue: 1)
+    /// Warm amber — movies catalog glow
+    public static let movieGlow = Color(red: 1, green: 0.58, blue: 0)
+    /// Purple — shows catalog glow
+    public static let showGlow = Color(red: 0.69, green: 0.32, blue: 0.87)
     public static let mutedText = Color.secondary
     public static let success = Color(red: 0.24, green: 0.72, blue: 0.45)
     public static let warning = Color(red: 0.95, green: 0.72, blue: 0.22)
@@ -61,6 +67,25 @@ public struct AdaptiveGlass: ViewModifier {
 public extension View {
     func adaptiveGlass(cornerRadius: CGFloat = 18, strength: GlassStrength = .regular) -> some View {
         modifier(AdaptiveGlass(cornerRadius: cornerRadius, strength: strength))
+    }
+}
+
+/// Soft radial highlight anchored at the top-leading corner of a page.
+public struct AmbientTopGlow: View {
+    private let color: Color
+
+    public init(color: Color) {
+        self.color = color
+    }
+
+    public var body: some View {
+        RadialGradient(
+            colors: [color.opacity(0.12), Color.clear],
+            center: .topLeading,
+            startRadius: 20,
+            endRadius: 480
+        )
+        .ignoresSafeArea()
     }
 }
 
