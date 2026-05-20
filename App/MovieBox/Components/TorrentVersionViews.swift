@@ -101,8 +101,13 @@ struct TorrentVersionList: View {
     var body: some View {
         VStack(spacing: 0) {
             ForEach(Array(models.enumerated()), id: \.element.id) { index, model in
-                TorrentVersionRow(model: model, mode: mode)
-                    .equatable()
+                TorrentVersionRow(
+                    model: model,
+                    mode: mode,
+                    rowIndex: index,
+                    rowCount: models.count
+                )
+                .equatable()
 
                 if index < models.count - 1 {
                     Divider()
@@ -123,11 +128,18 @@ struct TorrentVersionList: View {
 struct TorrentVersionRow: View, Equatable {
     let model: TorrentCardModel
     let mode: TorrentVersionListMode
+    let rowIndex: Int
+    let rowCount: Int
 
     @State private var isHovering = false
 
+    private static let listCornerRadius: CGFloat = 12
+
     static func == (lhs: TorrentVersionRow, rhs: TorrentVersionRow) -> Bool {
-        lhs.model == rhs.model && lhs.modeKey == rhs.modeKey
+        lhs.model == rhs.model
+            && lhs.rowIndex == rhs.rowIndex
+            && lhs.rowCount == rhs.rowCount
+            && lhs.modeKey == rhs.modeKey
     }
 
     private var modeKey: String {
@@ -136,7 +148,7 @@ struct TorrentVersionRow: View, Equatable {
             let buf = buffering[model.id].map { "\($0.progress)-\($0.phase)" } ?? ""
             return "detail-\(busy?.uuidString ?? "")-\(buf)-\(errors[model.id] ?? "")"
         case .player(let selected, let switching, _):
-            "player-\(selected?.uuidString ?? "")-\(switching)"
+            return "player-\(selected?.uuidString ?? "")-\(switching)"
         }
     }
 
@@ -215,6 +227,12 @@ struct TorrentVersionRow: View, Equatable {
                 }
                 .frame(width: 64, alignment: .trailing)
                 .opacity(isBusy ? 0.35 : 1)
+                .overlay {
+                    if isBusy {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
                 .disabled(isBusy)
             },
             errorMessage: errorMessage,
@@ -248,20 +266,20 @@ struct TorrentVersionRow: View, Equatable {
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
 
+                metadataRow
+
                 if let buffering {
-                    VStack(alignment: .leading, spacing: 2) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text(buffering.phase)
-                            .font(.subheadline.weight(.medium))
+                            .font(.caption.weight(.semibold))
                             .foregroundStyle(.primary)
                         if !buffering.detail.isEmpty {
                             Text(buffering.detail)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                                .lineLimit(2)
+                                .lineLimit(1)
                         }
                     }
-                } else {
-                    metadataRow
                 }
 
                 if let errorMessage {
@@ -291,12 +309,10 @@ struct TorrentVersionRow: View, Equatable {
         .background {
             if let buffering {
                 GeometryReader { proxy in
-                    ZStack(alignment: .leading) {
-                        Color.clear
-                        Rectangle()
-                            .fill(Color.white.opacity(0.14))
-                            .frame(width: max(0, proxy.size.width * buffering.progress))
-                    }
+                    let width = max(0, proxy.size.width * buffering.progress)
+                    Color.white.opacity(0.14)
+                        .frame(width: width, height: proxy.size.height)
+                        .clipShape(progressLeadingShape(in: proxy.size))
                 }
                 .animation(.easeInOut(duration: 0.25), value: buffering.progress)
             }
@@ -306,6 +322,20 @@ struct TorrentVersionRow: View, Equatable {
         .onHover { hovering in
             isHovering = hovering
         }
+    }
+
+    private func progressLeadingShape(in size: CGSize) -> UnevenRoundedRectangle {
+        let r = Self.listCornerRadius
+        let isFirst = rowIndex == 0
+        let isLast = rowIndex == rowCount - 1
+        let isOnly = rowCount == 1
+        return UnevenRoundedRectangle(
+            topLeadingRadius: isFirst || isOnly ? r : 0,
+            bottomLeadingRadius: isLast || isOnly ? r : 0,
+            bottomTrailingRadius: 0,
+            topTrailingRadius: 0,
+            style: .continuous
+        )
     }
 
     private var metadataRow: some View {
