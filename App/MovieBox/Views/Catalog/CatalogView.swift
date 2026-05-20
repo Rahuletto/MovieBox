@@ -1,3 +1,4 @@
+import CoreMLEngine
 import CoreMetadata
 import CoreStorage
 import DesignSystem
@@ -8,10 +9,14 @@ import SwiftUI
 struct CatalogView: View {
     @Environment(AppRouter.self) private var router
     @Query private var settings: [AppSettings]
+    @Query private var ratings: [RatingRecord]
+    @Query private var storedMovies: [MovieRecord]
 
     let kind: MediaKind
 
     @State private var rows: [MetadataCategory: [Movie]] = [:]
+    @State private var extraSections: [HomeExtraSection] = []
+    @State private var baseExtraSections: [HomeExtraSection] = []
     @State private var errorMessage: String?
     @State private var isLoading = false
 
@@ -60,6 +65,25 @@ struct CatalogView: View {
                                 }
                             }
                         }
+
+                        ForEach(extraSections, id: \.id) { section in
+                            if !section.items.isEmpty {
+                                HorizontalMovieRow(title: section.title, items: section.items) { movie in
+                                    MoviePosterCard(
+                                        title: movie.title,
+                                        subtitle: movie.releaseDate,
+                                        posterURL: MetadataClient().imageURL(path: movie.posterPath),
+                                        onHover: {
+                                            if let mode = MetadataSettings.mode(from: settings) {
+                                                Task { await Prefetcher.shared.prefetchDetail(id: movie.id, kind: kind, mode: mode) }
+                                            }
+                                        }
+                                    ) {
+                                        router.showDetail(id: movie.id, kind: kind)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 .padding(.bottom, 28)
@@ -93,6 +117,26 @@ struct CatalogView: View {
         .task(id: "\(settings.first?.cacheKey ?? "missing")|\(kind.rawValue)") {
             await load()
         }
+        .task(id: personalizationKey) {
+            await refreshPersonalizedSections()
+        }
+    }
+
+    private var personalizationKey: String {
+        let ratingPart = ratings
+            .sorted { $0.tmdbId < $1.tmdbId }
+            .map { "\($0.tmdbId):\($0.rating):\($0.ratedAt.timeIntervalSince1970)" }
+            .joined(separator: "|")
+        let watchPart = storedMovies
+            .filter { $0.mediaKindEnum == kind }
+            .sorted { $0.tmdbId < $1.tmdbId }
+            .map {
+                "\($0.tmdbId):\($0.watchedFraction):\($0.playbackPositionSeconds):\(($0.lastWatchedAt ?? .distantPast).timeIntervalSince1970):\(($0.watchlistAddedAt ?? .distantPast).timeIntervalSince1970)"
+            }
+            .joined(separator: "|")
+        let rowPart = rows.values.flatMap { $0 }.map(\.id).sorted().map(String.init).joined(separator: ",")
+        let basePart = baseExtraSections.flatMap(\.items).map(\.id).sorted().map(String.init).joined(separator: ",")
+        return "\(ratingPart)#\(watchPart)#\(rowPart)#\(basePart)"
     }
 
     private func load() async {
@@ -104,7 +148,10 @@ struct CatalogView: View {
         errorMessage = nil
         defer { isLoading = false }
         do {
-            rows = try await CatalogLoader.loadRows(mode: mode, kind: kind)
+            let payload = try await CatalogLoader.loadCatalogPayload(mode: mode, kind: kind)
+            rows = payload.rows
+            baseExtraSections = payload.extraSections
+            await refreshPersonalizedSections()
         } catch {
             if let urlError = error as? URLError, urlError.code == .cancelled {
                 return
@@ -115,5 +162,98 @@ struct CatalogView: View {
                 backendURL: settings.first?.proxyBaseURL
             )
         }
+    }
+
+    private func refreshPersonalizedSections() async {
+        extraSections = await withPersonalizedSection(
+            baseSections: baseExtraSections,
+            rows: rows
+        )
+    }
+
+    private func withPersonalizedSection(
+        baseSections: [HomeExtraSection],
+        rows: [MetadataCategory: [Movie]]
+    ) async -> [HomeExtraSection] {
+        let explicitSignals = ratings.map {
+            RatingSignal(
+                tmdbId: $0.tmdbId,
+                rating: $0.rating,
+                genreIds: $0.genres,
+                date: $0.ratedAt,
+                source: .explicitRating
+            )
+        }
+
+        let watchSignals = storedMovies
+            .filter { $0.mediaKindEnum == kind && $0.lastWatchedAt != nil }
+            .map { record in
+                let signalStrength: Float
+                if record.watchedFraction >= 0.8 {
+                    signalStrength = 1.0
+                } else if record.watchedFraction >= 0.2 {
+                    signalStrength = 0.5
+                } else if record.playbackPositionSeconds >= 30 {
+                    signalStrength = -0.25
+                } else {
+                    signalStrength = 0
+                }
+                return RatingSignal(
+                    tmdbId: record.tmdbId,
+                    rating: signalStrength,
+                    genreIds: record.genres,
+                    date: record.lastWatchedAt ?? Date(),
+                    source: .watchHistory
+                )
+            }
+
+        let watchlistSignals = storedMovies
+            .filter { $0.mediaKindEnum == kind && $0.watchlistAddedAt != nil }
+            .map { record in
+                RatingSignal(
+                    tmdbId: record.tmdbId,
+                    rating: 0.8,
+                    genreIds: record.genres,
+                    date: record.watchlistAddedAt ?? Date(),
+                    source: .watchlist
+                )
+            }
+
+        let signals = explicitSignals + watchSignals + watchlistSignals
+        guard !signals.isEmpty else { return baseSections }
+
+        var byMovieID: [Int: Movie] = [:]
+        for movie in rows.values.flatMap({ $0 }) + baseSections.flatMap(\.items) {
+            byMovieID[movie.id] = movie
+        }
+        let pool = Array(byMovieID.values)
+        guard !pool.isEmpty else { return baseSections }
+
+        let ratedOrWatchedIDs = Set(signals.map(\.tmdbId))
+        let candidates = pool
+            .filter { !ratedOrWatchedIDs.contains($0.id) }
+            .map { movie in
+                RecommendationCandidate(
+                    id: movie.id,
+                    genreIds: movie.genreIds,
+                    baseScore: Float(movie.voteAverage / 10)
+                )
+            }
+        guard !candidates.isEmpty else { return baseSections }
+
+        let ranked = await GenreAffinityEngine().rank(candidates: candidates, ratings: signals)
+        let personalized = ranked
+            .compactMap { byMovieID[$0.id] }
+            .prefix(20)
+        guard !personalized.isEmpty else { return baseSections }
+
+        let section = HomeExtraSection(
+            id: kind == .movie ? "movie-because-you-watched" : "tv-because-you-watched",
+            title: "Because You Watched",
+            items: Array(personalized),
+            kindByID: Dictionary(uniqueKeysWithValues: personalized.map { ($0.id, kind) })
+        )
+
+        return [section] + baseSections
     }
 }

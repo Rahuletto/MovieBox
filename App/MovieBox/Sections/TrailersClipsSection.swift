@@ -17,6 +17,8 @@ private enum TrailerClipFilter: String, CaseIterable, Identifiable {
 struct TrailersClipsSection: View {
     let videos: [MediaVideo]
     let onPlay: (URL) -> Void
+    let isPreparingStream: Bool
+    let preparingVideoURL: URL?
 
     @State private var filter: TrailerClipFilter = .trailers
     @State private var resolvedDurations: [String: Int] = [:]
@@ -60,14 +62,16 @@ struct TrailersClipsSection: View {
                         ForEach(visibleItems) { video in
                             TrailerClipCard(
                                 video: video,
-                                durationSeconds: resolvedDurations[video.key] ?? video.durationSeconds
+                                durationSeconds: resolvedDurations[video.key] ?? video.durationSeconds,
+                                isPreparing: isPreparingStream && preparingVideoURL == video.youtubeWatchURL
                             ) {
                                 guard let url = video.youtubeWatchURL else { return }
                                 onPlay(url)
                             }
+                            .disabled(isPreparingStream)
                         }
                     }
-                    .padding(.trailing, 24)
+                    .padding(.horizontal, 24)
                 }
                 .scrollIndicators(.hidden)
                 .frame(height: TrailerClipMetrics.height)
@@ -101,6 +105,7 @@ struct TrailersClipsSection: View {
                 .frame(maxWidth: 220)
             }
         }
+        .padding(.horizontal, 24)
         .onAppear {
             if trailerItems.isEmpty, !clipItems.isEmpty {
                 filter = .clips
@@ -115,6 +120,7 @@ struct TrailersClipsSection: View {
 private struct TrailerClipCard: View {
     let video: MediaVideo
     let durationSeconds: Int?
+    let isPreparing: Bool
     let onPlay: () -> Void
 
     private var durationLabel: String? {
@@ -125,51 +131,56 @@ private struct TrailerClipCard: View {
     }
 
     var body: some View {
-        Button(action: onPlay) {
-            ZStack(alignment: .bottomLeading) {
-                thumbnail
-                    .frame(width: TrailerClipMetrics.width, height: TrailerClipMetrics.height)
+        ZStack(alignment: .bottomLeading) {
+            thumbnail
+                .frame(width: TrailerClipMetrics.width, height: TrailerClipMetrics.height)
 
-                bottomBlurScrim
+            bottomBlurScrim
 
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 6) {
-                        Text(video.displayType.uppercased())
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.white.opacity(0.75))
-                        if let durationLabel {
-                            Text(durationLabel)
-                                .font(.caption2.weight(.medium))
-                                .monospacedDigit()
-                                .foregroundStyle(.white.opacity(0.65))
-                        }
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Text(video.displayType.uppercased())
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.75))
+                    if let durationLabel {
+                        Text(durationLabel)
+                            .font(.caption2.weight(.medium))
+                            .monospacedDigit()
+                            .foregroundStyle(.white.opacity(0.65))
                     }
+                }
 
-                    Text(video.name)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .lineLimit(2)
+                Text(video.name)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
 
-                    HStack {
-                        if video.official {
-                            Text("Official")
-                                .font(.caption2.weight(.medium))
-                                .foregroundStyle(.white.opacity(0.7))
-                        }
-                        Spacer(minLength: 0)
+                HStack {
+                    if video.official {
+                        Text("Official")
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.white.opacity(0.7))
+                    }
+                    Spacer(minLength: 0)
+                    if isPreparing {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(.white)
+                    } else {
                         Image(systemName: "play.circle.fill")
                             .font(.title3)
                             .foregroundStyle(.white.opacity(0.95))
                     }
                 }
-                .padding(.horizontal, 12)
-                .padding(.bottom, 12)
-                .padding(.top, 28)
             }
-            .frame(width: TrailerClipMetrics.width, height: TrailerClipMetrics.height)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .padding(.horizontal, 12)
+            .padding(.bottom, 12)
+            .padding(.top, 28)
         }
-        .buttonStyle(.plain)
+        .frame(width: TrailerClipMetrics.width, height: TrailerClipMetrics.height)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .onTapGesture(perform: onPlay)
     }
 
     private var bottomBlurScrim: some View {

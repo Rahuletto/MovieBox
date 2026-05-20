@@ -44,69 +44,46 @@ struct SkipSeekButton: View {
     @Bindable var state: PlayerState
     let direction: SkipSeekDirection
     let isCommandHeld: Bool
+    let isShiftHeld: Bool
     @Binding var pulseTrigger: Int
     let onActivity: () -> Void
 
     @State private var isPressed = false
     @State private var didHoldRepeat = false
     @State private var repeatTask: Task<Void, Never>?
-    @State private var renderedIcon: String
-    @State private var iconMorphScale: CGFloat = 1
-    @State private var morphTask: Task<Void, Never>?
 
     init(
         state: PlayerState,
         direction: SkipSeekDirection,
         isCommandHeld: Bool,
+        isShiftHeld: Bool,
         pulseTrigger: Binding<Int>,
         onActivity: @escaping () -> Void
     ) {
         self.state = state
         self.direction = direction
         self.isCommandHeld = isCommandHeld
+        self.isShiftHeld = isShiftHeld
         self._pulseTrigger = pulseTrigger
         self.onActivity = onActivity
-        _renderedIcon = State(initialValue: direction.icon15)
     }
 
     private var iconName: String {
         if isCommandHeld { return direction.iconFast }
-        if isPressed { return direction.icon5 }
+        if isShiftHeld || isPressed { return direction.icon5 }
         return direction.icon15
     }
 
     var body: some View {
-        Image(systemName: renderedIcon)
+        Image(systemName: iconName)
             .font(.system(size: 20, weight: .semibold))
             .foregroundStyle(.white)
-            .scaleEffect(iconMorphScale)
+            .contentTransition(.symbolEffect(.replace))
             .frame(width: 52, height: 52)
             .nativeGlassEffect()
-            .modifier(SkipButtonPulseModifier(trigger: pulseTrigger))
             .contentShape(Circle())
             .gesture(pressGesture)
-            .onChange(of: iconName) { _, newIcon in
-                morphIcon(to: newIcon)
-            }
-    }
-
-    private func morphIcon(to newIcon: String) {
-        guard newIcon != renderedIcon else { return }
-
-        morphTask?.cancel()
-        morphTask = Task { @MainActor in
-            withAnimation(.easeOut(duration: 0.09)) {
-                iconMorphScale = 0.72
-            }
-            try? await Task.sleep(for: .milliseconds(75))
-            guard !Task.isCancelled else { return }
-
-            renderedIcon = newIcon
-
-            withAnimation(.easeOut(duration: 0.14)) {
-                iconMorphScale = 1
-            }
-        }
+            .animation(.spring(response: 0.02, dampingFraction: 0.85), value: iconName)
     }
 
     private var pressGesture: some Gesture {
@@ -132,7 +109,7 @@ struct SkipSeekButton: View {
         if isCommandHeld {
             return
         }
-        state.seek(by: direction.tapDelta)
+        state.seek(by: isShiftHeld ? direction.holdDelta : direction.tapDelta)
         pulseTrigger += 1
     }
 

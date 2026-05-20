@@ -11,6 +11,7 @@ struct DetailHeroOverlay: View {
     let onRate: (Float) -> Void
     let onPlayNow: () -> Void
     let onPlayTrailer: () -> Void
+    let isPreparingTrailer: Bool
     let currentRating: Float?
 
     var body: some View {
@@ -26,6 +27,7 @@ struct DetailHeroOverlay: View {
                     onRate: onRate,
                     onPlayNow: onPlayNow,
                     onPlayTrailer: onPlayTrailer,
+                    isPreparingTrailer: isPreparingTrailer,
                     currentRating: currentRating,
                     playButtonTitle: playButtonTitle
                 )

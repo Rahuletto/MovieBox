@@ -1,8 +1,11 @@
 import SwiftUI
+import CoreMetadata
 
 /// IMDb rating pill — yellow wordmark on a dark chip (Apple TV–style).
 struct IMDBBadge: View {
     let rating: Double
+    let enrichment: MovieEnrichment?
+    let onTap: (() -> Void)?
 
     private static let imdbYellow = Color(red: 0.965, green: 0.773, blue: 0.094)
 
@@ -26,5 +29,8 @@ struct IMDBBadge: View {
         .fixedSize(horizontal: true, vertical: false)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("IMDb rating \(String(format: "%.1f", rating))")
+        .onTapGesture {
+            onTap?()
+        }
     }
 }

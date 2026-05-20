@@ -25,7 +25,7 @@ import {
 import { parseParams, parseQuery } from './validate'
 import { resolveTrailerStreamURL } from './trailer-resolve'
 import { buildTMDBUpstreamURL, tmdbPathFromRequest } from './tmdb-upstream'
-import { kvGet, kvGetBuffer, kvPut } from './kv-cache'
+import { kvDelete, kvGet, kvGetBuffer, kvList, kvPut } from './kv-cache'
 import {
   buildRottenTomatoesStatsFromOmdb,
   fetchRottenTomatoesBundle,
@@ -670,6 +670,59 @@ app.get('/api/config', (c) => {
   })
 })
 
+const CACHE_PURGE_PREFIXES = [
+  'title:',
+  'person:',
+  'rt:',
+  'logo:',
+  'tmdb:',
+  'extids:',
+  'fanart:',
+  'omdb:',
+  'subf2m:',
+]
+
+async function purgePrefix(kv: KVNamespace, prefix: string): Promise<number> {
+  let cursor: string | undefined
+  let deleted = 0
+  do {
+    const page = await kvList(kv, { prefix, cursor, limit: 1000 })
+    if (!page) break
+    for (const key of page.keys) {
+      if (await kvDelete(kv, key.name)) deleted += 1
+    }
+    cursor = page.list_complete ? undefined : page.cursor
+  } while (cursor)
+  return deleted
+}
+
+// Auth-required cache purge endpoint.
+// Examples:
+// POST /api/cache/purge?scope=all
+// POST /api/cache/purge?scope=prefix&prefix=title:
+app.post('/api/cache/purge', async (c) => {
+  const scope = (c.req.query('scope') ?? 'all').toLowerCase()
+
+  if (scope === 'prefix') {
+    const prefix = c.req.query('prefix')?.trim()
+    if (!prefix) {
+      return c.json({ error: 'bad_request', message: 'prefix is required for scope=prefix' }, 400)
+    }
+    const deleted = await purgePrefix(c.env.MOVIEBOX_CACHE, prefix)
+    return c.json({ ok: true, scope: 'prefix', prefix, deleted })
+  }
+
+  if (scope !== 'all') {
+    return c.json({ error: 'bad_request', message: 'scope must be all or prefix' }, 400)
+  }
+
+  let deleted = 0
+  for (const prefix of CACHE_PURGE_PREFIXES) {
+    deleted += await purgePrefix(c.env.MOVIEBOX_CACHE, prefix)
+  }
+  return c.json({ ok: true, scope: 'all', deleted, prefixes: CACHE_PURGE_PREFIXES })
+})
+
 /** Authenticated readiness probe for the macOS app (metadata + KV + secrets). */
 app.get('/api/status', async (c) => {
   let kvOk = false
@@ -702,8 +755,8 @@ app.get('/api/title/:kind/:id', async (c) => {
     if (route instanceof Response) return route
     const { kind, id } = route
 
-    // v6: refresh bundle after RT trailer selector accuracy fix.
-    const cacheKey = `title:v6:${kind}:${id}`
+    // v8: refresh bundle after RT stream quality policy (prefer 1080p+) update.
+    const cacheKey = `title:${kind}:${id}`
     const cached = await kvGet(c.env.MOVIEBOX_CACHE,cacheKey)
     if (cached) {
       return c.json(JSON.parse(cached), {

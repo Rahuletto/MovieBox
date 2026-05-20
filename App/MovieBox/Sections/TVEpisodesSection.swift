@@ -98,6 +98,7 @@ struct TVEpisodesSection: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
                     .menuStyle(.borderlessButton)
+                    .padding(.horizontal, 24)
                 } else {
                     HStack(spacing: 6) {
                         Image(systemName: "tv.inset.filled")
@@ -107,6 +108,7 @@ struct TVEpisodesSection: View {
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 8)
+                    .padding(.horizontal, 24)
                 }
 
                 // Episodes
@@ -143,7 +145,7 @@ struct TVEpisodesSection: View {
                         }
                     }
                 }
-                .padding(.trailing, 24)
+                .padding(.horizontal, 24)
             }
             .scrollIndicators(.hidden)
             .frame(height: TVEpisodeCardMetrics.height)
@@ -159,6 +161,7 @@ private struct TVEpisodeCard: View {
     let episode: TVEpisode
     var isSelected: Bool = false
     let onSelect: () -> Void
+    private var isUpcoming: Bool { episode.isUpcoming }
 
     var body: some View {
         Button(action: onSelect) {
@@ -183,6 +186,10 @@ private struct TVEpisodeCard: View {
                         .foregroundStyle(.primary)
                         .lineLimit(2)
 
+                    if isUpcoming {
+                        upcomingPill
+                    }
+
                     if !episode.overview.isEmpty {
                         Text(episode.overview)
                             .font(.caption)
@@ -197,12 +204,22 @@ private struct TVEpisodeCard: View {
                             Text("\(runtime)m")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                        } else if isUpcoming, let label = episode.formattedAirDate {
+                            Image(systemName: "calendar")
+                                .font(.caption)
+                            Text(label)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                         Spacer(minLength: 0)
                         if isSelected {
                             Image(systemName: "checkmark.circle.fill")
                                 .font(.caption)
                                 .foregroundStyle(.green)
+                        } else if isUpcoming {
+                            Image(systemName: "clock.badge")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         } else {
                             Image(systemName: "play.circle")
                                 .font(.caption)
@@ -220,6 +237,8 @@ private struct TVEpisodeCard: View {
             }
         }
         .buttonStyle(.plain)
+        .disabled(isUpcoming)
+        .opacity(isUpcoming ? 0.88 : 1)
     }
 
     @ViewBuilder
@@ -244,6 +263,43 @@ private struct TVEpisodeCard: View {
                     .font(.title2)
                     .foregroundStyle(.tertiary)
             }
+    }
+
+    private var upcomingPill: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "clock.badge")
+                .font(.caption2)
+            Text("Upcoming")
+                .font(.caption2.weight(.semibold))
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Color.white.opacity(0.14), in: Capsule(style: .continuous))
+    }
+}
+
+private extension TVEpisode {
+    var isUpcoming: Bool {
+        guard let airDate else { return false }
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        guard let date = formatter.date(from: airDate) else { return false }
+        return date > Calendar.current.startOfDay(for: Date())
+    }
+
+    var formattedAirDate: String? {
+        guard let airDate else { return nil }
+        let parser = DateFormatter()
+        parser.calendar = Calendar(identifier: .gregorian)
+        parser.locale = Locale(identifier: "en_US_POSIX")
+        parser.dateFormat = "yyyy-MM-dd"
+        guard let date = parser.date(from: airDate) else { return airDate }
+        let display = DateFormatter()
+        display.dateStyle = .medium
+        display.timeStyle = .none
+        return display.string(from: date)
     }
 }
 

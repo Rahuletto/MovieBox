@@ -36,6 +36,7 @@ struct WindowConfigurator: NSViewRepresentable {
     }
 
     final class Coordinator: NSObject {
+        private let windowCornerRadius: CGFloat = 14
         let trafficLightInset: CGPoint
         private(set) var isPlayerPresented: Bool
         private weak var window: NSWindow?
@@ -60,6 +61,7 @@ struct WindowConfigurator: NSViewRepresentable {
             guard self.isPlayerPresented != isPlayerPresented else { return }
             self.isPlayerPresented = isPlayerPresented
             applyToolbarState()
+            applyWindowCornerMask()
             repositionButtons()
         }
 
@@ -94,6 +96,7 @@ struct WindowConfigurator: NSViewRepresentable {
             }
 
             applyToolbarState()
+            applyWindowCornerMask()
             repositionButtons()
 
             if let resizeObserver { NotificationCenter.default.removeObserver(resizeObserver) }
@@ -102,6 +105,7 @@ struct WindowConfigurator: NSViewRepresentable {
                 object: window,
                 queue: .main
             ) { [weak self] _ in
+                self?.applyWindowCornerMask()
                 self?.repositionButtons()
             }
 
@@ -121,6 +125,7 @@ struct WindowConfigurator: NSViewRepresentable {
                 queue: .main
             ) { [weak self] _ in
                 self?.applyToolbarState()
+                self?.applyWindowCornerMask()
             }
 
             if let exitFSObserver { NotificationCenter.default.removeObserver(exitFSObserver) }
@@ -130,6 +135,7 @@ struct WindowConfigurator: NSViewRepresentable {
                 queue: .main
             ) { [weak self] _ in
                 self?.applyToolbarState()
+                self?.applyWindowCornerMask()
             }
         }
 
@@ -175,6 +181,23 @@ struct WindowConfigurator: NSViewRepresentable {
                 button.setFrameOrigin(frame.origin)
                 cursorX += frame.width + spacing
             }
+        }
+
+        private func applyWindowCornerMask() {
+            guard let window else { return }
+            let isFullScreen = window.styleMask.contains(.fullScreen)
+            guard let contentView = window.contentView else { return }
+
+            contentView.wantsLayer = true
+            if isFullScreen {
+                contentView.layer?.cornerRadius = 0
+                contentView.layer?.masksToBounds = false
+                return
+            }
+
+            contentView.layer?.cornerCurve = .continuous
+            contentView.layer?.cornerRadius = windowCornerRadius
+            contentView.layer?.masksToBounds = true
         }
     }
 }

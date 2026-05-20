@@ -13,7 +13,13 @@ final class AppRouter {
         case search
         case downloads
         case movieDetail(Int)
+        case personDetail(Int)
     }
+
+    /// Route to restore when leaving person detail (usually `.movieDetail`).
+    var personReturnRoute: Route?
+    /// Route to restore when leaving title detail opened from person (usually `.personDetail`).
+    var detailReturnRoute: Route?
 
     var selectedRoute: Route = .home {
         didSet {
@@ -60,20 +66,48 @@ final class AppRouter {
 
     func showDetail(id: Int, kind: MediaKind = .movie) {
         withAnimation(MovieBoxMotion.navigation) {
+            if case .personDetail = selectedRoute {
+                detailReturnRoute = selectedRoute
+            } else {
+                detailReturnRoute = nil
+            }
             detailKind = kind
             selectedRoute = .movieDetail(id)
         }
     }
 
+    func showPerson(id: Int, returningTo: Route) {
+        withAnimation(MovieBoxMotion.navigation) {
+            personReturnRoute = returningTo
+            selectedRoute = .personDetail(id)
+        }
+    }
+
     func backFromDetail() {
         withAnimation(MovieBoxMotion.navigation) {
-            selectedRoute = activeTab
+            if let returnRoute = detailReturnRoute {
+                selectedRoute = returnRoute
+                detailReturnRoute = nil
+            } else {
+                selectedRoute = activeTab
+            }
+        }
+    }
+
+    func backFromPerson() {
+        withAnimation(MovieBoxMotion.navigation) {
+            if let returnRoute = personReturnRoute {
+                selectedRoute = returnRoute
+                personReturnRoute = nil
+            } else {
+                selectedRoute = activeTab
+            }
         }
     }
 
     var isShowingDetail: Bool {
         switch selectedRoute {
-        case .movieDetail: true
+        case .movieDetail, .personDetail: true
         default: false
         }
     }
@@ -84,11 +118,12 @@ extension AppRouter.Route {
         switch self {
         case .home: "Home"
         case .movies: "Movies"
-        case .tvShows: "TV Shows"
+        case .tvShows: "Shows"
         case .library: "Library"
         case .search: "Search"
         case .downloads: "Downloads"
         case .movieDetail: "Movie Detail"
+        case .personDetail: "Person"
         }
     }
 

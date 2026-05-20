@@ -246,6 +246,8 @@ export function extractBestRtVideoFeedUrl(html: string, title: string): string |
 export async function resolveThePlatformFeedToHls(feedUrl: string): Promise<string | null> {
   try {
     const u = new URL(feedUrl)
+    // Ask MPX for a multi-bitrate ladder so we can explicitly pick HD variants.
+    u.searchParams.set('mbr', 'true')
     u.searchParams.set('formats', 'M3U+appleHlsEncryption,M3U+none')
     const r = await fetch(u.toString(), {
       headers: BROWSER_HEADERS,
@@ -254,11 +256,78 @@ export async function resolveThePlatformFeedToHls(feedUrl: string): Promise<stri
     })
     if (!r.ok) return null
     const final = r.url
-    if (final.includes('.m3u8')) return final
+    if (final.includes('.m3u8')) {
+      return await resolveHighestVariantHls(final)
+    }
     return null
   } catch (error) {
     console.warn('[rt] thePlatform HLS resolve failed:', error)
     return null
+  }
+}
+
+async function resolveHighestVariantHls(manifestURL: string): Promise<string> {
+  try {
+    const r = await fetch(manifestURL, {
+      headers: BROWSER_HEADERS,
+      redirect: 'follow',
+      signal: AbortSignal.timeout(20_000),
+    })
+    if (!r.ok) return manifestURL
+    const text = await r.text()
+    if (!text.includes('#EXT-X-STREAM-INF')) return manifestURL
+
+    const lines = text.split(/\r?\n/)
+    let bestHDURL: string | null = null
+    let bestHDScore = -1
+    let bestFallbackURL: string | null = null
+    let bestFallbackScore = -1
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]?.trim() ?? ''
+      if (!line.startsWith('#EXT-X-STREAM-INF:')) continue
+      const attrs = line
+      const next = lines[i + 1]?.trim() ?? ''
+      if (!next || next.startsWith('#')) continue
+
+      const res = attrs.match(/RESOLUTION=(\d+)x(\d+)/i)
+      const bw = attrs.match(/BANDWIDTH=(\d+)/i)
+      const codecs = (attrs.match(/CODECS="([^"]+)"/i)?.[1] ?? '').toLowerCase()
+      const width = res ? parseInt(res[1]!, 10) : 0
+      const height = res ? parseInt(res[2]!, 10) : 0
+      const pixels = width * height
+      const bandwidth = bw ? parseInt(bw[1]!, 10) : 0
+      const score = pixels * 10 + bandwidth
+      const candidateURL = new URL(next, manifestURL).toString()
+      const looksVideoCodec =
+        codecs.includes('avc') ||
+        codecs.includes('hvc') ||
+        codecs.includes('hev') ||
+        codecs.includes('vp9') ||
+        codecs.includes('av01')
+      const isVideoVariant = pixels > 0 || looksVideoCodec
+      if (!isVideoVariant) continue
+
+      // Prefer full HD+ even if startup takes longer; quality first for trailers.
+      if (height >= 1080 || width >= 1920) {
+        if (score > bestHDScore) {
+          bestHDScore = score
+          bestHDURL = candidateURL
+        }
+        continue
+      }
+
+      if (score > bestFallbackScore) {
+        bestFallbackScore = score
+        bestFallbackURL = candidateURL
+      }
+    }
+
+    // Return the master manifest URL so AVPlayer can adapt quality dynamically
+    // as network conditions improve/dip during playback.
+    return manifestURL
+  } catch {
+    return manifestURL
   }
 }
 
@@ -289,9 +358,9 @@ function parseCachedRtBundle(cached: string): RottenTomatoesBundle | null {
 
 function cacheKeyFor(lookup: RottenTomatoesLookup): string {
   const year = lookup.year?.trim() || 'unknown'
-  if (lookup.imdbId) return `rt:v4:${lookup.kind}:imdb:${lookup.imdbId}`
+  if (lookup.imdbId) return `rt:${lookup.kind}:imdb:${lookup.imdbId}`
   const slug = titleToRottenTomatoesSlug(lookup.title)
-  return `rt:v4:${lookup.kind}:${slug}:${year}`
+  return `rt:${lookup.kind}:${slug}:${year}`
 }
 
 /** Canonical RT paths to try before relying on `/search` (search HTML often omits the vanity link). */

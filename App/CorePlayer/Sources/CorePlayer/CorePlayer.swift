@@ -2,6 +2,7 @@ import AVFoundation
 import AVKit
 import AppKit
 import Combine
+import Foundation
 import SwiftUI
 
 public enum PlayerHDRType: String, Sendable, Codable {
@@ -49,10 +50,13 @@ public final class PlayerState {
     public var bufferingDetail: String?
     public var currentTime: Double = 0
     public var duration: Double = 0
+    public var bufferedTimeRanges: [ClosedRange<Double>] = []
     public var volume: Float = 1.0
     public var isMuted: Bool = false
     public var playbackRate: Double = 1.0
     public private(set) var isFastScanning = false
+    public var fastScanStatusIcon: String?
+    public var fastScanSpeedMultiplier: Int?
     public var showsControls: Bool = false
     public var subtitleURL: URL? = nil
     public var activeSubtitleTrack: Int = 0
@@ -89,7 +93,8 @@ public final class PlayerState {
     private var pipController: AVPictureInPictureController?
     private var pipDelegate: PlayerPiPDelegate?
     private var fastScanBackwardTask: Task<Void, Never>?
-    private var playbackRateBeforeFastScan: Double = 1.0
+    private var fastScanIsForward = false
+    private var wasPlayingBeforeFastScan = false
 
     private var timeObserver: Any?
     private var itemStatusObserver: NSKeyValueObservation?
@@ -125,6 +130,7 @@ public final class PlayerState {
         self.isPlaying = false
         self.currentTime = 0
         self.duration = 0
+        self.bufferedTimeRanges = []
         self.volume = 1.0
         self.isMuted = false
         self.playbackRate = 1.0
@@ -236,12 +242,21 @@ public final class PlayerState {
         lastSubtitleSyncTime = -1
         isBuffering = true
 
+        // Build headers for video playback
+        var headers: [String: String] = [
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        ]
+        
+        // Add Referer for Piped proxy URLs (required for video access)
+        if url.host?.contains("piped") == true || url.host?.contains("googlevideo.com") == true {
+            let referer = url.scheme ?? "https" + "://" + (url.host ?? "youtube.com")
+            headers["Referer"] = referer
+        }
+        
         let asset = AVURLAsset(
             url: url,
             options: [
-                "AVURLAssetHTTPHeaderFieldsKey": [
-                    "User-Agent": "MovieBox/1.0 (Macintosh; AVFoundation)",
-                ],
+                "AVURLAssetHTTPHeaderFieldsKey": headers,
                 AVURLAssetAllowsExpensiveNetworkAccessKey: true,
                 AVURLAssetAllowsCellularAccessKey: true,
                 AVURLAssetAllowsConstrainedNetworkAccessKey: true,
@@ -563,6 +578,7 @@ public final class PlayerState {
         isPresented = false
         currentTime = 0
         duration = 0
+        bufferedTimeRanges = []
         errorMessage = nil
         episodes = []
         currentEpisodeIndex = nil
@@ -648,11 +664,17 @@ public final class PlayerState {
         if player.timeControlStatus == .playing {
             pause()
         } else {
+            if isFastScanning {
+                stopFastScan()
+            }
             play()
         }
     }
 
     public func play() {
+        if playbackRate <= 0 {
+            playbackRate = 1.0
+        }
         player.play()
         player.rate = Float(playbackRate)
         isPlaying = true
@@ -667,7 +689,12 @@ public final class PlayerState {
     }
 
     public func pause() {
+        if isFastScanning {
+            stopFastScan()
+        }
         player.pause()
+        playbackRate = 1.0
+        player.rate = 0
         isPlaying = false
     }
 
@@ -700,48 +727,53 @@ public final class PlayerState {
     }
 
     public func startFastScan(forward: Bool) {
-        guard isPresented, !isFastScanning else { return }
-        isFastScanning = true
-        playbackRateBeforeFastScan = playbackRate > 0 ? playbackRate : 1.0
-        fastScanBackwardTask?.cancel()
+        guard isPresented else { return }
 
-        if forward {
-            player.rate = 2.0
-            playbackRate = 2.0
-            play()
+        if isFastScanning {
+            // Allow live direction switching while Command is still held.
+            if fastScanIsForward == forward { return }
+            fastScanBackwardTask?.cancel()
         } else {
-            player.rate = -1.5
-            playbackRate = -1.5
-            play()
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(120))
-                if player.rate >= 0 {
-                    player.rate = 0
-                    startBackwardSeekRepeat()
-                }
-            }
+            wasPlayingBeforeFastScan = player.timeControlStatus == .playing
         }
+
+        isFastScanning = true
+        fastScanIsForward = forward
+        fastScanStatusIcon = forward ? "forward.fill" : "backward.fill"
+        fastScanSpeedMultiplier = 2
+        fastScanBackwardTask?.cancel()
+        player.pause()
+        isPlaying = false
+        startBackwardSeekRepeat(forward: forward)
     }
 
     public func stopFastScan() {
         guard isFastScanning else { return }
         isFastScanning = false
+        fastScanStatusIcon = nil
+        fastScanSpeedMultiplier = nil
+        fastScanIsForward = false
         fastScanBackwardTask?.cancel()
         fastScanBackwardTask = nil
-        let restore = playbackRateBeforeFastScan > 0 ? playbackRateBeforeFastScan : 1.0
-        playbackRate = restore
-        player.rate = Float(restore)
-        if player.timeControlStatus != .playing, isPlaying {
+        if wasPlayingBeforeFastScan {
             play()
         }
+        wasPlayingBeforeFastScan = false
     }
 
-    private func startBackwardSeekRepeat() {
+    private func startBackwardSeekRepeat(forward: Bool) {
         fastScanBackwardTask?.cancel()
         fastScanBackwardTask = Task {
+            var ticks = 0
             while !Task.isCancelled {
-                seek(by: -10)
-                try? await Task.sleep(for: .milliseconds(350))
+                ticks += 1
+                let multiplier = ticks >= 7 ? 4 : 2
+                await MainActor.run {
+                    self.fastScanSpeedMultiplier = multiplier
+                    let delta = Double(multiplier * 6) * (forward ? 1 : -1)
+                    self.seek(by: delta)
+                }
+                try? await Task.sleep(for: .milliseconds(220))
             }
         }
     }
@@ -764,6 +796,17 @@ public final class PlayerState {
             guard let self else { return }
             let seconds = time.seconds
             currentTime = seconds
+            if let item = player.currentItem {
+                bufferedTimeRanges = item.loadedTimeRanges.compactMap { value in
+                    let range = value.timeRangeValue
+                    let start = CMTimeGetSeconds(range.start)
+                    let end = CMTimeGetSeconds(CMTimeAdd(range.start, range.duration))
+                    guard start.isFinite, end.isFinite, end > start else { return nil }
+                    return start...end
+                }
+            } else {
+                bufferedTimeRanges = []
+            }
             updateSubtitle(at: seconds)
 
             guard movieId != 0, duration > 0 else { return }
@@ -1005,6 +1048,8 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
     @State private var skipBackTrigger: Int = 0
     @State private var skipForwardTrigger: Int = 0
     @State private var isCommandHeld = false
+    @State private var isShiftHeld = false
+    @State private var nerdStats: PlayerNerdStats?
 
     public init(
         state: PlayerState,
@@ -1057,6 +1102,24 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
                     .transition(.opacity)
             }
 
+            if let icon = state.fastScanStatusIcon,
+               let speed = state.fastScanSpeedMultiplier {
+                HStack(spacing: 8) {
+                    Image(systemName: icon)
+                        .font(.system(size: 12, weight: .bold))
+                    Text("\(speed)x")
+                        .font(.system(size: 13, weight: .semibold))
+                        .monospacedDigit()
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .nativeGlassEffect()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(.top, 72)
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            }
+
             // Beautiful, floating glassmorphic IINA top bar
             topHUD
                 .opacity(state.showsControls ? 1 : 0)
@@ -1084,7 +1147,8 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
                 onActivity: resetControlFade,
                 onSkipBack: { skipBackTrigger += 1 },
                 onSkipForward: { skipForwardTrigger += 1 },
-                onCommandHeld: { isCommandHeld = $0 }
+                onCommandHeld: { isCommandHeld = $0 },
+                onShiftHeld: { isShiftHeld = $0 }
             )
         }
         .overlay {
@@ -1094,6 +1158,9 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
         .task {
             resetControlFade()
             NotificationCenter.default.post(name: .playerReclaimKeyboardFocus, object: nil)
+        }
+        .sheet(item: $nerdStats) { stats in
+            PlayerNerdStatsSheet(stats: stats)
         }
     }
 
@@ -1107,77 +1174,94 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
 
     private func playbackErrorOverlay(message: String) -> some View {
         ZStack {
-            // Refined backdrop blur
-            Color.black.opacity(0.25)
-                .ignoresSafeArea()
+            // No scrim - transparent overlay
 
-            VStack(alignment: .center, spacing: 20) {
-                // Icon with refined styling
+            // Error card - matches app's glass design language
+            VStack(spacing: 16) {
+                // Icon with app accent color
                 Image(systemName: "exclamationmark.circle.fill")
-                    .font(.system(size: 64))
+                    .font(.system(size: 44))
                     .symbolRenderingMode(.monochrome)
-                    .foregroundStyle(.secondary)
-                    .opacity(0.6)
+                    .foregroundStyle(Color(red: 0.98, green: 0.36, blue: 0.18))
 
-                // Content
-                VStack(alignment: .center, spacing: 8) {
-                    Text("This video couldn't be played.")
-                        .font(.system(size: 17, weight: .semibold, design: .default))
-                        .tracking(-0.4)
+                // Descriptive error message
+                VStack(spacing: 6) {
+                    Text("Playback failed")
+                        .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(.primary)
-
-                    Text(message)
-                        .font(.system(size: 15, weight: .regular, design: .default))
-                        .tracking(-0.2)
+                    
+                    Text(formatErrorMessage(message))
+                        .font(.system(size: 12, weight: .regular))
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(4)
                 }
 
-                // Buttons with Apple-style hierarchy
-                VStack(spacing: 12) {
+                // Buttons - match RetryCard layout
+                HStack(spacing: 12) {
+                    Button(action: { copyPlaybackDiagnostics() }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "doc.on.doc")
+                                .font(.system(size: 11))
+                            Text("Copy Logs")
+                                .font(.system(size: 13, weight: .semibold))
+                        }
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(Color.primary.opacity(0.12))
+                        .clipShape(Capsule(style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut("c", modifiers: [.command, .shift])
+
+                    Spacer()
+
                     Button(action: { state.dismiss() }) {
                         Text("OK")
-                            .font(.system(size: 16, weight: .semibold, design: .default))
-                            .tracking(-0.3)
-                            .frame(maxWidth: .infinity)
-                            .contentShape(Rectangle())
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 10)
+                            .background(Color(red: 0.98, green: 0.36, blue: 0.18))
+                            .clipShape(Capsule(style: .continuous))
                     }
-                    .buttonStyle(AppleBlueButtonStyle())
+                    .buttonStyle(.plain)
                     .keyboardShortcut(.defaultAction)
-
-                    Button(action: { copyPlaybackDiagnostics() }) {
-                        Text("Copy Diagnostics")
-                            .font(.system(size: 15, weight: .regular, design: .default))
-                            .tracking(-0.2)
-                            .frame(maxWidth: .infinity)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(AppleSecondaryButtonStyle())
-                    .keyboardShortcut("c", modifiers: [.command, .shift])
                 }
             }
-            .padding(28)
-            .frame(width: 340, alignment: .center)
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(.regularMaterial)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(
-                        LinearGradient(
-                            gradient: Gradient(colors: [
-                                Color.white.opacity(0.15),
-                                Color.white.opacity(0.05),
-                            ]),
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 1
-                    )
-            )
-            .shadow(color: .black.opacity(0.2), radius: 20, x: 0, y: 12)
-            .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 1)
+            .padding(24)
+            .frame(maxWidth: 420)
+            .adaptiveGlass(cornerRadius: 24)
+            .padding(.horizontal, 28)
+            .transition(.opacity.combined(with: .scale(scale: 0.96)))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+
+
+    private func formatErrorMessage(_ rawMessage: String) -> String {
+        let lower = rawMessage.lowercased()
+        
+        if lower.contains("resource unavailable") || lower.contains("404") {
+            return "The video file could not be found. This usually means the source is no longer available or the URL is invalid."
+        } else if lower.contains("timeout") || lower.contains("timed out") {
+            return "The connection took too long to respond. Check your internet connection and try again."
+        } else if lower.contains("network") || lower.contains("connection refused") {
+            return "Network connection failed. Check your internet connection and make sure the server is reachable."
+        } else if lower.contains("authorization") || lower.contains("forbidden") || lower.contains("403") {
+            return "Access denied. You may not have permission to play this content."
+        } else if lower.contains("format") || lower.contains("codec") || lower.contains("unsupported") {
+            return "This video format is not supported by your player."
+        } else if lower.contains("drm") || lower.contains("protected") {
+            return "This content is protected and cannot be played."
+        } else if lower.contains("certificate") || lower.contains("ssl") || lower.contains("tls") {
+            return "Secure connection failed. There may be a certificate issue."
+        } else {
+            // Return a cleaned up version of the raw message
+            let cleaned = rawMessage.replacingOccurrences(of: "_", with: " ")
+            return cleaned.isEmpty ? "An unknown error occurred. Check your connection and try again." : cleaned
         }
     }
 
@@ -1185,6 +1269,7 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
         let assetURL = (state.player.currentItem?.asset as? AVURLAsset)?.url.absoluteString ?? "No URL"
         let logText = """
         Playback Error: \(state.errorMessage ?? "Unknown error")
+        Formatted: \(formatErrorMessage(state.errorMessage ?? ""))
         URL: \(assetURL)
         """
         NSPasteboard.general.clearContents()
@@ -1249,7 +1334,21 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
 
                 // Top-Right Group: Stream stats (torrent) + Volume + Episodes
                 HStack(spacing: 12) {
-                    streamStatsAccessory()
+                    if state.movieId == 0 {
+                        Button {
+                            Task { await showNerdStats() }
+                        } label: {
+                            Image(systemName: "gauge.with.dots.needle.67percent")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.85))
+                                .frame(width: 30, height: 30)
+                                .nativeGlassEffect()
+                        }
+                        .buttonStyle(.plain)
+                        .help("Nerd stats")
+                    } else {
+                        streamStatsAccessory()
+                    }
 
                     HStack(spacing: 12) {
                         CustomSlider(value: Binding(
@@ -1308,6 +1407,7 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
                 state: state,
                 direction: .back,
                 isCommandHeld: isCommandHeld,
+                isShiftHeld: isShiftHeld,
                 pulseTrigger: $skipBackTrigger,
                 onActivity: resetControlFade
             )
@@ -1330,6 +1430,7 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
                 state: state,
                 direction: .forward,
                 isCommandHeld: isCommandHeld,
+                isShiftHeld: isShiftHeld,
                 pulseTrigger: $skipForwardTrigger,
                 onActivity: resetControlFade
             )
@@ -1340,17 +1441,28 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
     }
 
     private var scrubberTransportControls: some View {
-        HStack(spacing: 14) {
+        let commandFastActive = isCommandHeld || state.isFastScanning
+        let shortSeekActive = isShiftHeld
+        let seekStep = shortSeekActive ? 5.0 : 15.0
+        let backIcon = commandFastActive ? "backward.fill" : (shortSeekActive ? "gobackward.5" : "gobackward.15")
+        let forwardIcon = commandFastActive ? "forward.fill" : (shortSeekActive ? "goforward.5" : "goforward.15")
+
+        return HStack(spacing: 14) {
             Button {
-                state.seek(by: -15)
+                state.seek(by: -seekStep)
                 resetControlFade()
             } label: {
-                Image(systemName: "gobackward.15")
+                Image(systemName: backIcon)
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.9))
+                    .contentTransition(commandFastActive ? .identity : .symbolEffect(.replace))
+                    .frame(width: 22, height: 22)
+                    .scaleEffect(commandFastActive ? 1.08 : 1.0)
             }
             .buttonStyle(.plain)
-            .help("Back 15 seconds")
+            .animation(.linear(duration: 0.05), value: commandFastActive)
+            .animation(.linear(duration: 0.05), value: shortSeekActive)
+            .help(commandFastActive ? "Fast seek backward" : "Back \(Int(seekStep)) seconds")
 
             Button {
                 state.togglePlayback()
@@ -1363,18 +1475,24 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
                     .frame(width: 22)
             }
             .buttonStyle(.plain)
+            .animation(.spring(response: 0.02, dampingFraction: 0.85), value: state.isPlaying)
             .help(state.isPlaying ? "Pause" : "Play")
 
             Button {
-                state.seek(by: 15)
+                state.seek(by: seekStep)
                 resetControlFade()
             } label: {
-                Image(systemName: "goforward.15")
+                Image(systemName: forwardIcon)
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.9))
+                    .contentTransition(commandFastActive ? .identity : .symbolEffect(.replace))
+                    .frame(width: 22, height: 22)
+                    .scaleEffect(commandFastActive ? 1.08 : 1.0)
             }
             .buttonStyle(.plain)
-            .help("Forward 15 seconds")
+            .animation(.linear(duration: 0.05), value: commandFastActive)
+            .animation(.linear(duration: 0.05), value: shortSeekActive)
+            .help(commandFastActive ? "Fast seek forward" : "Forward \(Int(seekStep)) seconds")
         }
         .padding(.trailing, 4)
     }
@@ -1426,6 +1544,7 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
                             set: { state.seek(to: $0) }
                         ),
                         range: 0...max(state.duration, 0.01),
+                        bufferedRanges: state.bufferedTimeRanges,
                         formatTime: formatTime,
                         thumbnailProvider: { time, requestID in
                             await state.thumbnailImage(for: time, requestID: requestID)
@@ -1622,6 +1741,315 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
         }
     }
 
+    private func showNerdStats() async {
+        guard let item = state.player.currentItem,
+              let asset = item.asset as? AVURLAsset else { return }
+
+        let streamURL = asset.url
+        var quality = "Adaptive HLS"
+        var bitrate = "Adaptive"
+        var codec = "Adaptive"
+        var observedBitrate = "N/A"
+        var indicatedBitrate = "N/A"
+        var switchBitrate = "N/A"
+
+        let tracks = try? await item.asset.loadTracks(withMediaType: .video)
+        if let track = tracks?.first {
+            let size = try? await track.load(.naturalSize)
+            let transform = try? await track.load(.preferredTransform)
+            if let size, let transform {
+                let rendered = size.applying(transform)
+                let w = Int(abs(rendered.width))
+                let h = Int(abs(rendered.height))
+                if w > 0 && h > 0 {
+                    quality = "\(w)x\(h)"
+                }
+            }
+
+            let rate = track.estimatedDataRate
+            if rate > 0 {
+                bitrate = String(format: "%.2f Mbps", rate / 1_000_000)
+            }
+
+            if let desc = track.formatDescriptions.first {
+                let mediaSubType = CMFormatDescriptionGetMediaSubType(desc as! CMFormatDescription)
+                codec = fourCCString(mediaSubType)
+            }
+        }
+
+        let ext = streamURL.pathExtension.uppercased()
+        let format = ext == "M3U8" ? "HLS (M3U8)" : (ext.isEmpty ? "Unknown" : ext)
+        if ext == "M3U8" {
+            let accessEvent = item.accessLog()?.events.last
+            if let accessEvent {
+                if accessEvent.observedBitrate > 0 {
+                    observedBitrate = formatMbps(accessEvent.observedBitrate)
+                }
+                if accessEvent.indicatedBitrate > 0 {
+                    indicatedBitrate = formatMbps(accessEvent.indicatedBitrate)
+                    bitrate = indicatedBitrate
+                }
+                if accessEvent.switchBitrate > 0 {
+                    switchBitrate = formatMbps(accessEvent.switchBitrate)
+                }
+            }
+
+            if let hlsProbe = await probeHlsStats(from: streamURL) {
+                if let variant = bestMatchingVariant(
+                    variants: hlsProbe.variants,
+                    targetBitrate: accessEvent?.indicatedBitrate
+                ) {
+                    quality = variant.quality ?? quality
+                    codec = variant.codec ?? codec
+                    bitrate = formatMbps(Double(variant.bandwidth))
+                } else {
+                    if let qualityText = hlsProbe.quality {
+                        quality = qualityText
+                    }
+                    if let bitrateText = hlsProbe.bitrate {
+                        bitrate = bitrateText
+                    }
+                    if let codecText = hlsProbe.codec {
+                        codec = codecText
+                    }
+                }
+            }
+        }
+        nerdStats = PlayerNerdStats(
+            title: state.seriesName.isEmpty ? state.title : state.seriesName,
+            format: format,
+            quality: quality,
+            bitrate: bitrate,
+            codec: codec,
+            observedBitrate: observedBitrate,
+            indicatedBitrate: indicatedBitrate,
+            switchBitrate: switchBitrate,
+            url: streamURL.absoluteString
+        )
+    }
+
+    private func fourCCString(_ code: FourCharCode) -> String {
+        let n = Int(code)
+        let c1 = Character(UnicodeScalar((n >> 24) & 255)!)
+        let c2 = Character(UnicodeScalar((n >> 16) & 255)!)
+        let c3 = Character(UnicodeScalar((n >> 8) & 255)!)
+        let c4 = Character(UnicodeScalar(n & 255)!)
+        return String([c1, c2, c3, c4])
+    }
+
+    private func probeHlsStats(from manifestURL: URL) async -> HLSStatsProbe? {
+        let responseText = await fetchText(from: manifestURL)
+        guard let responseText else { return nil }
+        let lines = responseText
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard !lines.isEmpty else { return nil }
+
+        if lines.contains(where: { $0.hasPrefix("#EXT-X-STREAM-INF:") }) {
+            return parseMasterHls(lines: lines)
+        }
+        return parseMediaHls(lines: lines)
+    }
+
+    private func parseMasterHls(lines: [String]) -> HLSStatsProbe {
+        var bestPixels = 0
+        var bestBitrate = 0
+        var bestCodec: String?
+        var variants: [HLSVariant] = []
+
+        for line in lines where line.hasPrefix("#EXT-X-STREAM-INF:") {
+            let value = String(line.dropFirst("#EXT-X-STREAM-INF:".count))
+            let attrs = parseM3U8Attributes(value)
+            var variantPixels = 0
+            var variantQuality: String?
+            var variantBitrate = 0
+
+            if let resolution = attrs["RESOLUTION"] {
+                let parts = resolution.uppercased().split(separator: "X")
+                if parts.count == 2,
+                   let width = Int(parts[0]),
+                   let height = Int(parts[1]) {
+                    variantPixels = width * height
+                    variantQuality = "\(height)p (\(width)x\(height))"
+                    bestPixels = max(bestPixels, variantPixels)
+                }
+            }
+
+            if let bandwidthString = attrs["BANDWIDTH"], let bandwidth = Int(bandwidthString) {
+                bestBitrate = max(bestBitrate, bandwidth)
+                variantBitrate = bandwidth
+            }
+            var normalizedCodec: String?
+            if let codecsValue = attrs["CODECS"], !codecsValue.isEmpty {
+                normalizedCodec = normalizeCodec(codecsValue)
+                bestCodec = normalizedCodec
+            }
+
+            if variantBitrate > 0 {
+                variants.append(
+                    HLSVariant(
+                        bandwidth: variantBitrate,
+                        quality: variantQuality ?? (variantPixels > 0 ? qualityLabel(pixelCount: variantPixels) : nil),
+                        codec: normalizedCodec
+                    )
+                )
+            }
+        }
+
+        let quality = bestPixels > 0 ? qualityLabel(pixelCount: bestPixels) : nil
+        let bitrate = bestBitrate > 0 ? String(format: "%.2f Mbps", Double(bestBitrate) / 1_000_000) : nil
+        return HLSStatsProbe(quality: quality, bitrate: bitrate, codec: bestCodec, variants: variants)
+    }
+
+    private func parseMediaHls(lines: [String]) -> HLSStatsProbe {
+        var peakBitrate = 0
+        for line in lines where line.hasPrefix("#EXT-X-BITRATE:") {
+            let raw = line.dropFirst("#EXT-X-BITRATE:".count).trimmingCharacters(in: .whitespaces)
+            if let bitrate = Int(raw) {
+                peakBitrate = max(peakBitrate, bitrate * 1_000)
+            }
+        }
+        let bitrate = peakBitrate > 0 ? String(format: "%.2f Mbps", Double(peakBitrate) / 1_000_000) : nil
+        let variants = peakBitrate > 0 ? [HLSVariant(bandwidth: peakBitrate, quality: nil, codec: nil)] : []
+        return HLSStatsProbe(quality: nil, bitrate: bitrate, codec: nil, variants: variants)
+    }
+
+    private func parseM3U8Attributes(_ input: String) -> [String: String] {
+        var attributes: [String: String] = [:]
+        let pattern = #"([A-Z0-9-]+)=("([^"]*)"|[^,]*)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return attributes }
+        let nsInput = input as NSString
+        let range = NSRange(location: 0, length: nsInput.length)
+        regex.enumerateMatches(in: input, range: range) { match, _, _ in
+            guard let match,
+                  let keyRange = Range(match.range(at: 1), in: input),
+                  let valueRange = Range(match.range(at: 2), in: input) else { return }
+            var value = String(input[valueRange]).trimmingCharacters(in: .whitespaces)
+            if value.hasPrefix("\""), value.hasSuffix("\""), value.count >= 2 {
+                value.removeFirst()
+                value.removeLast()
+            }
+            attributes[String(input[keyRange])] = value
+        }
+        return attributes
+    }
+
+    private func normalizeCodec(_ codecList: String) -> String {
+        let normalized = codecList
+            .replacingOccurrences(of: "\"", with: "")
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: ", ")
+        return normalized.isEmpty ? "Adaptive" : normalized
+    }
+
+    private func qualityLabel(pixelCount: Int) -> String {
+        let tiers = [
+            (3840 * 2160, "2160p (4K)"),
+            (2560 * 1440, "1440p"),
+            (1920 * 1080, "1080p"),
+            (1280 * 720, "720p"),
+            (854 * 480, "480p")
+        ]
+        for (threshold, label) in tiers where pixelCount >= threshold {
+            return label
+        }
+        return "SD"
+    }
+
+    private func bestMatchingVariant(variants: [HLSVariant], targetBitrate: Double?) -> HLSVariant? {
+        guard !variants.isEmpty else { return nil }
+        guard let targetBitrate, targetBitrate > 0 else {
+            return variants.max(by: { $0.bandwidth < $1.bandwidth })
+        }
+        return variants.min(by: { lhs, rhs in
+            abs(Double(lhs.bandwidth) - targetBitrate) < abs(Double(rhs.bandwidth) - targetBitrate)
+        })
+    }
+
+    private func formatMbps(_ bitsPerSecond: Double) -> String {
+        guard bitsPerSecond > 0 else { return "N/A" }
+        return String(format: "%.2f Mbps", bitsPerSecond / 1_000_000)
+    }
+
+    private func fetchText(from url: URL) async -> String? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 8
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse,
+              (200...299).contains(http.statusCode) else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+}
+
+private struct HLSStatsProbe {
+    let quality: String?
+    let bitrate: String?
+    let codec: String?
+    let variants: [HLSVariant]
+}
+
+private struct HLSVariant {
+    let bandwidth: Int
+    let quality: String?
+    let codec: String?
+}
+
+private struct PlayerNerdStats: Identifiable {
+    let id = UUID()
+    let title: String
+    let format: String
+    let quality: String
+    let bitrate: String
+    let codec: String
+    let observedBitrate: String
+    let indicatedBitrate: String
+    let switchBitrate: String
+    let url: String
+}
+
+private struct PlayerNerdStatsSheet: View {
+    let stats: PlayerNerdStats
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(stats.title)
+                    .font(.title3.weight(.bold))
+                row("Format", stats.format)
+                row("Quality", stats.quality)
+                row("Bitrate", stats.bitrate)
+                row("Codec", stats.codec)
+                row("Observed", stats.observedBitrate)
+                row("Indicated", stats.indicatedBitrate)
+                row("Switch", stats.switchBitrate)
+                row("URL", stats.url, monospaced: true)
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(minWidth: 560, minHeight: 340)
+    }
+
+    @ViewBuilder
+    private func row(_ label: String, _ value: String, monospaced: Bool = false) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(label)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 90, alignment: .leading)
+            if monospaced {
+                Text(value)
+                    .font(.system(.footnote, design: .monospaced))
+                    .textSelection(.enabled)
+            } else {
+                Text(value)
+                    .font(.subheadline)
+            }
+        }
+    }
 }
 
 struct HUDButtonStyle: ButtonStyle {
@@ -1758,6 +2186,7 @@ struct PlayerKeyboardCaptureView: NSViewRepresentable {
     var onSkipBack: () -> Void
     var onSkipForward: () -> Void
     var onCommandHeld: (Bool) -> Void
+    var onShiftHeld: (Bool) -> Void
 
     func makeNSView(context: Context) -> PlayerKeyboardNSView {
         let view = PlayerKeyboardNSView()
@@ -1766,6 +2195,7 @@ struct PlayerKeyboardCaptureView: NSViewRepresentable {
         view.onSkipBack = onSkipBack
         view.onSkipForward = onSkipForward
         view.onCommandHeld = onCommandHeld
+        view.onShiftHeld = onShiftHeld
         return view
     }
 
@@ -1775,9 +2205,11 @@ struct PlayerKeyboardCaptureView: NSViewRepresentable {
         nsView.onSkipBack = onSkipBack
         nsView.onSkipForward = onSkipForward
         nsView.onCommandHeld = onCommandHeld
+        nsView.onShiftHeld = onShiftHeld
         if state.isPresented {
             nsView.claimKeyboardFocus()
             onCommandHeld(NSEvent.modifierFlags.contains(.command))
+            onShiftHeld(NSEvent.modifierFlags.contains(.shift))
         }
     }
 
@@ -1792,8 +2224,10 @@ final class PlayerKeyboardNSView: NSView {
     var onSkipBack: (() -> Void)?
     var onSkipForward: (() -> Void)?
     var onCommandHeld: ((Bool) -> Void)?
+    var onShiftHeld: ((Bool) -> Void)?
     private var focusObserver: NSObjectProtocol?
     private var isCommandKeyHeld = false
+    private var isShiftKeyHeld = false
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -1830,6 +2264,11 @@ final class PlayerKeyboardNSView: NSView {
         if commandDown != isCommandKeyHeld {
             isCommandKeyHeld = commandDown
             onCommandHeld?(commandDown)
+        }
+        let shiftDown = event.modifierFlags.contains(.shift)
+        if shiftDown != isShiftKeyHeld {
+            isShiftKeyHeld = shiftDown
+            onShiftHeld?(shiftDown)
         }
         if !commandDown {
             state?.stopFastScan()
@@ -2176,3 +2615,6 @@ struct AppleSecondaryButtonStyle: ButtonStyle {
             .animation(.easeInOut(duration: 0.12), value: configuration.isPressed)
     }
 }
+
+
+

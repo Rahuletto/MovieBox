@@ -7,10 +7,16 @@ struct MediaInformationSection: View {
     let subtitleLanguages: [String]
 
     var body: some View {
-        HStack(alignment: .top, spacing: 32) {
-            informationColumn
-            languagesColumn
-            accessibilityColumn
+        VStack(alignment: .leading, spacing: 32) {
+            HStack(alignment: .top, spacing: 32) {
+                informationColumn
+                languagesColumn
+                accessibilityColumn
+            }
+
+            if !detail.contentWarnings.isEmpty {
+                contentAdvisoriesSection
+            }
         }
     }
 
@@ -38,6 +44,18 @@ struct MediaInformationSection: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private var contentAdvisoriesSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Content Advisories")
+                .font(.headline)
+            Text(detail.contentWarnings.joined(separator: ", "))
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     private var languagesColumn: some View {
         VStack(alignment: .leading, spacing: 16) {
             columnTitle("Languages")
@@ -53,8 +71,22 @@ struct MediaInformationSection: View {
                         + (subtitleLanguages.count > 8 ? ", more" : "")
                 )
             }
+
+            if let rtStats = rottenTomatoesStatsForSection {
+                RottenTomatoesSection(stats: rtStats)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var rottenTomatoesStatsForSection: RottenTomatoesStats? {
+        if let stats = detail.enrichment?.rottenTomatoesStats {
+            return stats
+        }
+        if let percentage = detail.enrichment?.rottenTomatoes {
+            return RottenTomatoesStats(percentage: percentage)
+        }
+        return nil
     }
 
     private var accessibilityColumn: some View {

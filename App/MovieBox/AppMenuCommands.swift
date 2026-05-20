@@ -29,9 +29,9 @@ struct AppMenuCommands: Commands {
         CommandMenu("View") {
             Button("Home") { router.show(.home) }
                 .keyboardShortcut("1", modifiers: .command)
-            Button("TV Shows") { router.show(.tvShows) }
-                .keyboardShortcut("2", modifiers: .command)
             Button("Movies") { router.show(.movies) }
+                .keyboardShortcut("2", modifiers: .command)
+            Button("Shows") { router.show(.tvShows) }
                 .keyboardShortcut("3", modifiers: .command)
             Button("Library") { router.show(.library) }
                 .keyboardShortcut("4", modifiers: .command)

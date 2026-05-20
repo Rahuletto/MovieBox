@@ -8,6 +8,8 @@ import SwiftUI
 struct DetailHeroHeader: View {
       @Environment(\.modelContext) private var modelContext
       @Query private var storedMovies: [MovieRecord]
+      @State private var showIMDbSheet = false
+      @State private var showRTSheet = false
       
       let detail: MovieDetail
       let kind: MediaKind
@@ -17,6 +19,7 @@ struct DetailHeroHeader: View {
       let onRate: (Float) -> Void
       let onPlayNow: () -> Void
       let onPlayTrailer: () -> Void
+      let isPreparingTrailer: Bool
       let currentRating: Float?
       var playButtonTitle: String = "Play Now"
       
@@ -29,6 +32,16 @@ struct DetailHeroHeader: View {
           return year.count == 4 ? String(year) : nil
       }
 
+      private var rottenTomatoesStatsForSheet: RottenTomatoesStats? {
+          if let stats = detail.enrichment?.rottenTomatoesStats {
+              return stats
+          }
+          if let percentage = detail.enrichment?.rottenTomatoes {
+              return RottenTomatoesStats(percentage: percentage)
+          }
+          return nil
+      }
+
       private var starringNames: [String] {
           if let actors = detail.enrichment?.actors, !actors.isEmpty {
               return actors
@@ -37,6 +50,26 @@ struct DetailHeroHeader: View {
                   .filter { !$0.isEmpty }
           }
           return detail.cast.map(\.name)
+      }
+
+      private var directorLineText: String? {
+          guard let raw = detail.enrichment?.director?.trimmingCharacters(in: .whitespacesAndNewlines),
+                !raw.isEmpty
+          else { return nil }
+          return raw
+      }
+
+      @ViewBuilder
+      private func directorLineView(text: String) -> some View {
+          (
+              Text("Directed by ")
+                  .foregroundStyle(.white.opacity(0.72))
+              + Text(text)
+                  .foregroundStyle(.white)
+          )
+          .font(.subheadline)
+          .multilineTextAlignment(.trailing)
+          .frame(maxWidth: 320, alignment: .trailing)
       }
       
       var body: some View {
@@ -64,14 +97,30 @@ struct DetailHeroHeader: View {
                               outlineStroke: Color.white.opacity(0.45)
                           ) {
                               if let imdbRating = detail.enrichment?.imdbRating {
-                                  IMDBBadge(rating: imdbRating)
+                                  IMDBBadge(
+                                      rating: imdbRating,
+                                      enrichment: detail.enrichment,
+                                      onTap: { showIMDbSheet = true }
+                                  )
+                                  .sheet(isPresented: $showIMDbSheet) {
+                                      IMDbStatsSheet(
+                                          enrichment: detail.enrichment,
+                                          tmdbRating: detail.movie.voteAverage
+                                      )
+                                  }
                               }
                           }
 
-                          if let rt = detail.enrichment?.rottenTomatoes {
-                              RottenTomatoesBadge(score: rt)
+                          if let rtStats = rottenTomatoesStatsForSheet {
+                              RottenTomatoesBadge(
+                                  score: rtStats.percentage,
+                                  onTap: { showRTSheet = true }
+                              )
+                              .sheet(isPresented: $showRTSheet) {
+                                  RottenTomatoesStatsSheet(stats: rtStats)
+                              }
                           }
-                      }
+                          }
 
                       if !techKinds.isEmpty {
                           MediaTechBadgeRow(kinds: techKinds)
@@ -102,24 +151,38 @@ struct DetailHeroHeader: View {
                       }
                   }
 
-                  if detail.trailerURL != nil {
+                  if detail.trailerURL != nil || detail.trailerRTStreamURL != nil {
                       Button(action: onPlayTrailer) {
-                          Label("Watch Trailer", systemImage: "play.circle")
-                              .font(.subheadline)
-                              .foregroundStyle(.white.opacity(0.75))
+                          HStack(spacing: 8) {
+                              if isPreparingTrailer {
+                                  ProgressView()
+                                      .controlSize(.small)
+                              } else {
+                                  Image(systemName: "play.circle")
+                              }
+                              Text("Watch Trailer")
+                          }
+                          .font(.subheadline)
+                          .foregroundStyle(.white.opacity(0.75))
                       }
                       .buttonStyle(.plain)
+                      .disabled(isPreparingTrailer)
                   }
               }
               .frame(maxWidth: 720, alignment: .leading)
 
               Spacer(minLength: 0)
 
-              MediaStarringLine(
-                  names: starringNames,
-                  labelColor: .white.opacity(0.72),
-                  nameColor: .white
-              )
+              VStack(alignment: .trailing, spacing: 8) {
+                  MediaStarringLine(
+                      names: starringNames,
+                      labelColor: .white.opacity(0.72),
+                      nameColor: .white
+                  )
+                  if let directorLine = directorLineText {
+                      directorLineView(text: directorLine)
+                  }
+              }
               .frame(maxWidth: 380, alignment: .trailing)
               .padding(.bottom, 2)
           }
@@ -162,7 +225,7 @@ private struct DetailHeader: View {
                     Label("Add To My List", systemImage: "plus")
                 }
 
-                if detail.trailerURL != nil {
+                if detail.trailerURL != nil || detail.trailerRTStreamURL != nil {
                     GlassButton(action: onPlayTrailer) {
                         Label("Play Trailer", systemImage: "play.circle")
                     }

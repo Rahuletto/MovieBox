@@ -11,6 +11,7 @@ import SwiftData
 import SwiftUI
 
 struct MovieDetailView: View {
+    @Environment(AppRouter.self) private var router
     @Environment(PlayerState.self) private var playerState
     @Environment(\.modelContext) private var modelContext
     @Query private var settings: [AppSettings]
@@ -26,6 +27,7 @@ struct MovieDetailView: View {
     @State private var isLoading = false
     @State private var isLoadingSubtitles = false
     @State private var subtitleFileURL: URL?
+    @State private var preparingVideoURL: URL?
     @State private var activeStreamSession: TorrentStreamSession?
     @State private var isPreparingStream = false
     /// Cancels an in-flight `playBestTorrent` attempt when the user starts another play.
@@ -77,6 +79,8 @@ struct MovieDetailView: View {
                     isLoadingTVEpisodes: isLoadingTVEpisodes,
                     tvSeasonsLoadFailed: tvSeasonsLoadFailed,
                     isLoadingTorrents: isLoadingTorrents,
+                    isPreparingStream: isPreparingStream,
+                    preparingVideoURL: preparingVideoURL,
                     playButtonTitle: heroPlayButtonTitle,
                     onTVSeasonChange: { season in
                         selectedTVSeason = season
@@ -94,8 +98,20 @@ struct MovieDetailView: View {
                     onAddToList: { addToMyList(detail!.movie) },
                     onRate: rateMovie,
                     onPlayNow: playBestTorrent,
-                    onPlayTrailer: { playTrailer(detail?.trailerURL) },
-                    onPlayVideo: { playTrailer($0) },
+                    onPlayTrailer: { playTrailer() },
+                    onPlayVideo: { videoURL in
+                        if detail?.trailerRTStreamURL != nil {
+                            playTrailerRTFallback()
+                            return
+                        }
+                        playYouTubeVideo(videoURL, fallbackToRT: false)
+                    },
+                    onSelectCastMember: { member in
+                        router.showPerson(
+                            id: member.id,
+                            returningTo: .movieDetail(movieId)
+                        )
+                    },
                     onSearchSubtitles: { searchSubtitles(for: detail!.movie) },
                     onDownloadSubtitle: downloadSubtitle
                 )
@@ -223,8 +239,11 @@ struct MovieDetailView: View {
                 season: selectedTVSeason,
                 settings: settings.first
             )
-            if let first = tvEpisodes.first {
-                await selectEpisode(first)
+            if let latestReleased = latestReleasedEpisode(from: tvEpisodes) {
+                await selectEpisode(latestReleased)
+            } else if let firstUpcoming = tvEpisodes.first {
+                selectedTVEpisode = firstUpcoming
+                torrents = []
             } else {
                 selectedTVEpisode = nil
                 torrents = []
@@ -239,6 +258,9 @@ struct MovieDetailView: View {
     private var heroPlayButtonTitle: String {
         if kind == .tv {
             guard let episode = selectedTVEpisode else { return "Select Episode" }
+            if isUpcomingEpisode(episode), let label = formattedAirDate(episode.airDate) {
+                return "Airs \(label)"
+            }
             if WatchProgressStore.resumePosition(for: movieId, in: storedMovies) != nil {
                 return "Continue S\(episode.seasonNumber) E\(episode.episodeNumber)"
             }
@@ -252,6 +274,10 @@ struct MovieDetailView: View {
 
     private func selectEpisode(_ episode: TVEpisode) async {
         selectedTVEpisode = episode
+        if isUpcomingEpisode(episode) {
+            torrents = []
+            return
+        }
         await searchTorrents(episode: episode)
     }
 
@@ -358,9 +384,7 @@ struct MovieDetailView: View {
         )
     }
 
-    private func playTrailer(_ url: URL?) {
-        guard let url else { return }
-        
+    private func playYouTubeVideo(_ url: URL, fallbackToRT: Bool) {
         let absoluteString = url.absoluteString
         var key: String?
         
@@ -372,9 +396,17 @@ struct MovieDetailView: View {
             key = absoluteString.components(separatedBy: "youtu.be/").last?.components(separatedBy: "?").first
         }
         
-        guard let trailerKey = key else { return }
+        guard let trailerKey = key else {
+            if !fallbackToRT {
+                errorMessage = "Couldn't start this video. Try another clip or check your connection."
+                return
+            }
+            playTrailerRTFallback()
+            return
+        }
         
         isPreparingStream = true
+        preparingVideoURL = url
         
         Task {
             do {
@@ -387,11 +419,12 @@ struct MovieDetailView: View {
                 
                 await MainActor.run {
                     isPreparingStream = false
+                    preparingVideoURL = nil
                     LogStore.shared.log(.info, category: "playback", "Trailer resolved — playing in AVPlayer")
                     playerState.load(
                         url: resolvedURL,
                         title: detail?.movie.title ?? "",
-                        movieId: movieId,
+                        movieId: 0,
                         subtitleURL: nil,
                         subtitleAppearance: settings.first?.subtitleAppearance ?? .cinematic,
                         subtitleFontSize: settings.first?.subtitleFontSizePoints ?? 20,
@@ -402,18 +435,82 @@ struct MovieDetailView: View {
             } catch {
                 await MainActor.run {
                     isPreparingStream = false
-                    LogStore.shared.log(.error, category: "playback", "Trailer resolve failed — \(error.localizedDescription)")
-                    errorMessage = (error as? LocalizedError)?.errorDescription
-                        ?? "Couldn't start the trailer. Try another clip or check your connection."
+                    preparingVideoURL = nil
+                    let isAgeRestricted = isAgeRestrictionError(error)
+                    if fallbackToRT {
+                        LogStore.shared.log(.error, category: "playback", "Trailer resolve failed — trying RT fallback — \(error.localizedDescription)")
+                    } else if isAgeRestricted {
+                        LogStore.shared.log(.error, category: "playback", "Video resolve failed — age restricted")
+                    } else {
+                        LogStore.shared.log(.error, category: "playback", "Video resolve failed — \(error.localizedDescription)")
+                    }
+                }
+                await MainActor.run {
+                    if fallbackToRT {
+                        playTrailerRTFallback()
+                    } else if isAgeRestrictionError(error), detail?.trailerRTStreamURL != nil {
+                        playTrailerRTFallback()
+                    } else if isAgeRestrictionError(error) {
+                        errorMessage = "This YouTube clip is age-restricted and cannot be resolved in-app. Try another clip or play the RT trailer."
+                    } else {
+                        errorMessage = "Couldn't start this video. Try another clip or check your connection."
+                    }
                 }
             }
         }
+    }
+
+    private func isAgeRestrictionError(_ error: Error) -> Bool {
+        let lowercased = error.localizedDescription.lowercased()
+        return lowercased.contains("age restricted") || lowercased.contains("age-restricted")
+    }
+
+    private func playTrailer() {
+        isPreparingStream = true
+        preparingVideoURL = nil
+        // Prefer RT-hosted HLS when available (direct AVPlayer playback).
+        if detail?.trailerRTStreamURL != nil {
+            playTrailerRTFallback()
+            return
+        }
+        if let youtubeTrailer = detail?.trailerURL {
+            playYouTubeVideo(youtubeTrailer, fallbackToRT: true)
+            return
+        }
+        playTrailerRTFallback()
+    }
+
+    private func playTrailerRTFallback() {
+        guard let rtURL = detail?.trailerRTStreamURL else {
+            isPreparingStream = false
+            preparingVideoURL = nil
+            errorMessage = "Couldn't start the trailer. Try another clip or check your connection."
+            return
+        }
+
+        isPreparingStream = false
+        preparingVideoURL = nil
+        LogStore.shared.log(.info, category: "playback", "Playing RT trailer fallback in AVPlayer")
+        playerState.load(
+            url: rtURL,
+            title: detail?.movie.title ?? "",
+            movieId: 0,
+            subtitleURL: nil,
+            subtitleAppearance: settings.first?.subtitleAppearance ?? .cinematic,
+            subtitleFontSize: settings.first?.subtitleFontSizePoints ?? 20,
+            episodeTitle: "Trailer",
+            displayTitle: detail?.movie.title
+        )
     }
 
     private func playBestTorrent() {
         if kind == .tv, selectedTVEpisode == nil {
             LogStore.shared.log(.warn, category: "playback", "Play Now blocked — no TV episode selected (movieId=\(movieId))")
             errorMessage = "Select a season and episode to play."
+            return
+        }
+        if kind == .tv, let selectedTVEpisode, isUpcomingEpisode(selectedTVEpisode) {
+            errorMessage = "This episode is upcoming and not available yet."
             return
         }
 
@@ -491,6 +588,34 @@ struct MovieDetailView: View {
                 }
             }
         }
+    }
+
+    private func latestReleasedEpisode(from episodes: [TVEpisode]) -> TVEpisode? {
+        episodes
+            .filter { !isUpcomingEpisode($0) }
+            .max(by: { $0.episodeNumber < $1.episodeNumber })
+    }
+
+    private func isUpcomingEpisode(_ episode: TVEpisode) -> Bool {
+        guard let date = parseTMDBDate(episode.airDate) else { return false }
+        return date > Calendar.current.startOfDay(for: Date())
+    }
+
+    private func formattedAirDate(_ raw: String?) -> String? {
+        guard let date = parseTMDBDate(raw) else { return nil }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter.string(from: date)
+    }
+
+    private func parseTMDBDate(_ raw: String?) -> Date? {
+        guard let raw, !raw.isEmpty else { return nil }
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.date(from: raw)
     }
 }
 

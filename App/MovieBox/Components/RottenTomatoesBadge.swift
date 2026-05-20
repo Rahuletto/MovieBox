@@ -32,6 +32,7 @@ struct RottenTomatoesBadge: View {
 
     let score: Int
     var iconSize: CGFloat = 18
+    var onTap: (() -> Void)?
 
     private var verdict: Verdict { Verdict(score: score) }
 
@@ -59,5 +60,9 @@ struct RottenTomatoesBadge: View {
         .fixedSize(horizontal: true, vertical: false)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(verdict.accessibilityPrefix), \(score) percent on Rotten Tomatoes")
+        .accessibilityAddTraits(onTap != nil ? .isButton : [])
+        .onTapGesture {
+            onTap?()
+        }
     }
 }

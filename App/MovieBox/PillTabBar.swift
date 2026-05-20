@@ -18,8 +18,8 @@ struct PillTabBar: View {
 
     private let tabs: [TabItem] = [
         TabItem(id: .home, title: "Home", systemImage: "house.fill"),
-        TabItem(id: .tvShows, title: "TV Shows", systemImage: "tv"),
         TabItem(id: .movies, title: "Movies", systemImage: "film"),
+        TabItem(id: .tvShows, title: "Shows", systemImage: "tv"),
         TabItem(id: .library, title: "Library", systemImage: "books.vertical.fill"),
         TabItem(id: .downloads, title: "Downloads", systemImage: "arrow.down.circle")
     ]
@@ -102,11 +102,11 @@ struct PillTabBar: View {
                             .animation(MovieBoxMotion.tabHighlight, value: currentTopLevelRoute)
                             .padding(.horizontal, 4)
                             .padding(.vertical, 3)
-                            .frame(width: 420)
+                            .frame(width: 402, alignment: .leading)
                             .transition(.opacity)
                         }
                     }
-                    .frame(width: isSearchExpanded ? 38 : 420)
+                    .frame(width: isSearchExpanded ? 38 : 402, alignment: .leading)
                     .adaptiveGlass(cornerRadius: 32)
                     .clipShape(Capsule(style: .continuous))
                     .shadow(color: .black.opacity(0.12), radius: 12, x: 0, y: 4)
@@ -140,9 +140,9 @@ struct PillTabBar: View {
                                     .buttonStyle(.plain)
                                 }
                             }
-                            .padding(.horizontal, 14)
+                            .padding(.horizontal, 16)
                             .padding(.vertical, 8)
-                            .frame(width: 420)
+                            .frame(width: 402)
                             .transition(.opacity)
                         } else {
                             Button {
@@ -177,7 +177,7 @@ struct PillTabBar: View {
                     .onTapGesture {}
                     .gesture(DragGesture(minimumDistance: 0).onChanged { _ in }.onEnded { _ in })
                 }
-                .frame(width: 466)
+                .frame(width: 448)
             }
         }
         .frame(maxWidth: .infinity)

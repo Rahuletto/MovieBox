@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+@preconcurrency import YouTubeKit
 
 /// TMDB-shaped movie metadata. Source: TMDB only.
 ///
@@ -68,11 +69,34 @@ public struct CastMember: Sendable, Codable, Identifiable, Hashable {
 /// Rich metadata sourced from OMDB and merged in server-side. Lives alongside
 /// the TMDB-derived fields so we never block on TMDB for ratings / awards /
 /// director / etc.
+public struct RottenTomatoesStats: Sendable, Codable, Hashable {
+    public let percentage: Int           // 91 (percent)
+    public let totalReviews: Int?        // total critic reviews
+    public let freshCount: Int?          // number of fresh reviews
+    public let rottenCount: Int?         // number of rotten reviews
+    public let averageScore: Double?     // average score out of 10
+    
+    public init(
+        percentage: Int,
+        totalReviews: Int? = nil,
+        freshCount: Int? = nil,
+        rottenCount: Int? = nil,
+        averageScore: Double? = nil
+    ) {
+        self.percentage = percentage
+        self.totalReviews = totalReviews
+        self.freshCount = freshCount
+        self.rottenCount = rottenCount
+        self.averageScore = averageScore
+    }
+}
+
 public struct MovieEnrichment: Sendable, Codable, Hashable {
     public let imdbRating: Double?       // 7.8
     public let imdbVotes: Int?           // 1_234_567
     public let metascore: Int?           // 74 (out of 100)
-    public let rottenTomatoes: Int?      // 91 (percent)
+    public let rottenTomatoes: Int?      // 91 (percent) — deprecated, use rottenTomatoesStats
+    public let rottenTomatoesStats: RottenTomatoesStats?  // detailed RT stats
     public let runtimeMin: Int?
     public let rated: String?            // "PG-13"
     public let released: String?         // "07 Nov 2014"
@@ -85,6 +109,44 @@ public struct MovieEnrichment: Sendable, Codable, Hashable {
     public let boxOffice: String?
     public let production: String?
     public let genre: String?            // comma-separated
+
+    public init(
+        imdbRating: Double? = nil,
+        imdbVotes: Int? = nil,
+        metascore: Int? = nil,
+        rottenTomatoes: Int? = nil,
+        rottenTomatoesStats: RottenTomatoesStats? = nil,
+        runtimeMin: Int? = nil,
+        rated: String? = nil,
+        released: String? = nil,
+        director: String? = nil,
+        writer: String? = nil,
+        actors: String? = nil,
+        awards: String? = nil,
+        country: String? = nil,
+        language: String? = nil,
+        boxOffice: String? = nil,
+        production: String? = nil,
+        genre: String? = nil
+    ) {
+        self.imdbRating = imdbRating
+        self.imdbVotes = imdbVotes
+        self.metascore = metascore
+        self.rottenTomatoes = rottenTomatoes
+        self.rottenTomatoesStats = rottenTomatoesStats
+        self.runtimeMin = runtimeMin
+        self.rated = rated
+        self.released = released
+        self.director = director
+        self.writer = writer
+        self.actors = actors
+        self.awards = awards
+        self.country = country
+        self.language = language
+        self.boxOffice = boxOffice
+        self.production = production
+        self.genre = genre
+    }
 }
 
 /// YouTube video from TMDB `videos` (trailers, teasers, clips, etc.).
@@ -219,6 +281,8 @@ public struct MovieDetail: Sendable, Codable, Identifiable, Hashable {
     public let genres: [Genre]
     public let cast: [CastMember]
     public let trailerURL: URL?
+    /// Direct HLS URL from Rotten Tomatoes / Fandango MPX (backend-resolved). Used when YouTube → Piped resolution fails or when there is no TMDB trailer.
+    public let trailerRTStreamURL: URL?
     /// All YouTube videos from TMDB (trailers, clips, featurettes, …).
     public let videos: [MediaVideo]
     public let similar: [Movie]
@@ -230,27 +294,33 @@ public struct MovieDetail: Sendable, Codable, Identifiable, Hashable {
     public let imdbId: String?
     /// OMDB-sourced enrichment (IMDB rating, RT, Metascore, director, awards…).
     public let enrichment: MovieEnrichment?
+    /// TMDB regional descriptors (e.g. "Contains Violence") when available.
+    public let contentWarnings: [String]
 
     public init(
         movie: Movie,
         genres: [Genre],
         cast: [CastMember] = [],
         trailerURL: URL? = nil,
+        trailerRTStreamURL: URL? = nil,
         videos: [MediaVideo] = [],
         similar: [Movie] = [],
         logoURL: URL? = nil,
         imdbId: String? = nil,
-        enrichment: MovieEnrichment? = nil
+        enrichment: MovieEnrichment? = nil,
+        contentWarnings: [String] = []
     ) {
         self.movie = movie
         self.genres = genres
         self.cast = cast
         self.trailerURL = trailerURL
+        self.trailerRTStreamURL = trailerRTStreamURL
         self.videos = videos
         self.similar = similar
         self.logoURL = logoURL
         self.imdbId = imdbId
         self.enrichment = enrichment
+        self.contentWarnings = contentWarnings
     }
 }
 
@@ -276,6 +346,7 @@ public struct TVEpisode: Sendable, Identifiable, Hashable, Codable {
     public let episodeNumber: Int
     public let name: String
     public let overview: String
+    public let airDate: String?
     public let stillPath: String?
     public let runtime: Int?
 
@@ -285,6 +356,7 @@ public struct TVEpisode: Sendable, Identifiable, Hashable, Codable {
         episodeNumber: Int,
         name: String,
         overview: String,
+        airDate: String?,
         stillPath: String?,
         runtime: Int?
     ) {
@@ -293,6 +365,7 @@ public struct TVEpisode: Sendable, Identifiable, Hashable, Codable {
         self.episodeNumber = episodeNumber
         self.name = name
         self.overview = overview
+        self.airDate = airDate
         self.stillPath = stillPath
         self.runtime = runtime
     }
@@ -362,6 +435,8 @@ public actor MetadataClient {
     private let session: URLSession
     private let decoder: JSONDecoder
     private let tmdbToken: String?
+    private var lastNetworkProbeMbps: Double?
+    private var lastNetworkProbeAt: Date?
 
     public init(mode: MetadataEndpointMode? = nil, session: URLSession? = nil, tmdbToken: String? = nil) {
         self.mode = mode
@@ -408,6 +483,53 @@ public actor MetadataClient {
         return response.results.map(\.movie)
     }
 
+    public func discoverCurated(kind: MediaKind = .movie, queryItems: [URLQueryItem], page: Int = 1) async throws -> [Movie] {
+        let endpoint = kind == .movie ? "/discover/movie" : "/discover/tv"
+        var allItems = queryItems
+        allItems.append(URLQueryItem(name: "page", value: String(page)))
+        let response: MovieListResponse = try await request(path: endpoint, queryItems: allItems)
+        return response.results.map(\.movie)
+    }
+
+    public func keywordID(matching query: String) async throws -> Int? {
+        let response: KeywordSearchResponse = try await request(
+            path: "/search/keyword",
+            queryItems: [URLQueryItem(name: "query", value: query)]
+        )
+        return response.results.first?.id
+    }
+
+    public func discoverByKeyword(kind: MediaKind = .movie, keywordID: Int, page: Int = 1) async throws -> [Movie] {
+        try await discoverCurated(
+            kind: kind,
+            queryItems: [URLQueryItem(name: "with_keywords", value: String(keywordID))],
+            page: page
+        )
+    }
+
+    public func personDetail(id: Int) async throws -> PersonDetail {
+        guard let mode else { throw MetadataError.missingConfiguration }
+
+        if case .backend(let baseURL, let appToken) = mode {
+            let url = baseURL.appending(path: "api/person/\(id)")
+            var request = URLRequest(url: url)
+            request.setValue(appToken, forHTTPHeaderField: "X-MovieBox-Token")
+            request.timeoutInterval = 20
+            let (data, response) = try await session.data(for: request)
+            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                throw MetadataError.upstream(http.statusCode)
+            }
+            let bundle = try decoder.decode(TMDBPersonBundleDTO.self, from: data)
+            return PersonDetailMapper.map(bundle: bundle)
+        }
+
+        let bundle: TMDBPersonBundleDTO = try await request(
+            path: "/person/\(id)",
+            queryItems: [URLQueryItem(name: "append_to_response", value: "combined_credits,external_ids")]
+        )
+        return PersonDetailMapper.map(bundle: bundle)
+    }
+
     public func movieDetail(id: Int, kind: MediaKind = .movie) async throws -> MovieDetail {
         guard let mode else { throw MetadataError.missingConfiguration }
 
@@ -435,16 +557,32 @@ public actor MetadataClient {
             return detail
         }
 
-        // Direct mode (no backend): fall back to the three individual TMDB calls.
+        // Direct mode (no backend): fall back to individual TMDB calls.
         let base = kind == .movie ? "/movie" : "/tv"
         async let movieResponse: TMDBMovieDTO = request(path: "\(base)/\(id)")
         async let creditsResponse: CreditsResponse = request(path: "\(base)/\(id)/credits")
         async let similarResponse: MovieListResponse = request(path: "\(base)/\(id)/similar")
 
+        let contentWarnings: [String]
+        switch kind {
+        case .movie:
+            let releaseDates: TMDBReleaseDatesAppendDTO = try await request(path: "\(base)/\(id)/release_dates")
+            contentWarnings = ContentAdvisoryExtractor.fromMovieReleaseDates(releaseDates.results)
+        case .tv:
+            let ratings: TMDBContentRatingsAppendDTO = try await request(path: "\(base)/\(id)/content_ratings")
+            contentWarnings = ContentAdvisoryExtractor.fromTVContentRatings(ratings.results)
+        }
+
         let movie = try await movieResponse.movie
         let credits = try await creditsResponse.cast.prefix(16).map(\.castMember)
         let similar = try await similarResponse.results.map(\.movie)
-        return MovieDetail(movie: movie, genres: try await movieResponse.genres ?? [], cast: Array(credits), similar: similar)
+        return MovieDetail(
+            movie: movie,
+            genres: try await movieResponse.genres ?? [],
+            cast: Array(credits),
+            similar: similar,
+            contentWarnings: contentWarnings
+        )
     }
 
     /// Season list for a TV show (excludes specials / season 0).
@@ -474,6 +612,7 @@ public actor MetadataClient {
                     episodeNumber: $0.episodeNumber,
                     name: $0.name ?? "Episode \($0.episodeNumber)",
                     overview: $0.overview ?? "",
+                    airDate: $0.airDate,
                     stillPath: $0.stillPath,
                     runtime: $0.runtime
                 )
@@ -483,104 +622,161 @@ public actor MetadataClient {
     public func resolveTrailer(key: String) async throws -> URL {
         guard mode != nil else { throw MetadataError.missingConfiguration }
 
-        // Resolve on-device first — many public Piped mirrors block Cloudflare Workers.
-        if let piped = await resolveTrailerViaPiped(key: key) {
-            return piped
+        await TrailerStreamRelay.shared.stop()
+
+        // Native, on-device extraction of playable streams from YouTube.
+        // Choose quality based on current throughput with an "edge-up" rule:
+        // if bandwidth suggests 720p, try 1080p; if 360p, try 480p.
+        let streams = try await YouTube(videoID: key).streams
+        let playableMuxed = Array(streams
+            .filterVideoAndAudio()
+            .filter { $0.isNativelyPlayable })
+
+        if playableMuxed.isEmpty {
+            throw MetadataError.trailerUnavailable
         }
 
-        if case .backend(let baseURL, let appToken) = mode {
-            var components = URLComponents(url: baseURL.appending(path: "api/trailer/resolve"), resolvingAgainstBaseURL: false)
-            components?.queryItems = [URLQueryItem(name: "key", value: key)]
-            guard let url = components?.url else { throw MetadataError.invalidURL }
+        let candidates = playableMuxed.map { stream in
+            TrailerStreamCandidate(
+                url: stream.url,
+                tier: inferredTier(from: stream.url),
+                score: streamScore(stream.url)
+            )
+        }
+        let throughputMbps = await measuredNetworkMbps(probeURL: candidates.max(by: { $0.score < $1.score })?.url)
 
-            var request = URLRequest(url: url)
-            request.setValue(appToken, forHTTPHeaderField: "X-MovieBox-Token")
-            request.timeoutInterval = 20
-
-            let (data, response) = try await session.data(for: request)
-            if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
-                struct TrailerResponse: Codable { let url: String }
-                if let resolved = try? JSONDecoder().decode(TrailerResponse.self, from: data),
-                   let resultURL = URL(string: resolved.url) {
-                    return resultURL
-                }
+        if let throughputMbps {
+            let suggested = tierForThroughput(mbps: throughputMbps)
+            let target = edgeUpTier(from: suggested)
+            if let adaptivePick = pickBestCandidate(candidates, targetTier: target) {
+                return adaptivePick.url
             }
+        }
+
+        if let scoredBest = candidates.max(by: { $0.score < $1.score }) {
+            return scoredBest.url
         }
 
         throw MetadataError.trailerUnavailable
     }
 
-    private static let staticPipedBases = [
-        "https://api.piped.private.coffee",
-        "https://pipedapi.kavin.rocks",
-        "https://pipedapi.adminforge.de",
-        "https://pipedapi.leptons.xyz",
-    ]
-
-    private func listPipedAPIBases() async -> [String] {
-        var merged: [String] = []
-        if let instancesURL = URL(string: "https://piped-instances.kavin.rocks/") {
-            do {
-                var request = URLRequest(url: instancesURL)
-                request.timeoutInterval = 5
-                let (data, response) = try await session.data(for: request)
-                if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
-                    struct Instance: Decodable { let api_url: String }
-                    let instances = try JSONDecoder().decode([Instance].self, from: data)
-                    for instance in instances {
-                        let trimmed = instance.api_url.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !trimmed.isEmpty else { continue }
-                        let base = trimmed.hasSuffix("/") ? String(trimmed.dropLast()) : trimmed
-                        if !merged.contains(base) { merged.append(base) }
-                    }
-                }
-            } catch {
-                // Fall back to static list.
-            }
-        }
-        for base in Self.staticPipedBases where !merged.contains(base) {
-            merged.append(base)
-        }
-        return merged
+    private struct TrailerStreamCandidate: Sendable {
+        let url: URL
+        let tier: Int
+        let score: Int
     }
 
-    private func resolveTrailerViaPiped(key: String) async -> URL? {
-        let bases = await listPipedAPIBases()
-        struct PipedStream: Codable {
-            let url: String?
-            let format: String?
-            let quality: String?
+    private func tierForThroughput(mbps: Double) -> Int {
+        switch mbps {
+        case ..<0.9: 360
+        case ..<1.8: 480
+        case ..<3.8: 720
+        case ..<8.0: 1080
+        case ..<14.0: 1440
+        default: 2160
         }
-        struct PipedResponse: Codable {
-            let hlsUrl: String?
-            let hls: String?
-            let videoStreams: [PipedStream]?
+    }
+
+    private func edgeUpTier(from suggested: Int) -> Int {
+        let tier: Int
+        switch suggested {
+        case ..<480: tier = 480
+        case ..<720: tier = 720
+        case ..<1080: tier = 1080
+        case ..<1440: tier = 1440
+        default: tier = 2160
         }
+        return max(480, tier)
+    }
 
-        for base in bases {
-            guard let apiURL = URL(string: "\(base)/streams/\(key)") else { continue }
-            do {
-                var request = URLRequest(url: apiURL)
-                request.timeoutInterval = 15
-                let (data, response) = try await session.data(for: request)
-                guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { continue }
-                let piped = try JSONDecoder().decode(PipedResponse.self, from: data)
+    private func pickBestCandidate(_ candidates: [TrailerStreamCandidate], targetTier: Int) -> TrailerStreamCandidate? {
+        let suitable = candidates.filter { $0.tier >= targetTier }
+        if let bestSuitable = suitable.max(by: { $0.score < $1.score }) {
+            return bestSuitable
+        }
+        return candidates.max(by: { $0.score < $1.score })
+    }
 
-                let pickerInput = TrailerStreamPicker.Response(
-                    hlsUrl: piped.hlsUrl,
-                    hls: piped.hls,
-                    videoStreams: piped.videoStreams?.map {
-                        TrailerStreamPicker.Stream(url: $0.url ?? "", format: $0.format, quality: $0.quality)
-                    }
-                )
-                if let url = TrailerStreamPicker.pickPlayableURL(from: pickerInput) {
-                    return url
-                }
-            } catch {
-                continue
+    private func inferredTier(from url: URL) -> Int {
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        let itag = Int(query["itag"] ?? "")
+        if let itag {
+            switch itag {
+            case 38: return 2160
+            case 37: return 1080
+            case 22: return 720
+            case 59, 78: return 480
+            case 18: return 360
+            default: break
             }
         }
-        return nil
+
+        let quality = (query["quality"] ?? "").lowercased()
+        if quality.contains("hd2160") { return 2160 }
+        if quality.contains("hd1440") { return 1440 }
+        if quality.contains("hd1080") { return 1080 }
+        if quality.contains("hd720") { return 720 }
+        if quality.contains("large") { return 480 }
+        if quality.contains("medium") { return 360 }
+        return 360
+    }
+
+    private func streamScore(_ url: URL) -> Int {
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let query = Dictionary(uniqueKeysWithValues: (components?.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        let itag = Int(query["itag"] ?? "")
+
+        // Prefer known high-quality muxed itags first.
+        let itagScore: Int = switch itag {
+        case 38: 4000 // 3072p
+        case 37: 3000 // 1080p
+        case 22: 2000 // 720p
+        case 59, 78: 1500 // 480p
+        case 18: 1000 // 360p
+        default: 0
+        }
+
+        let quality = (query["quality"] ?? "").lowercased()
+        let qualityScore: Int
+        if quality.contains("hd2160") { qualityScore = 3500 }
+        else if quality.contains("hd1440") { qualityScore = 3200 }
+        else if quality.contains("hd1080") { qualityScore = 3000 }
+        else if quality.contains("hd720") { qualityScore = 2000 }
+        else if quality.contains("large") { qualityScore = 1500 }
+        else if quality.contains("medium") { qualityScore = 1000 }
+        else { qualityScore = 0 }
+
+        // Slightly prefer streams with larger explicit bitrate values.
+        let bitrateScore = Int(query["bitrate"] ?? "") ?? 0
+
+        return max(itagScore, qualityScore) * 10_000 + bitrateScore
+    }
+
+    private func measuredNetworkMbps(probeURL: URL?) async -> Double? {
+        if let cached = lastNetworkProbeMbps,
+           let at = lastNetworkProbeAt,
+           Date().timeIntervalSince(at) < 45 {
+            return cached
+        }
+        guard let probeURL else { return nil }
+
+        var request = URLRequest(url: probeURL)
+        request.setValue("bytes=0-524287", forHTTPHeaderField: "Range")
+        request.timeoutInterval = 4
+
+        let start = Date()
+        do {
+            let (data, _) = try await URLSession.shared.data(for: request)
+            let elapsed = max(Date().timeIntervalSince(start), 0.2)
+            let bits = Double(data.count * 8)
+            let mbps = bits / elapsed / 1_000_000
+            lastNetworkProbeMbps = mbps
+            lastNetworkProbeAt = Date()
+            return mbps
+        } catch {
+            return lastNetworkProbeMbps
+        }
     }
 
     /// Returns an absolute Fanart.tv logo URL (NOT a TMDB path).
@@ -735,6 +931,15 @@ public actor ImageLoader {
 
 private struct MovieListResponse: Decodable, Sendable {
     let results: [TMDBMovieDTO]
+}
+
+private struct KeywordSearchResponse: Decodable, Sendable {
+    struct KeywordDTO: Decodable, Sendable {
+        let id: Int
+        let name: String
+    }
+
+    let results: [KeywordDTO]
 }
 
 private struct CreditsResponse: Decodable, Sendable {
@@ -904,9 +1109,13 @@ private struct TitleBundleDTO: Decodable, Sendable {
     let externalIds: ExternalIdsDTO?
     let videos: VideosBundleDTO?
     let movieboxLogo: String?
+    /// HLS playlist URL when RT hosts the trailer (MPX / Akamai); direct AVPlayer playback.
+    let movieboxTrailerRtHls: String?
     /// OMDB-sourced enrichment payload (ratings, director, awards, etc.).
     /// This is the *only* place OMDB-derived data enters the type system.
     let movieboxEnrichment: EnrichmentDTO?
+    let releaseDates: TMDBReleaseDatesAppendDTO?
+    let contentRatings: TMDBContentRatingsAppendDTO?
 
     func detail(kind: MediaKind) -> MovieDetail {
         let resolvedTitle = title ?? name ?? "Untitled"
@@ -935,17 +1144,43 @@ private struct TitleBundleDTO: Decodable, Sendable {
         let similarMovies = (similar?.results ?? []).map(\.movie)
         let trailer = videos?.preferredTrailerURL
         let mediaVideos = videos?.youtubeVideos ?? []
+        let contentWarnings: [String] = switch kind {
+        case .movie:
+            ContentAdvisoryExtractor.fromMovieReleaseDates(releaseDates?.results)
+        case .tv:
+            ContentAdvisoryExtractor.fromTVContentRatings(contentRatings?.results)
+        }
 
         return MovieDetail(
             movie: movie,
             genres: genres ?? [],
             cast: Array(cast),
             trailerURL: trailer,
+            trailerRTStreamURL: movieboxTrailerRtHls.flatMap(URL.init(string:)),
             videos: mediaVideos,
             similar: similarMovies,
             logoURL: movieboxLogo.flatMap(URL.init(string:)),
             imdbId: resolvedImdbId,
-            enrichment: movieboxEnrichment?.toEnrichment()
+            enrichment: movieboxEnrichment?.toEnrichment(),
+            contentWarnings: contentWarnings
+        )
+    }
+}
+
+private struct RottenTomatoesStatsDTO: Decodable, Sendable {
+    let percentage: Int
+    let totalReviews: Int?
+    let freshCount: Int?
+    let rottenCount: Int?
+    let averageScore: Double?
+    
+    func toStats() -> RottenTomatoesStats {
+        RottenTomatoesStats(
+            percentage: percentage,
+            totalReviews: totalReviews,
+            freshCount: freshCount,
+            rottenCount: rottenCount,
+            averageScore: averageScore
         )
     }
 }
@@ -955,6 +1190,7 @@ private struct EnrichmentDTO: Decodable, Sendable {
     let imdbVotes: Int?
     let metascore: Int?
     let rottenTomatoes: Int?
+    let rottenTomatoesStats: RottenTomatoesStatsDTO?
     let runtimeMin: Int?
     let rated: String?
     let released: String?
@@ -974,6 +1210,7 @@ private struct EnrichmentDTO: Decodable, Sendable {
             imdbVotes: imdbVotes,
             metascore: metascore,
             rottenTomatoes: rottenTomatoes,
+            rottenTomatoesStats: rottenTomatoesStats?.toStats(),
             runtimeMin: runtimeMin,
             rated: rated,
             released: released,
@@ -1068,6 +1305,7 @@ private struct TVEpisodeDTO: Decodable, Sendable {
     let episodeNumber: Int
     let name: String?
     let overview: String?
+    let airDate: String?
     let stillPath: String?
     let runtime: Int?
 }

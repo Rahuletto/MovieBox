@@ -4,6 +4,7 @@ import CoreMetadata
 
 struct CastSection: View {
     let cast: [CastMember]
+    var onSelectMember: ((CastMember) -> Void)? = nil
 
     private let photoSize: CGFloat = 128
     private let cardWidth: CGFloat = 140
@@ -13,29 +14,36 @@ struct CastSection: View {
             Text("Cast & Crew")
                 .font(MovieBoxTypography.title)
                 .foregroundStyle(.primary)
+                .padding(.horizontal, 24)
 
             ScrollView(.horizontal) {
                 HStack(spacing: 20) {
                     ForEach(cast) { member in
-                        VStack(spacing: 6) {
-                            castPhoto(for: member)
-                            Text(member.name)
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(.primary)
-                                .lineLimit(2)
-                                .multilineTextAlignment(.center)
-                                .frame(width: cardWidth)
+                        Button {
+                            onSelectMember?(member)
+                        } label: {
+                            VStack(spacing: 6) {
+                                castPhoto(for: member)
+                                Text(member.name)
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(2)
+                                    .multilineTextAlignment(.center)
+                                    .frame(width: cardWidth)
 
-                            Text(member.character)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                                .multilineTextAlignment(.center)
-                                .frame(width: cardWidth)
+                                Text(member.character)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                                    .multilineTextAlignment(.center)
+                                    .frame(width: cardWidth)
+                            }
                         }
+                        .buttonStyle(.plain)
+                        .disabled(onSelectMember == nil)
                     }
                 }
-                .padding(.trailing, 24)
+                .padding(.horizontal, 24)
             }
             .scrollIndicators(.hidden)
             .frame(maxWidth: .infinity, alignment: .leading)

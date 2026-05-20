@@ -25,6 +25,8 @@ struct MovieDetailContentView: View {
     let isLoadingTVEpisodes: Bool
     let tvSeasonsLoadFailed: Bool
     let isLoadingTorrents: Bool
+    let isPreparingStream: Bool
+    let preparingVideoURL: URL?
     let playButtonTitle: String
     let onTVSeasonChange: (Int) -> Void
     let onEpisodeSelect: (TVEpisode) -> Void
@@ -34,6 +36,7 @@ struct MovieDetailContentView: View {
     let onPlayNow: () -> Void
     let onPlayTrailer: () -> Void
     let onPlayVideo: (URL) -> Void
+    let onSelectCastMember: (CastMember) -> Void
     let onSearchSubtitles: () -> Void
     let onDownloadSubtitle: (SubtitleInfo) -> Void
 
@@ -66,6 +69,7 @@ struct MovieDetailContentView: View {
                     onRate: onRate,
                     onPlayNow: onPlayNow,
                     onPlayTrailer: onPlayTrailer,
+                    isPreparingTrailer: isPreparingStream && preparingVideoURL == nil,
                     currentRating: currentRating
                 )
                 .zIndex(1)
@@ -75,8 +79,14 @@ struct MovieDetailContentView: View {
                         .frame(maxWidth: .infinity)
 
                     if !detail.videos.isEmpty {
-                        TrailersClipsSection(videos: detail.videos, onPlay: onPlayVideo)
-                            .frame(maxWidth: .infinity)
+                        TrailersClipsSection(
+                            videos: detail.videos,
+                            onPlay: onPlayVideo,
+                            isPreparingStream: isPreparingStream,
+                            preparingVideoURL: preparingVideoURL
+                        )
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, -DetailLayoutMetrics.horizontalPadding)
                     }
 
                     if kind == .tv {
@@ -94,6 +104,7 @@ struct MovieDetailContentView: View {
                             onRetrySeasons: onRetryTVSeasons
                         )
                         .frame(maxWidth: .infinity)
+                        .padding(.horizontal, -DetailLayoutMetrics.horizontalPadding)
                     }
 
                     if kind == .tv, selectedTVEpisode != nil, let episode = selectedTVEpisode {
@@ -124,8 +135,11 @@ struct MovieDetailContentView: View {
                     }
 
                     if !detail.cast.isEmpty {
-                        CastSection(cast: detail.cast)
-                            .frame(maxWidth: .infinity)
+                        CastSection(cast: detail.cast) { member in
+                            onSelectCastMember(member)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, -DetailLayoutMetrics.horizontalPadding)
                     }
 
                     SubtitleSection(

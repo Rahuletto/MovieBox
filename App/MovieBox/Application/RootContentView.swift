@@ -7,7 +7,15 @@ struct RootContentView: View {
         ZStack {
             RootTabStack()
 
-            if case .movieDetail(let id) = router.selectedRoute {
+            if case .personDetail(let id) = router.selectedRoute {
+                PersonDetailView(
+                    personId: id,
+                    onBack: { router.backFromPerson() }
+                )
+                .id("person-detail-\(id)")
+                .transition(.opacity)
+                .zIndex(2)
+            } else if case .movieDetail(let id) = router.selectedRoute {
                 MovieDetailView(
                     movieId: id,
                     kind: router.detailKind,

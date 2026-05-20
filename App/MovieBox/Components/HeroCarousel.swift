@@ -12,11 +12,18 @@ struct HeroCarousel: View {
 
     let movies: [Movie]
     let kind: MediaKind
+    let kindForMovie: ((Movie) -> MediaKind)?
     let action: (Movie) -> Void
 
-    init(movies: [Movie], kind: MediaKind = .movie, action: @escaping (Movie) -> Void) {
+    init(
+        movies: [Movie],
+        kind: MediaKind = .movie,
+        kindForMovie: ((Movie) -> MediaKind)? = nil,
+        action: @escaping (Movie) -> Void
+    ) {
         self.movies = movies
         self.kind = kind
+        self.kindForMovie = kindForMovie
         self.action = action
     }
 
@@ -41,6 +48,7 @@ struct HeroCarousel: View {
     var body: some View {
         guard !movies.isEmpty else { return AnyView(EmptyView()) }
         let currentMovie = movies[currentIndex]
+        let currentKind = kindForMovie?(currentMovie) ?? kind
         let enrichment = enrichmentByMovieID[currentMovie.id]
         let releaseYear: String? = {
             let year = currentMovie.releaseDate.prefix(4)
@@ -77,7 +85,7 @@ struct HeroCarousel: View {
                     VStack(alignment: .leading, spacing: 20) {
                         Spacer()
 
-                        AsyncLogoView(movieId: currentMovie.id, title: currentMovie.title, kind: kind)
+                        AsyncLogoView(movieId: currentMovie.id, title: currentMovie.title, kind: currentKind)
 
                         HStack(spacing: 12) {
                             MediaMetadataRibbon(
@@ -87,7 +95,11 @@ struct HeroCarousel: View {
                                 labelColor: contentColor.opacity(0.85)
                             ) {
                                 if let imdbRating = enrichment?.imdbRating {
-                                    IMDBBadge(rating: imdbRating)
+                                    IMDBBadge(
+                                        rating: imdbRating,
+                                        enrichment: enrichment,
+                                        onTap: nil
+                                    )
                                 }
                             }
 
@@ -120,11 +132,10 @@ struct HeroCarousel: View {
                 }
                 .padding(40)
 
-                VStack(spacing: 0) {
+                VStack(spacing: 12) {
                     Spacer()
-                        .padding(.top, 20)
 
-                    HStack {
+                    HStack(spacing: 0) {
                         Button {
                             withAnimation(.easeInOut) {
                                 currentIndex = (currentIndex - 1 + movies.count) % movies.count
@@ -132,12 +143,34 @@ struct HeroCarousel: View {
                             }
                         } label: {
                             Image(systemName: "chevron.left")
-                                .font(.system(size: 18, weight: .light))
+                                .font(.system(size: 14, weight: .semibold))
                                 .foregroundStyle(contentColor)
-                                .padding(8)
+                                .padding(12)
                         }
                         .buttonStyle(.plain)
                         .help("Previous movie")
+
+                        Spacer()
+
+                        HStack(spacing: 8) {
+                            ForEach(0..<movies.count, id: \.self) { index in
+                                if index == currentIndex {
+                                    ZStack(alignment: .leading) {
+                                        Capsule()
+                                            .fill(contentColor.opacity(0.3))
+                                            .frame(width: 40, height: 4)
+
+                                        Capsule()
+                                            .fill(contentColor)
+                                            .frame(width: max(0, 40 * progress), height: 4)
+                                    }
+                                } else {
+                                    Circle()
+                                        .fill(contentColor.opacity(0.3))
+                                        .frame(width: 6, height: 6)
+                                }
+                            }
+                        }
 
                         Spacer()
 
@@ -148,38 +181,16 @@ struct HeroCarousel: View {
                             }
                         } label: {
                             Image(systemName: "chevron.right")
-                                .font(.system(size: 18, weight: .light))
+                                .font(.system(size: 14, weight: .semibold))
                                 .foregroundStyle(contentColor)
-                                .padding(8)
+                                .padding(12)
                         }
                         .buttonStyle(.plain)
                         .help("Next movie")
                     }
                     .padding(.horizontal, 20)
-
-                    Spacer()
+                    .padding(.bottom, 12)
                 }
-
-                HStack(spacing: 8) {
-                    ForEach(0..<movies.count, id: \.self) { index in
-                        if index == currentIndex {
-                            ZStack(alignment: .leading) {
-                                Capsule()
-                                    .fill(contentColor.opacity(0.3))
-                                    .frame(width: 40, height: 4)
-
-                                Capsule()
-                                    .fill(contentColor)
-                                    .frame(width: max(0, 40 * progress), height: 4)
-                            }
-                        } else {
-                            Circle()
-                                .fill(contentColor.opacity(0.3))
-                                .frame(width: 6, height: 6)
-                        }
-                    }
-                }
-                .padding(.bottom, 24)
             }
             .frame(height: 620)
             .ignoresSafeArea(edges: .horizontal)
@@ -216,12 +227,12 @@ struct HeroCarousel: View {
                 }
             }
             .task(id: currentMovie.id) {
-                await loadEnrichment(for: currentMovie)
+                await loadEnrichment(for: currentMovie, kind: currentKind)
             }
         )
     }
 
-    private func loadEnrichment(for movie: Movie) async {
+    private func loadEnrichment(for movie: Movie, kind: MediaKind) async {
         guard enrichmentByMovieID[movie.id] == nil,
               let mode = metadataMode else { return }
         let client = MetadataClient(mode: mode)

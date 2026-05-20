@@ -37,3 +37,26 @@ export async function kvPut(
     return false
   }
 }
+
+export async function kvDelete(kv: KVNamespace, key: string): Promise<boolean> {
+  try {
+    await kv.delete(key)
+    return true
+  } catch (error) {
+    logKvFailure('DELETE', key, error)
+    return false
+  }
+}
+
+export async function kvList(
+  kv: KVNamespace,
+  options?: KVNamespaceListOptions
+): Promise<KVNamespaceListResult<unknown> | null> {
+  try {
+    return await kv.list(options)
+  } catch (error) {
+    const prefix = options?.prefix ?? ''
+    logKvFailure('LIST', prefix, error)
+    return null
+  }
+}
