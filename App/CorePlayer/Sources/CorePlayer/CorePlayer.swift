@@ -639,6 +639,8 @@ public final class PlayerState {
     }
 
     private func stopPlaybackResources() {
+        cancelHUDPillDismissTask()
+        hudStatusPill = nil
         stopFastScan()
         removeObservers()
         teardownPiP()
@@ -1140,12 +1142,15 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
                     .transition(.opacity)
             }
 
-            if let pill = state.hudStatusPill {
-                PlayerHUDStatusPill(model: pill)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    .padding(.top, 72)
-                    .transition(.scale(scale: 0.52, anchor: .center))
+            Group {
+                if let pill = state.hudStatusPill {
+                    PlayerHUDStatusPill(model: pill)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .padding(.top, 72)
+                        .transition(.scale(scale: 0.52, anchor: .center))
+                }
             }
+            .animation(.spring(response: 0.34, dampingFraction: 0.74), value: state.hudStatusPill)
 
             // Beautiful, floating glassmorphic IINA top bar
             topHUD
@@ -1644,6 +1649,7 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
                             .foregroundStyle(.white.opacity(0.85))
                     }
                     .buttonStyle(.plain)
+                    .help(state.videoGravityHUDTitle)
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)

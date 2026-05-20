@@ -135,7 +135,7 @@ public enum CatalogLoader {
 
     /// Yields at least twice: first when core category rows are ready, again when extra shelves have been merged in.
     public static func loadCatalogPayloadStream(mode: MetadataEndpointMode, kind: MediaKind) -> AsyncThrowingStream<CatalogPayload, Error> {
-        AsyncThrowingStream { continuation in
+        AsyncThrowingStream(CatalogPayload.self, bufferingPolicy: .unbounded) { continuation in
             let task = Task {
                 do {
                     let client = MetadataClient(mode: mode)
@@ -169,7 +169,7 @@ public enum CatalogLoader {
                     continuation.finish(throwing: error)
                 }
             }
-            continuation.onTermination { _ in task.cancel() }
+            continuation.onTermination = { @Sendable _ in task.cancel() }
         }
     }
 
@@ -376,7 +376,7 @@ public enum CatalogLoader {
 
     /// Yields at least twice: first when core category rows are ready, again when extra shelves have been merged in.
     public static func loadHomePayloadStream(mode: MetadataEndpointMode) -> AsyncThrowingStream<HomeCatalogPayload, Error> {
-        AsyncThrowingStream { continuation in
+        AsyncThrowingStream(HomeCatalogPayload.self, bufferingPolicy: .unbounded) { continuation in
             let task = Task {
                 do {
                     let client = MetadataClient(mode: mode)
@@ -495,7 +495,7 @@ public enum CatalogLoader {
                     continuation.finish(throwing: error)
                 }
             }
-            continuation.onTermination { _ in task.cancel() }
+            continuation.onTermination = { @Sendable _ in task.cancel() }
         }
     }
 }

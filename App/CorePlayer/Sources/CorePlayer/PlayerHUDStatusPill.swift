@@ -21,7 +21,7 @@ public struct PlayerHUDStatusPill: View {
                 Image(systemName: icon)
                     .font(.system(size: 12, weight: .bold))
                     .contentTransition(.symbolEffect(.replace))
-                Text("\(multiplier)×")
+                Text("\(multiplier)x")
                     .font(.system(size: 13, weight: .semibold))
                     .monospacedDigit()
                     .contentTransition(.numericText())
@@ -31,7 +31,6 @@ public struct PlayerHUDStatusPill: View {
                     .contentTransition(.symbolEffect(.replace))
                 Text(title)
                     .font(.system(size: 13, weight: .semibold))
-                    .contentTransition(.interpolate)
             }
         }
         .foregroundStyle(.white)
@@ -39,12 +38,5 @@ public struct PlayerHUDStatusPill: View {
         .padding(.vertical, 7)
         .nativeGlassEffect()
         .animation(.spring(response: 0.32, dampingFraction: 0.76), value: model)
-    }
-}
-
-extension AnyTransition {
-    /// Pop-in / warp without relying on opacity (reads sharper on video).
-    static var hudStatusPillWarp: AnyTransition {
-        .scale(scale: 0.52, anchor: .center)
     }
 }
