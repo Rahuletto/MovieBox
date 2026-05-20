@@ -5,8 +5,8 @@ import type { TorrentKind, TorrentSearchPayload } from './types'
 import { TORRENT_API_VERSION } from './types'
 
 export { TORRENT_API_VERSION } from './types'
+export { INDEXER_IDS } from './registry'
 export {
-  INDEXER_IDS,
   INDEXER_CATALOG,
   DEFAULT_ENABLED_INDEXER_IDS,
   parseEnabledIndexerIDs,

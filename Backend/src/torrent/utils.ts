@@ -18,9 +18,17 @@ export function magnetFor(infoHash: string, title: string): string {
 }
 
 export function sanitizeQuery(title: string, year?: number | null): string {
-  const cleaned = title.replace(/%/g, '').trim()
-  if (!cleaned) return title.trim()
-  if (year && year >= 1900 && year <= 2100) return `${cleaned} ${year}`
+  let cleaned = title.replace(/%/g, '').replace(/\s+/g, ' ').trim()
+  if (!cleaned) return title.replace(/%/g, '').trim()
+
+  // Repair already-doubled years from older clients ("Fight Club 1999 1999").
+  cleaned = cleaned.replace(/\b((?:19|20)\d{2})\s+\1\b$/i, '$1')
+
+  if (year && year >= 1900 && year <= 2100) {
+    // The macOS app sends `q` with year baked in (TorrentSearchQuery.make) plus `year=`.
+    if (new RegExp(`\\b${year}\\b`).test(cleaned)) return cleaned
+    return `${cleaned} ${year}`
+  }
   return cleaned
 }
 
@@ -35,9 +43,13 @@ export function normalizeImdb(raw?: string | null): string | null {
 export async function fetchJSON<T>(url: string, referer?: string): Promise<T | null> {
   const headers: Record<string, string> = { 'User-Agent': USER_AGENT, Accept: 'application/json' }
   if (referer) headers.Referer = referer
-  const res = await fetch(url, { headers, cf: { cacheTtl: 300, cacheEverything: true } })
-  if (!res.ok) return null
-  return (await res.json()) as T
+  try {
+    const res = await fetch(url, { headers, cf: { cacheTtl: 300, cacheEverything: true } })
+    if (!res.ok) return null
+    return (await res.json()) as T
+  } catch {
+    return null
+  }
 }
 
 export async function fetchHTML(url: string, referer?: string): Promise<string | null> {

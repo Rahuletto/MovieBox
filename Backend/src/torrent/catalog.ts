@@ -57,28 +57,28 @@ export const INDEXER_CATALOG: IndexerCatalogEntry[] = [
     name: 'LimeTorrents',
     description: 'General movies & TV releases',
     kinds: ['movie', 'tv'],
-    defaultEnabled: true,
+    defaultEnabled: false,
   },
   {
     id: 'torrentgalaxy',
     name: 'TorrentGalaxy',
     description: 'Movies, TV, and diverse content',
     kinds: ['movie', 'tv'],
-    defaultEnabled: true,
+    defaultEnabled: false,
   },
   {
     id: 'magnetdl',
     name: 'MagnetDL',
     description: 'Quick magnet search engine',
     kinds: ['movie', 'tv'],
-    defaultEnabled: true,
+    defaultEnabled: false,
   },
   {
     id: 'solidtorrents',
     name: 'Solid Torrents',
     description: 'Decentralized torrent search API',
     kinds: ['movie', 'tv'],
-    defaultEnabled: true,
+    defaultEnabled: false,
   },
   {
     id: 'rutracker',
@@ -92,49 +92,49 @@ export const INDEXER_CATALOG: IndexerCatalogEntry[] = [
     name: 'KickassTorrents',
     description: 'Community torrent releases',
     kinds: ['movie', 'tv'],
-    defaultEnabled: true,
+    defaultEnabled: false,
   },
   {
     id: 'rarbg',
     name: 'RARBG',
-    description: 'One of the best sources (high seeders)',
+    description: 'Shut down May 2023 — kept for legacy compatibility',
     kinds: ['movie', 'tv'],
-    defaultEnabled: true,
+    defaultEnabled: false,
   },
   {
     id: 'zooqle',
     name: 'Zooqle',
-    description: 'Reliable tracker with good coverage',
+    description: 'Defunct tracker — kept for legacy compatibility',
     kinds: ['movie', 'tv'],
-    defaultEnabled: true,
+    defaultEnabled: false,
   },
   {
     id: 'torrentfunk',
     name: 'TorrentFunk',
     description: 'Movies and TV with many seeders',
     kinds: ['movie', 'tv'],
-    defaultEnabled: true,
+    defaultEnabled: false,
   },
   {
     id: 'isohunt',
     name: 'IsoHunt',
-    description: 'Revived tracker with broad catalog',
+    description: 'Defunct tracker — kept for legacy compatibility',
     kinds: ['movie', 'tv'],
-    defaultEnabled: true,
+    defaultEnabled: false,
   },
   {
     id: 'torrentdownload',
     name: 'Torrent Download',
     description: 'Clean search interface, good coverage',
     kinds: ['movie', 'tv'],
-    defaultEnabled: true,
+    defaultEnabled: false,
   },
   {
     id: 'bitsearch',
     name: 'Bitsearch',
     description: 'Modern aggregator with high seeders',
     kinds: ['movie', 'tv'],
-    defaultEnabled: true,
+    defaultEnabled: false,
   },
 ]
 
@@ -142,12 +142,24 @@ export const DEFAULT_ENABLED_INDEXER_IDS = INDEXER_CATALOG.filter((e) => e.defau
   (e) => e.id
 )
 
+/** Indexers that are ALWAYS included regardless of client toggles. */
+const FORCE_ENABLED_INDEXER_IDS = ['piratebay'] as const
+
 export function parseEnabledIndexerIDs(raw: string | null | undefined): Set<string> {
   const known = new Set(INDEXER_CATALOG.map((e) => e.id))
-  if (!raw?.trim()) return new Set(DEFAULT_ENABLED_INDEXER_IDS)
-  const ids = raw
-    .split(',')
-    .map((s) => s.trim().toLowerCase())
-    .filter((id) => known.has(id))
-  return ids.size > 0 ? ids : new Set(DEFAULT_ENABLED_INDEXER_IDS)
+  if (raw === null || raw === undefined) return new Set(DEFAULT_ENABLED_INDEXER_IDS)
+  // An explicit empty string means "all disabled" — respect it instead of
+  // silently substituting the defaults (otherwise the Settings toggles look
+  // like they don't do anything).
+  const ids = new Set(
+    raw
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter((id) => known.has(id))
+  )
+  // Always force-include critical indexers (piratebay has massive coverage).
+  for (const id of FORCE_ENABLED_INDEXER_IDS) {
+    ids.add(id)
+  }
+  return ids
 }

@@ -92,7 +92,7 @@ export async function streamAllTorrents(
       const capped = batch.rows
         .toSorted((a, b) => (b.seeders ?? 0) - (a.seeders ?? 0))
         .slice(0, 40)
-      if (!capped.isEmpty) {
+      if (capped.length > 0) {
         allBatches.push(capped)
       }
       await write('batch', {

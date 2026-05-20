@@ -45,7 +45,7 @@ export const INDEXER_IDS = INDEXERS.map((i) => i.id)
 
 export { INDEXER_CATALOG, DEFAULT_ENABLED_INDEXER_IDS, parseEnabledIndexerIDs } from './catalog'
 
-const INDEXER_TIMEOUT_MS = 25_000
+const INDEXER_TIMEOUT_MS = 8_000
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return Promise.race([
