@@ -3,11 +3,11 @@ import Foundation
 // MARK: - Piece Store
 
 public actor PieceStore {
-    public let infoHash: String
-    public let pieceCount: Int
-    public let pieceSize: Int64
-    public let totalSize: Int64
-    public let storageURL: URL
+    public nonisolated let infoHash: String
+    public nonisolated let pieceCount: Int
+    public nonisolated let pieceSize: Int64
+    public nonisolated let totalSize: Int64
+    public nonisolated let storageURL: URL
     public let streamFirstPiece: Int
     /// Byte offset in the torrent where the streamed media file begins.
     public let streamMediaByteOffset: Int64
@@ -17,6 +17,14 @@ public actor PieceStore {
     private var readHandle: FileHandle?
     /// Contiguous bytes written from the start of the streamed media file (may be unverified).
     private var streamHeadContiguousEnd: Int64 = 0
+
+    private struct CachedBlock {
+        let torrentOffset: Int64
+        let data: Data
+    }
+    private var writeCache: [CachedBlock] = []
+    private let maxCacheSize = 2 * 1024 * 1024 // 2 MB
+    private var currentCacheBytes = 0
 
     public init(
         infoHash: String,
@@ -101,6 +109,30 @@ public actor PieceStore {
         return result
     }
 
+    private func queueWrite(torrentOffset: Int64, data: Data) throws {
+        writeCache.append(CachedBlock(torrentOffset: torrentOffset, data: data))
+        currentCacheBytes += data.count
+
+        if currentCacheBytes >= maxCacheSize {
+            try flushCache()
+        }
+    }
+
+    private func flushCache() throws {
+        guard !writeCache.isEmpty else { return }
+        guard let writeHandle else {
+            throw PieceStoreError.ioError("Write handle unavailable")
+        }
+
+        for block in writeCache {
+            try writeHandle.seek(toOffset: UInt64(block.torrentOffset))
+            writeHandle.write(block.data)
+        }
+
+        writeCache.removeAll(keepingCapacity: true)
+        currentCacheBytes = 0
+    }
+
     /// Writes a block to disk immediately for progressive playback (before hash verification).
     public func writeBlock(pieceIndex: Int, blockOffset: Int64, data: Data) async throws {
         guard pieceIndex >= 0, pieceIndex < pieceCount else {
@@ -108,15 +140,22 @@ public actor PieceStore {
         }
 
         let torrentOffset = Int64(pieceIndex) * pieceSize + blockOffset
-        try writeHandle?.seek(toOffset: UInt64(torrentOffset))
-        writeHandle?.write(data)
+        try queueWrite(torrentOffset: torrentOffset, data: data)
 
-        let mediaOffset = torrentOffset - streamMediaByteOffset
-        guard mediaOffset >= 0 else { return }
-
-        let mediaEnd = mediaOffset + Int64(data.count)
-        if mediaOffset <= streamHeadContiguousEnd {
-            streamHeadContiguousEnd = max(streamHeadContiguousEnd, mediaEnd)
+        let blockStart = torrentOffset
+        let blockEnd = torrentOffset + Int64(data.count)
+        let mediaStart = max(0, blockStart - streamMediaByteOffset)
+        let mediaEnd = max(0, blockEnd - streamMediaByteOffset)
+        if mediaEnd > mediaStart {
+            // Advance the contiguous head if this block connects to the current end.
+            // Also seed the head from offset 0 if this is the first block of the first
+            // piece — even when streamMediaByteOffset places mediaStart > 0, the actual
+            // content is still contiguous from byte 0 of the media.
+            let connectsToHead = mediaStart <= streamHeadContiguousEnd
+            let isFirstBlock = pieceIndex == streamFirstPiece && blockOffset == 0
+            if connectsToHead || (isFirstBlock && streamHeadContiguousEnd == 0) {
+                streamHeadContiguousEnd = max(streamHeadContiguousEnd, mediaEnd)
+            }
         }
     }
 
@@ -134,14 +173,17 @@ public actor PieceStore {
         }
 
         let offset = Int64(pieceIndex) * pieceSize
-        try writeHandle?.seek(toOffset: UInt64(offset))
-        writeHandle?.write(data)
+        try queueWrite(torrentOffset: offset, data: data)
         bitmap[pieceIndex] = true
 
-        let mediaOffset = offset - streamMediaByteOffset
-        if mediaOffset >= 0 {
-            let mediaEnd = mediaOffset + Int64(data.count)
-            if mediaOffset <= streamHeadContiguousEnd {
+        let blockStart = offset
+        let blockEnd = offset + Int64(data.count)
+        let mediaStart = max(0, blockStart - streamMediaByteOffset)
+        let mediaEnd = max(0, blockEnd - streamMediaByteOffset)
+        if mediaEnd > mediaStart {
+            let connectsToHead = mediaStart <= streamHeadContiguousEnd
+            let isFirstPiece = pieceIndex == streamFirstPiece
+            if connectsToHead || (isFirstPiece && streamHeadContiguousEnd == 0) {
                 streamHeadContiguousEnd = max(streamHeadContiguousEnd, mediaEnd)
             }
         }
@@ -152,6 +194,8 @@ public actor PieceStore {
         guard offset >= 0, clampedLength > 0, offset < totalSize else {
             throw PieceStoreError.outOfRange(offset, totalSize)
         }
+
+        try flushCache()
 
         try await waitForReadable(offset: offset, length: clampedLength)
 
@@ -237,6 +281,10 @@ public actor PieceStore {
                     "[PieceStore] Waiting for readable bytes \(offset)-\(end) (head contiguous: \(streamHeadContiguousEnd))"
                 )
             }
+            if waitCount >= 300 {
+                TorrentLog.error("[PieceStore] Read timeout waiting for range \(offset)-\(end)")
+                throw PieceStoreError.readTimeout(offset, length)
+            }
             try await Task.sleep(for: .milliseconds(100))
         }
     }
@@ -245,12 +293,22 @@ public actor PieceStore {
         var position = offset
         while position < end {
             let pieceIndex = Int(position / pieceSize)
-            guard hasPiece(pieceIndex) else {
-                return false
+            if hasPiece(pieceIndex) {
+                let pieceStart = Int64(pieceIndex) * pieceSize
+                let pieceEnd = min(end, pieceStart + pieceSize(for: pieceIndex))
+                position = pieceEnd
+                continue
             }
-            let pieceStart = Int64(pieceIndex) * pieceSize
-            let pieceEnd = min(end, pieceStart + pieceSize(for: pieceIndex))
-            position = pieceEnd
+            
+            // Check if within the contiguous unverified stream head.
+            let mediaOffset = position - streamMediaByteOffset
+            if mediaOffset >= 0 && mediaOffset < streamHeadContiguousEnd {
+                let mediaEnd = min(end - streamMediaByteOffset, streamHeadContiguousEnd)
+                position = mediaEnd + streamMediaByteOffset
+                continue
+            }
+            
+            return false
         }
         return true
     }
@@ -260,6 +318,14 @@ public actor PieceStore {
         guard pieceIndex >= 0, pieceIndex < pieceCount else {
             throw PieceStoreError.invalidPieceIndex(pieceIndex)
         }
+
+        let pieceStart = Int64(pieceIndex) * pieceSize
+        let pieceEnd = pieceStart + pieceSize(for: pieceIndex)
+        writeCache.removeAll { block in
+            block.torrentOffset >= pieceStart && block.torrentOffset < pieceEnd
+        }
+        currentCacheBytes = writeCache.reduce(0) { $0 + $1.data.count }
+
         guard let writeHandle else {
             throw PieceStoreError.ioError("Write handle unavailable")
         }
@@ -277,10 +343,14 @@ public actor PieceStore {
         for index in streamFirstPiece..<pieceCount {
             guard hasPiece(index) else { break }
             let pieceStart = Int64(index) * pieceSize
-            let mediaStart = pieceStart - streamMediaByteOffset
-            guard mediaStart >= 0 else { continue }
-            let mediaEnd = mediaStart + pieceSize(for: index)
-            end = max(end, mediaEnd)
+            let pieceEnd = pieceStart + pieceSize(for: index)
+            
+            let mediaStart = max(0, pieceStart - streamMediaByteOffset)
+            let mediaEnd = max(0, pieceEnd - streamMediaByteOffset)
+            
+            if mediaEnd > mediaStart {
+                end = max(end, mediaEnd)
+            }
         }
         streamHeadContiguousEnd = end
     }
@@ -298,6 +368,7 @@ public enum PieceStoreError: Error, LocalizedError {
     case pieceTooLarge(Int, Int64)
     case outOfRange(Int64, Int64)
     case ioError(String)
+    case readTimeout(Int64, Int)
 
     public var errorDescription: String? {
         switch self {
@@ -309,6 +380,8 @@ public enum PieceStoreError: Error, LocalizedError {
             "Offset \(offset) out of range (total: \(total))"
         case .ioError(let message):
             "I/O error: \(message)"
+        case .readTimeout(let offset, let length):
+            "Read timeout waiting for range: \(offset) (length: \(length))"
         }
     }
 }

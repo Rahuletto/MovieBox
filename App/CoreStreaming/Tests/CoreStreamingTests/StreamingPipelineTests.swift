@@ -90,7 +90,7 @@ final class ProgressiveStreamingTests: XCTestCase {
             totalSize: 10 * 1024 * 1024,
             pieceLength: 2 * 1024 * 1024,
             pieces: Data(repeating: 0, count: 5 * 20),
-            files: [TorrentFile(relativePath: "sample.mp4", length: 10 * 1024 * 1024)],
+            files: [TorrentFile(path: ["sample.mp4"], length: 10 * 1024 * 1024)],
             trackers: []
         )
         let target = TorrentStreamTarget.selectPrimary(from: metadata)

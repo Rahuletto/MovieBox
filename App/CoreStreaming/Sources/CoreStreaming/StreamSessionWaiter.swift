@@ -3,7 +3,7 @@ import Foundation
 extension StreamSession {
     /// Polls until the session reaches a terminal state or `timeout` elapses (then cancels).
     @MainActor
-    public func waitUntilSettled(timeout: TimeInterval = 120) async {
+    public func waitUntilSettled(timeout: TimeInterval = 240) async {
         let deadline = Date().addingTimeInterval(timeout)
         while !Task.isCancelled, Date() < deadline {
             switch state {

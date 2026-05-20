@@ -87,23 +87,18 @@ public final class HTTPRangeServer {
 
         listener?.start(queue: .main)
 
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                guard let self, let port = self.listener?.port else {
-                    continuation.resume(throwing: HTTPRangeServerError.failedToStart)
-                    return
-                }
-                self.port = port.rawValue
-                if let url = URL(string: "http://127.0.0.1:\(port)/stream") {
-                    TorrentLog.info(
-                        "[HTTPRangeServer] listening on port \(port.rawValue) — \(MovieBoxFileLogger.redactURL(url)) length=\(self.streamByteLength) offset=\(self.streamByteOffset)"
-                    )
-                    continuation.resume(returning: url)
-                } else {
-                    continuation.resume(throwing: HTTPRangeServerError.failedToStart)
-                }
-            }
+        try await Task.sleep(for: .milliseconds(500))
+        guard let port = listener?.port else {
+            throw HTTPRangeServerError.failedToStart
         }
+        self.port = port.rawValue
+        guard let url = URL(string: "http://127.0.0.1:\(port)/stream") else {
+            throw HTTPRangeServerError.failedToStart
+        }
+        TorrentLog.info(
+            "[HTTPRangeServer] listening on port \(port.rawValue) — \(MovieBoxFileLogger.redactURL(url)) length=\(self.streamByteLength) offset=\(self.streamByteOffset)"
+        )
+        return url
     }
 
     public func stop() async {
@@ -155,9 +150,17 @@ public final class HTTPRangeServer {
                     connection.cancel()
                     return
                 }
-                Task { @MainActor in
+                let responseTask = Task { @MainActor in
                     let response = await self.handleRequest(request, pieceStore: pieceStore)
                     self.sendResponse(connection: connection, response: response)
+                }
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .cancelled, .failed:
+                        responseTask.cancel()
+                    default:
+                        break
+                    }
                 }
                 return
             }
@@ -194,7 +197,6 @@ public final class HTTPRangeServer {
         var bodyData = Data()
         var contentRange: String?
         var contentLength = mediaLength
-        var retryAfterSeconds: Int?
 
         if let rangeHeader = lines.first(where: { $0.lowercased().hasPrefix("range:") }) {
             let rangeParts = rangeHeader.components(separatedBy: "=")
@@ -263,11 +265,23 @@ public final class HTTPRangeServer {
                         statusCode = 206
                         contentRange = "bytes \(mediaStart)-\(servedEnd)/\(mediaLength)"
                         contentLength = Int64(bodyData.count)
+                    } catch is CancellationError {
+                        return HTTPResponse(status: 499, body: "Client Closed Request")
                     } catch is HTTPRangeReadTimeout {
                         TorrentLog.warn(
                             "[HTTPRangeServer] Range \(mediaStart)-\(mediaEnd) timed out after \(Self.readTimeoutSeconds)s — still buffering"
                         )
                         return HTTPResponse(status: 503, body: "Buffering", retryAfterSeconds: 2)
+                    } catch let error as PieceStoreError {
+                        if case .readTimeout = error {
+                            TorrentLog.warn(
+                                "[HTTPRangeServer] PieceStore read timeout at \(mediaStart) — still buffering"
+                            )
+                            return HTTPResponse(status: 503, body: "Buffering", retryAfterSeconds: 2)
+                        } else {
+                            TorrentLog.warn("[HTTPRangeServer] Range read failed: \(error.localizedDescription)")
+                            return HTTPResponse(status: 500, body: "Internal Server Error")
+                        }
                     } catch {
                         TorrentLog.warn("[HTTPRangeServer] Range read failed: \(error.localizedDescription)")
                         return HTTPResponse(status: 500, body: "Internal Server Error")
@@ -288,8 +302,16 @@ public final class HTTPRangeServer {
                     length: length
                 )
                 contentLength = Int64(bodyData.count)
+            } catch is CancellationError {
+                return HTTPResponse(status: 499, body: "Client Closed Request")
             } catch is HTTPRangeReadTimeout {
                 return HTTPResponse(status: 503, body: "Buffering", retryAfterSeconds: 1)
+            } catch let error as PieceStoreError {
+                if case .readTimeout = error {
+                    return HTTPResponse(status: 503, body: "Buffering", retryAfterSeconds: 1)
+                } else {
+                    return HTTPResponse(status: 500, body: "Internal Server Error")
+                }
             } catch {
                 return HTTPResponse(status: 500, body: "Internal Server Error")
             }
@@ -305,10 +327,6 @@ public final class HTTPRangeServer {
             "Accept-Ranges: bytes",
             "Connection: close",
         ]
-        if statusCode == 503, let retryAfterSeconds {
-            headers.append("Retry-After: \(retryAfterSeconds)")
-        }
-
         if let contentRange {
             headers.append("Content-Range: \(contentRange)")
         }
@@ -323,7 +341,7 @@ public final class HTTPRangeServer {
             response.append(bodyData)
         }
 
-        return HTTPResponse(status: statusCode, data: response, retryAfterSeconds: retryAfterSeconds)
+        return HTTPResponse(status: statusCode, data: response, retryAfterSeconds: nil)
     }
 
     private func notifyPlayerRead(mediaOffset: Int64, length: Int) async {

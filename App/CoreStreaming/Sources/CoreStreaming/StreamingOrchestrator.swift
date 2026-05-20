@@ -114,7 +114,7 @@ public final class StreamingOrchestrator: @unchecked Sendable {
     }
 
     public func stop() async {
-        await torrentEngine?.stop()
+        torrentEngine?.stop()
         torrentEngine = nil
         await rangeServer.stop()
         await pieceStore?.cleanup()
@@ -146,9 +146,10 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         guard let pieceStore, let target = streamTarget, let metadata else { return false }
         guard target.needsTailProbeForPlayback else { return true }
 
-        let verifiedHead = await pieceStore.verifiedMediaBytesFromStart()
-        if verifiedHead >= 64 * 1024 {
-            let readLength = min(Int(verifiedHead), 512 * 1024)
+        // Check for fast-start MP4 (moov before mdat) — can start immediately.
+        let headBytes = await pieceStore.streamHeadContiguousBytes()
+        if headBytes >= 64 * 1024 {
+            let readLength = min(Int(headBytes), 512 * 1024)
             if let prefix = try? await pieceStore.read(
                 offset: target.byteOffset,
                 length: readLength
@@ -158,65 +159,19 @@ public final class StreamingOrchestrator: @unchecked Sendable {
             }
         }
 
-        if !target.needsMP4MoovTailProbe {
-            let tailPieces = StreamTailPlanner.tailPieceIndices(
-                target: target,
-                pieceLength: metadata.pieceLength,
-                pieceCount: metadata.pieceCount
+        // For all other containers (non-fast-start MP4, MKV, WebM, etc.):
+        // Return true as soon as the head satisfies the minimum buffer. AVPlayer will
+        // issue HTTP range requests for the moov/index tail as it needs them, and those
+        // are served by HTTPRangeServer once those pieces are downloaded (they remain
+        // prioritised in the background by PieceManager). Blocking here until ALL tail
+        // pieces are verified caused the 45-55% stall and 180s timeout.
+        let verifiedHead = await pieceStore.verifiedMediaBytesFromStart()
+        let effectiveHead = max(verifiedHead, headBytes)
+        if effectiveHead >= 64 * 1024 {
+            TorrentLog.info(
+                "[Streaming] Tail probe deferred — \(effectiveHead / 1024) KB head ready, tail will load on demand"
             )
-            guard !tailPieces.isEmpty else { return true }
-            for index in tailPieces where !(await pieceStore.hasPiece(index)) {
-                return false
-            }
-            TorrentLog.info("[Streaming] Tail index ready — \(tailPieces.count) piece(s) verified at file end")
             return true
-        }
-
-        let fileEnd = target.byteOffset + target.byteLength
-        var span = StreamTailPlanner.tailByteSpan(
-            byteLength: target.byteLength,
-            pieceLength: metadata.pieceLength
-        )
-        let maxSpan = min(StreamTailPlanner.maxTailByteSpan, target.byteLength)
-
-        while span <= maxSpan {
-            let tailPieces = StreamTailPlanner.tailPieceIndices(
-                target: target,
-                pieceLength: metadata.pieceLength,
-                pieceCount: metadata.pieceCount,
-                tailByteSpan: span
-            )
-            guard !tailPieces.isEmpty else { return true }
-
-            for index in tailPieces where !(await pieceStore.hasPiece(index)) {
-                return false
-            }
-
-            let tailStart = max(target.byteOffset, fileEnd - span)
-            let readLength = Int(min(span, Int64(Int.max)))
-            guard readLength > 0,
-                  let tailData = try? await pieceStore.read(offset: tailStart, length: readLength)
-            else { return false }
-
-            switch StreamTailPlanner.moovTailProbe(in: tailData, endsAtFileEOF: tailStart + Int64(readLength) >= fileEnd) {
-            case .complete:
-                TorrentLog.info(
-                    "[Streaming] Tail moov ready — \(tailPieces.count) piece(s), \(readLength / 1024) KB tail window"
-                )
-                return true
-            case .incomplete:
-                TorrentLog.debug(
-                    "[Streaming] moov truncated in \(readLength / 1024) KB tail — expanding window"
-                )
-            case .notFound:
-                TorrentLog.debug(
-                    "[Streaming] moov not in \(readLength / 1024) KB tail — expanding window"
-                )
-            }
-
-            let nextSpan = min(span * 2, maxSpan)
-            guard nextSpan > span else { return false }
-            span = nextSpan
         }
 
         return false
@@ -267,19 +222,19 @@ public final class StreamingOrchestrator: @unchecked Sendable {
     }
 
     public func downloadSpeed() async -> Double {
-        await torrentEngine?.downloadSpeed ?? 0
+        torrentEngine?.downloadSpeed ?? 0
     }
 
     public func peerCount() async -> Int {
-        await torrentEngine?.livePeerCount() ?? 0
+        torrentEngine?.livePeerCount() ?? 0
     }
 
     public func transferringPeerCount() async -> Int {
-        await torrentEngine?.transferringPeerCount() ?? 0
+        torrentEngine?.transferringPeerCount() ?? 0
     }
 
     public func peerSocketCount() async -> Int {
-        await torrentEngine?.peerSocketCount() ?? 0
+        torrentEngine?.peerSocketCount() ?? 0
     }
 
     public func diagnosticsSnapshot(
@@ -523,12 +478,13 @@ public final class TorrentEngine {
 
     private var bytesDownloaded: Int64 = 0
     private var recentBytesSamples: [(date: Date, bytes: Int64)] = []
+    private var lastAnnounceTime = Date.distantPast
 
-    private let maxPeerConnections = 36
-    private let peersPerAnnounce = 20
+    private let maxPeerConnections = 64
+    private let peersPerAnnounce = 30
     private static let announceWallTimeoutSeconds: TimeInterval = 4
     private static let maxTrackersPerRound = 40
-    private static let minPeersBeforeEarlyAnnounceExit = 24
+    private static let minPeersBeforeEarlyAnnounceExit = 48
 
     public init(
         metadata: TorrentMetadata,
@@ -650,18 +606,35 @@ public final class TorrentEngine {
     }
 
     private func fetchPeersFromTrackers(event: TrackerEvent) async -> [PeerInfo] {
-        let trackers = selectedTrackersForAnnounce()
-        TorrentLog.info(
-            "[TorrentEngine] Announcing to \(trackers.count) trackers (of \(metadata.trackers.count), \(Int(Self.announceWallTimeoutSeconds))s cap)..."
-        )
-        let eventCode = event.rawValue
-        let deadline = Date().addingTimeInterval(Self.announceWallTimeoutSeconds)
+        let now = Date()
+        let shouldAnnounceTrackers = now.timeIntervalSince(lastAnnounceTime) >= 30
 
-        let peersFound = await withTaskGroup(of: [PeerInfo].self) { group in
-            for trackerURL in trackers {
-                group.addTask { [self] in
-                    if trackerURL.hasPrefix("udp://") {
-                        guard let response = try? await udpTrackerClient.announce(
+        var peersFound: [PeerInfo] = []
+        if shouldAnnounceTrackers {
+            lastAnnounceTime = now
+            let trackers = selectedTrackersForAnnounce()
+            TorrentLog.info(
+                "[TorrentEngine] Announcing to \(trackers.count) trackers (of \(metadata.trackers.count), \(Int(Self.announceWallTimeoutSeconds))s cap)..."
+            )
+            let eventCode = event.rawValue
+            let deadline = Date().addingTimeInterval(Self.announceWallTimeoutSeconds)
+
+            peersFound = await withTaskGroup(of: [PeerInfo].self) { group in
+                for trackerURL in trackers {
+                    group.addTask { [self] in
+                        if trackerURL.hasPrefix("udp://") {
+                            guard let response = try? await udpTrackerClient.announce(
+                                trackerURL: trackerURL,
+                                infoHash: metadata.infoHash,
+                                peerId: peerId,
+                                port: 6881,
+                                downloaded: bytesDownloaded,
+                                left: metadata.totalSize - bytesDownloaded,
+                                event: TrackerEvent(rawValue: eventCode) ?? .empty
+                            ) else { return [] }
+                            return response.peers
+                        }
+                        guard let response = try? await trackerClient.announce(
                             trackerURL: trackerURL,
                             infoHash: metadata.infoHash,
                             peerId: peerId,
@@ -672,34 +645,26 @@ public final class TorrentEngine {
                         ) else { return [] }
                         return response.peers
                     }
-                    guard let response = try? await trackerClient.announce(
-                        trackerURL: trackerURL,
-                        infoHash: metadata.infoHash,
-                        peerId: peerId,
-                        port: 6881,
-                        downloaded: bytesDownloaded,
-                        left: metadata.totalSize - bytesDownloaded,
-                        event: TrackerEvent(rawValue: eventCode) ?? .empty
-                    ) else { return [] }
-                    return response.peers
                 }
-            }
 
-            var merged: [PeerInfo] = []
-            var seen = Set<String>()
-            while let peers = await group.next() {
-                for peer in peers {
-                    let key = peerKey(peer)
-                    if seen.insert(key).inserted {
-                        merged.append(peer)
+                var merged: [PeerInfo] = []
+                var seen = Set<String>()
+                while let peers = await group.next() {
+                    for peer in peers {
+                        let key = peerKey(peer)
+                        if seen.insert(key).inserted {
+                            merged.append(peer)
+                        }
+                    }
+                    if Date() >= deadline || merged.count >= Self.minPeersBeforeEarlyAnnounceExit {
+                        group.cancelAll()
+                        break
                     }
                 }
-                if Date() >= deadline || merged.count >= Self.minPeersBeforeEarlyAnnounceExit {
-                    group.cancelAll()
-                    break
-                }
+                return merged
             }
-            return merged
+        } else {
+            TorrentLog.info("[TorrentEngine] Throttling tracker announce. Relying on DHT discovery.")
         }
 
         var finalPeers = peersFound
@@ -748,6 +713,11 @@ public final class TorrentEngine {
                 guard isRunning else { return }
                 pruneDeadPeers()
                 await expireStalledRequests()
+
+                if livePeerCount() < 8 {
+                    let peers = await fetchPeersFromTrackers(event: .empty)
+                    await connectToPeers(peers)
+                }
             }
         }
     }
@@ -773,6 +743,9 @@ public final class TorrentEngine {
                     pieceManager: pieceManager,
                     onPieceReceived: { [weak self] pieceIndex, offset, block in
                         await self?.handlePieceReceived(pieceIndex: pieceIndex, offset: offset, block: block)
+                    },
+                    onPeersDiscovered: { [weak self] discovered in
+                        await self?.handleDiscoveredPeers(discovered)
                     }
                 )
             }
@@ -784,8 +757,14 @@ public final class TorrentEngine {
         await updateStats()
     }
 
+    private func handleDiscoveredPeers(_ peers: [PeerInfo]) async {
+        guard isRunning else { return }
+        await connectToPeers(peers)
+    }
+
     private func pruneDeadPeers() {
         let before = peerConnections.count
+        let currentCount = before
         peerConnections.removeAll { peer in
             switch peer.state {
             case .disconnected, .error:
@@ -799,7 +778,7 @@ public final class TorrentEngine {
                 }
                 return false
             case .connected, .choked:
-                if peer.handshakeAge > 45, peer.piecesReceived == 0 {
+                if currentCount >= maxPeerConnections - 8, peer.handshakeAge > 60, peer.piecesReceived == 0 {
                     connectedPeerKeys.remove(peerKey(peer.peerInfo))
                     peer.disconnect()
                     return true

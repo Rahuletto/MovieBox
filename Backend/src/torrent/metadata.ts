@@ -29,20 +29,31 @@ export async function fetchTorrentFileBytes(infoHash: string): Promise<Uint8Arra
   const hash = normalizeHash(infoHash)
   if (!hash) return null
 
-  for (const url of torrentFileURLs(hash)) {
+  const urls = torrentFileURLs(hash)
+  const fetchTasks = urls.map(async (url) => {
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 6000)
     try {
       const res = await fetch(url, {
         headers: { 'User-Agent': USER_AGENT, Accept: 'application/x-bittorrent,*/*' },
         redirect: 'follow',
         cf: { cacheTtl: 3600 },
+        signal: controller.signal,
       })
-      if (!res.ok) continue
+      if (!res.ok) throw new Error('Not ok')
       const buf = new Uint8Array(await res.arrayBuffer())
-      if (!isTorrentFileBytes(buf)) continue
+      if (!isTorrentFileBytes(buf)) throw new Error('Invalid torrent file')
       return buf
-    } catch {
-      continue
+    } catch (e) {
+      throw e
+    } finally {
+      clearTimeout(timeoutId)
     }
+  })
+
+  try {
+    return await Promise.any(fetchTasks)
+  } catch {
+    return null
   }
-  return null
 }

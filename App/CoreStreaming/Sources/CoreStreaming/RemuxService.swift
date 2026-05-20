@@ -1,9 +1,15 @@
 import Foundation
 
 public actor RemuxService {
-    private static let ffmpegPath = Bundle.main.path(forResource: "ffmpeg", ofType: nil)
-        ?? "/opt/homebrew/bin/ffmpeg"
-        ?? "/usr/local/bin/ffmpeg"
+    private static let ffmpegPath: String = {
+        if let bundlePath = Bundle.main.path(forResource: "ffmpeg", ofType: nil) {
+            return bundlePath
+        }
+        if FileManager.default.fileExists(atPath: "/opt/homebrew/bin/ffmpeg") {
+            return "/opt/homebrew/bin/ffmpeg"
+        }
+        return "/usr/local/bin/ffmpeg"
+    }()
 
     public init() {}
 

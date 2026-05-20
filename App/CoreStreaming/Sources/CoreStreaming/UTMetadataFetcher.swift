@@ -14,8 +14,10 @@ public enum UTMetadataFetcher {
         trackers: [String],
         peerId: String
     ) async throws -> TorrentMetadata {
+        try Task.checkCancellation()
         let normalized = infoHash.lowercased()
         let peers = await discoverPeers(infoHash: normalized, trackers: trackers, peerId: peerId)
+        try Task.checkCancellation()
         guard !peers.isEmpty else {
             throw TorrentMetadataFetcher.FetchError.torrentFileUnavailable
         }
@@ -23,7 +25,8 @@ public enum UTMetadataFetcher {
         return try await withThrowingTaskGroup(of: TorrentMetadata.self) { group in
             for peer in peers.prefix(6) {
                 group.addTask {
-                    try await fetchFromPeer(
+                    try Task.checkCancellation()
+                    return try await fetchFromPeer(
                         peer: peer,
                         infoHash: normalized,
                         peerId: peerId,
@@ -69,6 +72,7 @@ public enum UTMetadataFetcher {
 
             for tracker in capped {
                 group.addTask {
+                    if Task.isCancelled { return [] }
                     if tracker.hasPrefix("udp://") {
                         do {
                             let response = try await udp.announce(
@@ -270,6 +274,7 @@ private actor MetadataPeerSession {
     private func readUntilMetadataOffered() async throws -> Int? {
         let deadline = Date().addingTimeInterval(12)
         while Date() < deadline {
+            try Task.checkCancellation()
             if let packet = try await readNextPacket() {
                 if packet.id == extendedMessageID,
                    packet.extendedID == extendedHandshakeID,
@@ -291,6 +296,7 @@ private actor MetadataPeerSession {
     private func readMetadataPiece(expectedPiece: Int) async throws -> Data {
         let deadline = Date().addingTimeInterval(12)
         while Date() < deadline {
+            try Task.checkCancellation()
             if let packet = try await readNextPacket() {
                 guard packet.id == extendedMessageID,
                       packet.extendedID == utMetadataExtensionID else { continue }
@@ -442,6 +448,7 @@ private actor MetadataPeerSession {
     private func readExact(_ count: Int) async throws -> Data {
         let deadline = Date().addingTimeInterval(10)
         while buffer.count < count {
+            try Task.checkCancellation()
             if Date() > deadline { throw TorrentMetadataFetcher.FetchError.torrentFileUnavailable }
             try await appendReceive()
         }

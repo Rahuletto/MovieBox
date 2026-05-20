@@ -227,28 +227,29 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
             return
         }
 
-        let hasVerifiedHead = bufferedPieces >= 1
         let verifiedHeadBytes = await orchestrator.contiguousBytesFromStreamStart()
-        let hasEnoughVerifiedHead = verifiedHeadBytes >= StreamPlaybackThreshold.minimumHeadBytes
+        let unverifiedHeadBytes = await orchestrator.streamHeadContiguousBytes()
+        let headBytes = max(verifiedHeadBytes, unverifiedHeadBytes)
+        let hasEnoughHead = headBytes >= StreamPlaybackThreshold.minimumHeadBytes
         let needsTail = await orchestrator.streamTargetNeedsTailProbe()
         let hasTail = needsTail ? await orchestrator.isStreamTailPieceReady() : true
 
-        if hasVerifiedHead, hasEnoughVerifiedHead, hasTail {
+        if hasEnoughHead, hasTail {
             if case .ready = state {} else {
                 let (tailVerified, tailTotal) = await tailBufferProgress()
                 TorrentLog.info(
-                    "[StreamSession] buffer ready — \(verifiedHeadBytes / 1024) KB verified head (need \(StreamPlaybackThreshold.minimumHeadBytes / 1024) KB), tail=\(tailVerified)/\(tailTotal) pieces, \(bufferedPieces) contiguous head piece(s), \(peerCount) live peers (\(transferringPeerCount) transferring)"
+                    "[StreamSession] buffer ready — \(headBytes / 1024) KB head (need \(StreamPlaybackThreshold.minimumHeadBytes / 1024) KB), tail=\(tailVerified)/\(tailTotal) pieces, \(bufferedPieces) contiguous head piece(s), \(peerCount) live peers (\(transferringPeerCount) transferring)"
                 )
                 state = .ready(streamURL: url)
             }
         } else {
-            let headProgress = min(1, Double(verifiedHeadBytes) / Double(StreamPlaybackThreshold.minimumHeadBytes))
-            let (tailVerified, tailTotal) = await tailBufferProgress()
-            let tailProgress = needsTail ? min(1, Double(tailVerified) / Double(tailTotal)) : 1
-            let hint = max(progress, headProgress * 0.45 + tailProgress * 0.45, 0.02)
+            // Drive progress from head accumulation (0→90%). Tail is no longer a hard gate —
+            // AVPlayer fetches moov/index tail via range requests once pieces are downloaded.
+            let headProgress = min(1, Double(headBytes) / Double(StreamPlaybackThreshold.minimumHeadBytes))
+            let hint = max(progress, headProgress * 0.90, 0.02)
             if case .preparing = state {
                 TorrentLog.info(
-                    "[StreamSession] buffering — \(verifiedHeadBytes / 1024)/\(StreamPlaybackThreshold.minimumHeadBytes / 1024) KB verified head, \(peerCount) live peers (\(transferringPeerCount) transferring, indexer: \(swarmSeeders) seeders), \(Int(downloadSpeed / 1024)) KB/s"
+                    "[StreamSession] buffering — \(headBytes / 1024)/\(StreamPlaybackThreshold.minimumHeadBytes / 1024) KB head, \(peerCount) live peers (\(transferringPeerCount) transferring, indexer: \(swarmSeeders) seeders), \(Int(downloadSpeed / 1024)) KB/s"
                 )
             }
             state = .buffering(progress: hint)

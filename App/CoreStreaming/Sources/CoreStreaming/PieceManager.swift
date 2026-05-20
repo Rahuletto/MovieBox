@@ -185,19 +185,16 @@ public actor PieceManager {
     /// Until head + tail index pieces are verified, never fall back to middle-of-file pieces
     /// (peers without end-of-file in bitfield would otherwise pull piece 1, 2, … forever).
     private func earliestIncompletePiece(peerBitfield: Data) -> UInt32? {
+        // If the peer has not sent any bitfield or have messages, do not request anything from them.
+        guard !peerBitfield.isEmpty else { return nil }
+
         let bootstrap = buildBootstrapPriorityOrder()
         if needsIndexBootstrap() {
-            if let index = firstIncompletePiece(in: bootstrap, peerBitfield: peerBitfield) {
-                return index
-            }
-            return firstIncompletePiece(in: bootstrap, peerBitfield: Data())
+            return firstIncompletePiece(in: bootstrap, peerBitfield: peerBitfield)
         }
 
         let priority = buildFullPriorityOrder()
-        if let index = firstIncompletePiece(in: priority, peerBitfield: peerBitfield) {
-            return index
-        }
-        return firstIncompletePiece(in: priority, peerBitfield: Data())
+        return firstIncompletePiece(in: priority, peerBitfield: peerBitfield)
     }
 
     private func needsIndexBootstrap() -> Bool {
@@ -227,7 +224,7 @@ public actor PieceManager {
             append(index)
         }
         append(UInt32(streamFirstPiece))
-        for piece in streamTailPieces {
+        for piece in streamTailPieces.reversed() {
             append(UInt32(piece))
         }
         return priority
@@ -310,10 +307,18 @@ public actor PieceManager {
     }
 
     private func trimPieceBuffers(keeping current: UInt32) {
-        let maxBuffers = 2
+        let maxBuffers = 64
         guard pieceBuffers.count > maxBuffers else { return }
-        for key in pieceBuffers.keys where key != current {
-            pieceBuffers.removeValue(forKey: key)
+
+        let tailSet = Set(streamTailPieces.map { UInt32($0) })
+        let hotSet = Set(playerHotPieces)
+
+        let candidates = pieceBuffers.keys.filter { key in
+            key != current && !tailSet.contains(key) && !hotSet.contains(key)
+        }
+
+        for key in candidates {
+            resetPiece(key)
             if pieceBuffers.count <= maxBuffers { break }
         }
     }

@@ -3,13 +3,17 @@ import CoreStreaming
 import Foundation
 
 public extension TorrentStreamSession {
+    /// Waits until the stream reaches a terminal state (.ready, .failed, or .cancelled).
+    /// The `timeout` parameter is ignored — the session's internal bufferingWatchdog
+    /// already calculates the correct deadline (90s + 18s per tail piece for MP4s) and
+    /// calls failWithTimeout() when needed. Relying on a fixed 180s deadline here was
+    /// causing the session to be killed seconds before the tail pieces arrived.
     @MainActor
     func waitForPlayback(timeout: TimeInterval = 180) async {
         PlaybackLog.log("Waiting for torrent buffer…")
-        let deadline = Date().addingTimeInterval(timeout)
         var lastHeartbeat = Date.distantPast
 
-        while !Task.isCancelled, Date() < deadline {
+        while !Task.isCancelled {
             switch state {
             case .ready, .failed, .cancelled:
                 PlaybackLog.log("Stream settled — \(stateLabel)")
@@ -29,20 +33,6 @@ public extension TorrentStreamSession {
             try? await Task.sleep(for: .milliseconds(250))
         }
 
-        if case .ready = state {
-            PlaybackLog.log("Stream settled — \(stateLabel)")
-            return
-        }
-        if case .failed = state {
-            PlaybackLog.log("Stream settled — \(stateLabel)")
-            return
-        }
-        if case .cancelled = state {
-            PlaybackLog.log("Stream settled — cancelled")
-            return
-        }
-
-        await failWithTimeout()
         PlaybackLog.log("Stream settled — \(stateLabel)")
     }
 }

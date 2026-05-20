@@ -313,7 +313,7 @@ public final class DownloadManager: ObservableObject {
             tasks[index].state = .completed
             if let store = pieceStores[taskId] {
                 do {
-                    let storePath = await store.storageURL
+                    let storePath = store.storageURL
                     let fileURL = try TorrentFileAssembler.exportPrimaryFile(
                         metadata: metadata,
                         pieceStorePath: storePath,

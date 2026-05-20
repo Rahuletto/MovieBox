@@ -15,6 +15,8 @@ public enum WireMessage: Equatable, Sendable {
     case piece(pieceIndex: UInt32, offset: UInt32, block: Data)
     case cancel(pieceIndex: UInt32, offset: UInt32, length: UInt32)
     case port(port: UInt16)
+    case extended(extendedID: UInt8, payload: Data)
+    case ignored(messageId: UInt8)
 
     public func encode() -> Data {
         var data = Data()
@@ -58,6 +60,14 @@ public enum WireMessage: Equatable, Sendable {
         case .port(let port):
             data.append(contentsOf: [0, 0, 0, 3, 9])
             data.append(contentsOf: port.bigEndianBytes)
+        case .extended(let extID, let payload):
+            let length = UInt32(1 + 1 + payload.count)
+            data.append(contentsOf: length.bigEndianBytes)
+            data.append(20)
+            data.append(extID)
+            data.append(payload)
+        case .ignored:
+            break
         }
 
         return data
@@ -108,8 +118,12 @@ public enum WireMessage: Equatable, Sendable {
             guard cleanData.count >= 7 else { return nil }
             let port = UInt16(cleanData[5]) << 8 | UInt16(cleanData[6])
             return .port(port: port)
+        case 20:
+            guard cleanData.count >= 6 else { return nil }
+            let extID = cleanData[5]
+            return .extended(extendedID: extID, payload: Data(cleanData[6...]))
         default:
-            return nil
+            return .ignored(messageId: messageId)
         }
     }
 }
@@ -165,13 +179,17 @@ public final class PeerConnection: ObservableObject {
     private var peerBitfield: Data = Data()
     private var pieceManager: PieceManager?
     private var onPieceReceived: ((UInt32, UInt32, Data) async -> Void)?
+    private var onPeersDiscovered: (@Sendable ([PeerInfo]) async -> Void)?
+    private var peerSupportsExtensions = false
+    private var peerSupportsPex = false
+    private var peerPexID: UInt8?
     private var outstandingRequests: Set<BlockRequest> = []
     private var requestSentAt: [BlockRequest: Date] = [:]
     private var keepaliveTask: Task<Void, Never>?
     private var connectionStarted = Date.now
 
-    private let maxOutstanding = 12
-    private let requestTimeout: TimeInterval = 20
+    private var maxOutstanding = 12
+    private let requestTimeout: TimeInterval = 3.5
     private let peerQueue = DispatchQueue(label: "com.moviebox.peer-connection", qos: .userInitiated)
 
     public init(peerInfo: PeerInfo, connectionPeerId: String) {
@@ -182,10 +200,12 @@ public final class PeerConnection: ObservableObject {
     public func connect(
         infoHash: String,
         pieceManager: PieceManager,
-        onPieceReceived: @escaping (UInt32, UInt32, Data) async -> Void
+        onPieceReceived: @escaping (UInt32, UInt32, Data) async -> Void,
+        onPeersDiscovered: (@Sendable ([PeerInfo]) async -> Void)? = nil
     ) async {
         self.pieceManager = pieceManager
         self.onPieceReceived = onPieceReceived
+        self.onPeersDiscovered = onPeersDiscovered
         state = .connecting
         connectionStarted = Date.now
 
@@ -215,7 +235,17 @@ public final class PeerConnection: ObservableObject {
 
         guard case .connected = state else { return }
 
-        let pieceCount = await pieceManager.pieceCount
+        if peerSupportsExtensions {
+            let handshakeDict: BencodeValue = .dictionary([
+                "m": .dictionary([
+                    "ut_pex": .integer(1)
+                ])
+            ])
+            let handshakePayload = BencodeParser.encode(handshakeDict)
+            await sendExtendedMessage(extendedID: 0, payload: handshakePayload)
+        }
+
+        let pieceCount = pieceManager.pieceCount
         sendLeecherBitfield(pieceCount: pieceCount)
         await sendInterested()
 
@@ -329,7 +359,9 @@ public final class PeerConnection: ObservableObject {
         var handshake = Data()
         handshake.append(19)
         handshake.append(contentsOf: "BitTorrent protocol".utf8)
-        handshake.append(contentsOf: [UInt8](repeating: 0, count: 8))
+        var reserved = [UInt8](repeating: 0, count: 8)
+        reserved[5] |= 0x10 // Enable extension protocol support (BEP 10)
+        handshake.append(contentsOf: reserved)
         handshake.append(contentsOf: HexEncoding.data(fromHex: infoHash))
         handshake.append(BitTorrentPeerID.data(for: peerId))
         connection?.send(content: handshake, completion: .contentProcessed { _ in })
@@ -379,6 +411,10 @@ public final class PeerConnection: ObservableObject {
             state = .error("Info hash mismatch")
             return
         }
+
+        let reservedStart = 1 + pstrLength
+        let handshakeData = Data(handshake)
+        peerSupportsExtensions = (handshakeData[reservedStart + 5] & 0x10) != 0
 
         state = .connected
     }
@@ -542,8 +578,38 @@ public final class PeerConnection: ObservableObject {
             }
         case .piece(let pieceIndex, let offset, let block):
             await handlePiece(pieceIndex: pieceIndex, offset: offset, block: block)
-        case .request, .cancel, .port, .keepAlive:
+        case .extended(let extID, let payload):
+            await handleExtendedMessage(extID: extID, payload: payload)
+        case .request, .cancel, .port, .keepAlive, .ignored:
             break
+        }
+    }
+
+    private func sendExtendedMessage(extendedID: UInt8, payload: Data) async {
+        let msg = WireMessage.extended(extendedID: extendedID, payload: payload)
+        connection?.send(content: msg.encode(), completion: .contentProcessed { _ in })
+    }
+
+    private func handleExtendedMessage(extID: UInt8, payload: Data) async {
+        if extID == 0 { // Extension handshake
+            guard let dict = try? BencodeParser.parse(payload).dictionary else { return }
+            if let extensions = dict["m"]?.dictionary,
+               let pexID = extensions["ut_pex"]?.integer {
+                peerSupportsPex = true
+                peerPexID = UInt8(clamping: pexID)
+                TorrentLog.info("[PeerConnection] Peer \(peerInfo.ip):\(peerInfo.port) supports PEX (remote message ID = \(peerPexID!))")
+            }
+        } else if peerSupportsPex, extID == 1 { // Incoming PEX message
+            guard let dict = try? BencodeParser.parse(payload).dictionary else { return }
+            if case .string(let addedData) = dict["added"] {
+                let discovered = DHTCodec.decodeCompactPeers(addedData)
+                if !discovered.isEmpty {
+                    TorrentLog.info("[PeerConnection] Received PEX update from \(peerInfo.ip):\(peerInfo.port) containing \(discovered.count) peers")
+                    if let callback = onPeersDiscovered {
+                        await callback(discovered)
+                    }
+                }
+            }
         }
     }
 
@@ -587,9 +653,19 @@ public final class PeerConnection: ObservableObject {
 
     private func handlePiece(pieceIndex: UInt32, offset: UInt32, block: Data) async {
         let completed = BlockRequest(pieceIndex: pieceIndex, offset: offset, length: 0)
+        let sentAt = requestSentAt[completed]
         outstandingRequests.remove(completed)
         requestSentAt.removeValue(forKey: completed)
         piecesReceived += 1
+
+        if let sentAt {
+            let rtt = Date.now.timeIntervalSince(sentAt)
+            if rtt < 0.35 {
+                maxOutstanding = min(28, maxOutstanding + 1)
+            } else if rtt > 1.2 {
+                maxOutstanding = max(4, maxOutstanding - 1)
+            }
+        }
 
         if let callback = onPieceReceived {
             await callback(pieceIndex, offset, block)

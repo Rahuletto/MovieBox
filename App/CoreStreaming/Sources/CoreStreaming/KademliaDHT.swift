@@ -80,10 +80,12 @@ public final class KademliaDHT {
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             networkQueue.asyncAfter(deadline: .now() + 1) { [weak self] in
-                if self?.listener != nil {
-                    continuation.resume()
-                } else {
-                    continuation.resume(throwing: DHTError.failedToStart)
+                Task { @MainActor in
+                    if self?.listener != nil {
+                        continuation.resume()
+                    } else {
+                        continuation.resume(throwing: DHTError.failedToStart)
+                    }
                 }
             }
         }
@@ -210,7 +212,7 @@ public final class KademliaDHT {
                 Task { @MainActor in
                     guard let responseData,
                           let bencode = try? BencodeParser.parse(responseData),
-                          var response = DHTResponse(from: bencode) else {
+                          let response = DHTResponse(from: bencode) else {
                         continuation.resume(returning: nil)
                         return
                     }

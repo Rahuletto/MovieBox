@@ -686,6 +686,18 @@ app.get('/api/torrent/metadata', async (c) => {
   const meta = parseQuery(c, TorrentMetadataQuerySchema, c.req.query())
   if (meta instanceof Response) return meta
 
+  const cacheKey = `torrent:meta:${meta.hash.toLowerCase()}`
+  const cached = await kvGetBuffer(c.env.MOVIEBOX_CACHE, cacheKey)
+  if (cached) {
+    return new Response(cached, {
+      headers: {
+        'Content-Type': 'application/x-bittorrent',
+        'Cache-Control': 'public, max-age=604800',
+        'X-Cache': 'HIT',
+      },
+    })
+  }
+
   const data = await fetchTorrentFileBytes(meta.hash)
   if (!data) {
     return c.json(
@@ -694,10 +706,15 @@ app.get('/api/torrent/metadata', async (c) => {
     )
   }
 
+  await kvPut(c.env.MOVIEBOX_CACHE, cacheKey, data.buffer, {
+    expirationTtl: 60 * 60 * 24 * 7, // 7 days cache
+  })
+
   return new Response(data, {
     headers: {
       'Content-Type': 'application/x-bittorrent',
-      'Cache-Control': 'private, max-age=3600',
+      'Cache-Control': 'public, max-age=604800',
+      'X-Cache': 'MISS',
     },
   })
 })

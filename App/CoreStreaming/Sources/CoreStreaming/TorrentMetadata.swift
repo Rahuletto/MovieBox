@@ -291,7 +291,6 @@ public enum TorrentFileParser {
             }
             index += 1
         case UInt8(ascii: "l"), UInt8(ascii: "d"):
-            let marker = data[index]
             index += 1
             while index < data.endIndex, data[index] != UInt8(ascii: "e") {
                 _ = try skipBencodeValue(data, at: &index)

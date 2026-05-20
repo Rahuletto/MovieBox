@@ -110,8 +110,10 @@ public enum TorrentMetadataFetcher {
         return try await withThrowingTaskGroup(of: TorrentMetadata.self) { group in
             if let backend {
                 group.addTask {
-                    let data = try await fetchTorrentBytesFromBackend(hash: normalized, config: backend)
-                    return try parseTorrentData(data, expectedHash: normalized, trackers: trackerList)
+                    try await TaskTimeout.withTimeout(seconds: 12) {
+                        let data = try await fetchTorrentBytesFromBackend(hash: normalized, config: backend)
+                        return try parseTorrentData(data, expectedHash: normalized, trackers: trackerList)
+                    }
                 }
             }
 
@@ -126,7 +128,9 @@ public enum TorrentMetadataFetcher {
             }
 
             group.addTask {
-                try await fetchFirstMirror(hash: normalized, trackers: trackerList)
+                try await TaskTimeout.withTimeout(seconds: 15) {
+                    try await fetchFirstMirror(hash: normalized, trackers: trackerList)
+                }
             }
 
             var lastError: Error = FetchError.torrentFileUnavailable
@@ -256,7 +260,7 @@ public enum TorrentMetadataFetcher {
         expectedHash: String,
         trackers: [String]
     ) throws -> TorrentMetadata {
-        var metadata = try TorrentFileParser.parse(data: data)
+        let metadata = try TorrentFileParser.parse(data: data)
         guard metadata.infoHash.lowercased() == expectedHash else {
             throw FetchError.infoHashMismatch
         }
