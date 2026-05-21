@@ -483,7 +483,14 @@ public final class HTTPRangeServer {
                 length: length,
                 preferSuffix: false
             ) else {
-                return HTTPResponse(status: 503, body: "Buffering", retryAfterSeconds: 1)
+                return logRangeServerAndReturn(
+                    id: rangeReqID,
+                    response: HTTPResponse(status: 503, body: "Buffering", retryAfterSeconds: 1),
+                    statusCode: 503,
+                    servedBytes: 0,
+                    torrentOffset: streamByteOffset,
+                    wasReadable: false
+                )
             }
             do {
                 bodyData = try await readBytes(
@@ -591,6 +598,49 @@ public final class HTTPRangeServer {
         }
 
         return HTTPResponse(status: statusCode, data: response, retryAfterSeconds: nil)
+    }
+
+    private func logRangeServerRequest(
+        id: Int,
+        method: String,
+        rangeHeader: String?,
+        mediaStart: Int64,
+        mediaEnd: Int64,
+        length: Int
+    ) {
+        TorrentLog.info(
+            "[RangeServer] ← REQUEST #\(id) method=\(method) range=\(rangeHeader ?? "none") mediaStart=\(mediaStart) mediaEnd=\(mediaEnd) length=\(length)"
+        )
+    }
+
+    private func logRangeServerResponse(
+        id: Int,
+        statusCode: Int,
+        servedBytes: Int,
+        torrentOffset: Int64,
+        wasReadable: Bool
+    ) {
+        TorrentLog.info(
+            "[RangeServer] → RESPONSE #\(id) status=\(statusCode) servedBytes=\(servedBytes) torrentOffset=\(torrentOffset) readable=\(wasReadable)"
+        )
+    }
+
+    private func logRangeServerAndReturn(
+        id: Int,
+        response: HTTPResponse,
+        statusCode: Int,
+        servedBytes: Int,
+        torrentOffset: Int64,
+        wasReadable: Bool
+    ) -> HTTPResponse {
+        logRangeServerResponse(
+            id: id,
+            statusCode: statusCode,
+            servedBytes: servedBytes,
+            torrentOffset: torrentOffset,
+            wasReadable: wasReadable
+        )
+        return response
     }
 
     private func notifyPlayerRead(mediaOffset: Int64, length: Int) async {

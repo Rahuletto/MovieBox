@@ -65,6 +65,10 @@ public final class StreamingOrchestrator: @unchecked Sendable {
             throw StreamingOrchestratorError.failedToInitialize
         }
 
+        TorrentLog.info(
+            "[Streaming] metadata resolved — pieceLength=\(metadata.pieceLength) pieceCount=\(metadata.pieceCount) totalSize=\(metadata.totalSize) infoHash=\(metadata.infoHash.prefix(8))…"
+        )
+
         try TorrentLimits.validateTotalSize(metadata.totalSize)
 
         let target = TorrentStreamTarget.selectPrimary(from: metadata)
@@ -298,7 +302,9 @@ public final class StreamingOrchestrator: @unchecked Sendable {
                 TorrentLog.debug("[Streaming] MKV Cues not complete in tail window (\(tailData.count) bytes)")
                 return false
             case .complete:
-                break
+                TorrentLog.info(
+                    "[Streaming] MKV mkvSeekTableProbe=.complete tailData.count=\(tailData.count) segmentBodyOffset=\(segmentBodyOffset)"
+                )
             }
 
             guard let analysis = StreamTailPlanner.analyzeMKVCues(
@@ -308,6 +314,10 @@ public final class StreamingOrchestrator: @unchecked Sendable {
                 TorrentLog.debug("[Streaming] MKV Cues present but cluster entries not parseable yet")
                 return false
             }
+
+            TorrentLog.info(
+                "[Streaming] MKV analyzeMKVCues firstClusterOffsets=\(analysis.firstClusterOffsets) segmentBodyOffset=\(analysis.segmentBodyOffset)"
+            )
 
             if let firstClusterRel = analysis.firstClusterOffsets.first {
                 let firstClusterAbs = analysis.segmentBodyOffset + firstClusterRel
