@@ -9,6 +9,7 @@ public final class AppServices {
     public let downloadManager: DownloadManager
     public private(set) var playbackCoordinator: TorrentPlaybackCoordinator
     public private(set) var activeSession: TorrentStreamSession?
+    public let persistentPlayback = PersistentPlaybackController()
 
     public let streamingOrchestrator: StreamingOrchestrator
 
@@ -19,6 +20,11 @@ public final class AppServices {
     }
 
     public func cancelActiveStream() async {
+        await persistentPlayback.cancel(appServices: self)
+    }
+
+    /// Stops torrent engine/session without clearing persistent pill state (used internally during replace).
+    func cancelActiveStreamWithoutPersistentReset() async {
         await activeSession?.cancel()
         activeSession = nil
         await playbackCoordinator.cancel()

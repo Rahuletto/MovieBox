@@ -175,6 +175,10 @@ public final class KademliaDHT {
                 routingTable.append(newNode)
             }
         }
+        // Cap routing table to prevent unbounded growth during peer discovery.
+        if routingTable.count > 200 {
+            routingTable = Array(routingTable.prefix(200))
+        }
     }
 
     private func sendFindNode(to node: DHTNode, target: Data) async -> DHTResponse? {
@@ -206,23 +210,48 @@ public final class KademliaDHT {
         let message = makeMessage(transactionId: transactionId, method: method, args: args)
         let data = BencodeParser.encode(message)
 
-        return await withCheckedContinuation { continuation in
+        // Use a class-based gate so the continuation is resumed exactly once
+        // even if both the receive callback and the timeout fire concurrently.
+        final class Gate: @unchecked Sendable {
+            private let lock = NSLock()
+            private var done = false
+            private var cont: CheckedContinuation<DHTResponse?, Never>?
+            init(_ c: CheckedContinuation<DHTResponse?, Never>) { cont = c }
+            func finish(_ value: DHTResponse?) {
+                lock.lock(); defer { lock.unlock() }
+                guard !done else { return }
+                done = true
+                cont?.resume(returning: value)
+                cont = nil
+            }
+        }
+
+        let result: DHTResponse? = await withCheckedContinuation { continuation in
+            let gate = Gate(continuation)
             connection.send(content: data, completion: .contentProcessed { _ in })
             connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { responseData, _, _, _ in
-                Task { @MainActor in
+                Task { @MainActor [weak self] in
+                    defer { connection.cancel() }
                     guard let responseData,
                           let bencode = try? BencodeParser.parse(responseData),
                           let response = DHTResponse(from: bencode) else {
-                        continuation.resume(returning: nil)
+                        gate.finish(nil)
                         return
                     }
                     if let token = response.token {
-                        self.peerTokens[node.cacheKey] = token
+                        self?.peerTokens[node.cacheKey] = token
                     }
-                    continuation.resume(returning: response)
+                    gate.finish(response)
                 }
             }
+            // Timeout: cancel the connection and resume after 3 seconds.
+            Task {
+                try? await Task.sleep(for: .seconds(3))
+                connection.cancel()
+                gate.finish(nil)
+            }
         }
+        return result
     }
 
     private func createConnection(to node: DHTNode) throws -> NWConnection {

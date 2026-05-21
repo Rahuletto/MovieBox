@@ -28,10 +28,7 @@ struct MovieDetailView: View {
     @State private var isLoadingSubtitles = false
     @State private var subtitleFileURL: URL?
     @State private var preparingVideoURL: URL?
-    @State private var activeStreamSession: TorrentStreamSession?
     @State private var isPreparingStream = false
-    /// Cancels an in-flight `playBestTorrent` attempt when the user starts another play.
-    @State private var prepareStreamTask: Task<Void, Never>?
     @State private var tvSeasons: [TVSeasonSummary] = []
     @State private var tvEpisodes: [TVEpisode] = []
     @State private var selectedTVSeason = 1
@@ -83,6 +80,7 @@ struct MovieDetailView: View {
                     isPreparingStream: isPreparingStream,
                     preparingVideoURL: preparingVideoURL,
                     playButtonTitle: heroPlayButtonTitle,
+                    playButtonDisabled: heroPlayButtonDisabled,
                     onTVSeasonChange: { season in
                         selectedTVSeason = season
                         selectedTVEpisode = nil
@@ -286,6 +284,17 @@ struct MovieDetailView: View {
             return "Continue Watching"
         }
         return "Play Now"
+    }
+
+    private var heroPlayButtonDisabled: Bool {
+        if appServices.persistentPlayback.isBuffering(movieId: movieId) {
+            return false
+        }
+        if kind == .tv {
+            guard let episode = selectedTVEpisode else { return true }
+            if isUpcomingEpisode(episode) { return true }
+        }
+        return torrents.isEmpty
     }
 
     private func selectEpisode(_ episode: TVEpisode) async {
@@ -564,13 +573,7 @@ struct MovieDetailView: View {
             "Play Now tapped — movieId=\(movieId) title=\"\(detail?.movie.title ?? "?")\" torrents=\(torrents.count) seeded=\(seeded) kind=\(kind.rawValue)"
         )
 
-        prepareStreamTask?.cancel()
-
-        prepareStreamTask = Task {
-            if Task.isCancelled {
-                LogStore.shared.log(.info, category: "playback", "Play Now cancelled before start")
-                return
-            }
+        Task {
             if subtitleFileURL == nil, let preferred = subtitles.first {
                 await downloadSubtitleAsync(preferred)
             }
@@ -580,48 +583,49 @@ struct MovieDetailView: View {
                 "S\($0.seasonNumber)E\($0.episodeNumber) · \($0.name)"
             }
 
-            do {
-                if let movie = detail?.movie {
-                    WatchProgressStore.ensureRecord(
-                        movie: movie,
-                        kind: kind,
-                        genres: movie.genreIds,
-                        in: modelContext,
-                        existing: storedMovies
-                    )
-                }
-
-                try await TorrentPlaybackService.playBestAvailable(
-                    torrents: torrents,
-                    movieId: movieId,
-                    subtitleURL: subtitleFileURL,
-                    playback: playback,
-                    episodeTitle: episodeTitle,
-                    displayTitle: detail?.movie.title,
-                    resumePosition: WatchProgressStore.resumePosition(for: movieId, in: storedMovies),
-                    appServices: appServices,
-                    playerState: playerState,
-                    onSessionStarted: { session in
-                        activeStreamSession = session
-                    },
-                    maxAttempts: 5,
-                    waitTimeout: 90
+            if let movie = detail?.movie {
+                WatchProgressStore.ensureRecord(
+                    movie: movie,
+                    kind: kind,
+                    genres: movie.genreIds,
+                    in: modelContext,
+                    existing: storedMovies
                 )
-                LogStore.shared.log(.info, category: "playback", "Play Now finished — player should be visible")
-            } catch {
-                if Task.isCancelled {
-                    LogStore.shared.log(.info, category: "playback", "Play Now task cancelled")
-                    playerState.dismiss()
-                } else {
-                    LogStore.shared.log(.error, category: "playback", "Play Now failed — \(error.localizedDescription)")
-                    if playerState.isPresented {
-                        playerState.errorMessage = error.localizedDescription
-                        playerState.isBuffering = false
-                        playerState.bufferingDetail = nil
-                    } else {
-                        errorMessage = error.localizedDescription
-                    }
-                }
+            }
+
+            let posterURL = detail.map {
+                MetadataClient().posterDisplayURL(
+                    posterPath: $0.movie.posterPath,
+                    backdropPath: $0.movie.backdropPath
+                )
+            } ?? nil
+
+            let request = PersistentPlaybackStartRequest(
+                mode: .bestAvailable(torrents: torrents, maxAttempts: 5),
+                movieId: movieId,
+                mediaKind: kind,
+                allTorrents: torrents,
+                posterURL: posterURL,
+                title: detail?.movie.title ?? "Playing",
+                episodeTitle: episodeTitle,
+                displayTitle: detail?.movie.title,
+                subtitleURL: subtitleFileURL,
+                playback: playback,
+                resumePosition: WatchProgressStore.resumePosition(for: movieId, in: storedMovies),
+                knownDurationSeconds: detail?.movie.runtime.map { Double($0) * 60 },
+                waitTimeout: 90
+            )
+
+            let result = appServices.persistentPlayback.start(
+                request: request,
+                appServices: appServices,
+                playerState: playerState
+            )
+
+            if result == .needsConfirmation {
+                LogStore.shared.log(.info, category: "playback", "Play Now waiting for replace confirmation")
+            } else {
+                LogStore.shared.log(.info, category: "playback", "Play Now started — background buffering")
             }
         }
     }

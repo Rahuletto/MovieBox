@@ -26,39 +26,80 @@ public enum MovieBoxTypography {
 }
 
 public enum GlassStrength {
-  case ultraThin
-  case regular
+    case ultraThin
+    case regular
+    /// Strongest fallback material; on macOS 26+ uses Liquid Glass `.regular` (no thicker Glass variant exists).
+    case thick
+}
+
+public enum AdaptiveGlassShape: Sendable {
+    case roundedRect(cornerRadius: CGFloat)
+    case capsule
 }
 
 public struct AdaptiveGlass: ViewModifier {
-    private let cornerRadius: CGFloat
+    private let shape: AdaptiveGlassShape
     private let strength: GlassStrength
 
     public init(cornerRadius: CGFloat = 18, strength: GlassStrength = .regular) {
-        self.cornerRadius = cornerRadius
+        self.shape = .roundedRect(cornerRadius: cornerRadius)
+        self.strength = strength
+    }
+
+    public init(shape: AdaptiveGlassShape, strength: GlassStrength = .regular) {
+        self.shape = shape
         self.strength = strength
     }
 
     public func body(content: Content) -> some View {
-        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-
-        switch strength {
-        case .ultraThin:
-            content
-                .background(.ultraThinMaterial, in: shape)
-                .overlay {
-                    shape.strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.6)
+        switch shape {
+        case .roundedRect(let cornerRadius):
+            let rect = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            switch strength {
+            case .ultraThin:
+                content
+                    .background(.ultraThinMaterial, in: rect)
+                    .overlay { rect.strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.6) }
+            case .regular:
+                if #available(macOS 26.0, *) {
+                    content.glassEffect(.regular.interactive(), in: rect)
+                } else {
+                    content
+                        .background(.ultraThinMaterial, in: rect)
+                        .overlay { rect.strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.6) }
                 }
-        case .regular:
-            if #available(macOS 26.0, *) {
+            case .thick:
+                if #available(macOS 26.0, *) {
+                    content.glassEffect(.regular.interactive(), in: rect)
+                } else {
+                    content
+                        .background(.thickMaterial, in: rect)
+                        .overlay { rect.strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.6) }
+                }
+            }
+        case .capsule:
+            let capsule = Capsule(style: .continuous)
+            switch strength {
+            case .ultraThin:
                 content
-                    .glassEffect(.regular.interactive(), in: shape)
-            } else {
-                content
-                    .background(.ultraThinMaterial, in: shape)
-                    .overlay {
-                        shape.strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.6)
-                    }
+                    .background(.ultraThinMaterial, in: capsule)
+                    .overlay { capsule.strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.6) }
+            case .regular:
+                if #available(macOS 26.0, *) {
+                    content.glassEffect(.regular.interactive(), in: capsule)
+                } else {
+                    content
+                        .background(.ultraThinMaterial, in: capsule)
+                        .overlay { capsule.strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.6) }
+                }
+            case .thick:
+                if #available(macOS 26.0, *) {
+                    content.glassEffect(.regular.interactive(), in: capsule)
+                } else {
+                    content
+                        .background(.thickMaterial, in: capsule)
+                        .overlay { capsule.strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.6) }
+                }
             }
         }
     }
@@ -67,6 +108,10 @@ public struct AdaptiveGlass: ViewModifier {
 public extension View {
     func adaptiveGlass(cornerRadius: CGFloat = 18, strength: GlassStrength = .regular) -> some View {
         modifier(AdaptiveGlass(cornerRadius: cornerRadius, strength: strength))
+    }
+
+    func adaptiveGlass(shape: AdaptiveGlassShape, strength: GlassStrength = .regular) -> some View {
+        modifier(AdaptiveGlass(shape: shape, strength: strength))
     }
 }
 

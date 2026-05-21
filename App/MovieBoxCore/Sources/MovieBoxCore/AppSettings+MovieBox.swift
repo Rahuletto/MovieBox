@@ -45,11 +45,7 @@ public extension AppSettings {
     }
 
     var enabledTorrentIndexerSet: Set<String> {
-        let parsed = TorrentIndexerPreferences.parseCSV(enabledTorrentIndexers)
-        if !enabledTorrentIndexers.isEmpty { return parsed }
-        var ids = parsed
-        if !enableYTS { ids.remove("yts") }
-        return ids
+        return TorrentIndexerPreferences.parseCSV(enabledTorrentIndexers)
     }
 
     var cacheKey: String {

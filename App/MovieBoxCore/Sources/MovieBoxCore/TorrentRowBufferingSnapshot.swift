@@ -7,6 +7,12 @@ public struct TorrentRowBufferingSnapshot: Equatable, Sendable {
     public var phase: String
     public var detail: String
 
+    /// Single-line status for torrent rows (avoids phase/detail wrapping to two lines).
+    public var statusLine: String {
+        if detail.isEmpty { return phase }
+        return "\(phase) · \(detail)"
+    }
+
     public init(progress: Double, phase: String, detail: String) {
         self.progress = progress
         self.phase = phase
@@ -18,18 +24,8 @@ public struct TorrentRowBufferingSnapshot: Equatable, Sendable {
         phase: "Starting…",
         detail: "Loading torrent metadata"
     )
-}
 
-public extension TorrentStreamSession {
-    @MainActor
-    func rowBufferingSnapshot() async -> TorrentRowBufferingSnapshot {
-        let metrics = await rowBufferingMetrics()
-        return TorrentRowBufferingSnapshot(metrics: metrics)
-    }
-}
-
-private extension TorrentRowBufferingSnapshot {
-    init(metrics: StreamRowBufferingMetrics) {
+    public init(metrics: StreamRowBufferingMetrics) {
         if let failedMessage = metrics.failedMessage {
             self.init(progress: 0, phase: "Failed", detail: failedMessage)
             return
@@ -90,5 +86,13 @@ private extension TorrentRowBufferingSnapshot {
             phase: phase,
             detail: detailParts.joined(separator: " · ")
         )
+    }
+}
+
+public extension TorrentStreamSession {
+    @MainActor
+    func rowBufferingSnapshot() async -> TorrentRowBufferingSnapshot {
+        let metrics = await rowBufferingMetrics()
+        return TorrentRowBufferingSnapshot(metrics: metrics)
     }
 }

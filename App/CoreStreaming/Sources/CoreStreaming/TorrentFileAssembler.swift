@@ -11,9 +11,21 @@ public enum TorrentFileAssembler {
         let target = TorrentStreamTarget.selectPrimary(from: metadata)
         let sourceURL = pieceStorePath
         let safeName = sanitizedFilename(metadata.name.isEmpty ? target.file.relativePath : metadata.name)
-        let ext = (target.file.relativePath as NSString).pathExtension
-        let filename = ext.isEmpty ? safeName : "\(safeName).\(ext)"
+        // SECURITY: sanitize the extension sourced from the torrent's relativePath (peer-controlled)
+        // before appending it to the output path to prevent path traversal (e.g. "../../bad.sh").
+        let rawExt = (target.file.relativePath as NSString).pathExtension
+        let safeExt = sanitizedExtension(rawExt)
+        let filename = safeExt.isEmpty ? safeName : "\(safeName).\(safeExt)"
         let destination = outputDirectory.appendingPathComponent(filename)
+
+        // SECURITY: Verify the resolved destination is inside the expected output directory.
+        // appendingPathComponent handles ".." internally, but we double-check after resolution.
+        let resolvedDest = destination.resolvingSymlinksInPath()
+        let resolvedDir = outputDirectory.resolvingSymlinksInPath()
+        guard resolvedDest.path.hasPrefix(resolvedDir.path + "/") ||
+              resolvedDest.path == resolvedDir.path else {
+            throw TorrentFileAssemblerError.pathTraversal(destination.path)
+        }
 
         if FileManager.default.fileExists(atPath: destination.path) {
             try FileManager.default.removeItem(at: destination)
@@ -50,15 +62,25 @@ public enum TorrentFileAssembler {
         let trimmed = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "download" : String(trimmed.prefix(180))
     }
+
+    /// Sanitizes a file extension from peer-controlled torrent metadata.
+    /// Only allows alphanumeric characters and a maximum of 10 characters.
+    private static func sanitizedExtension(_ raw: String) -> String {
+        let allowed = raw.filter { $0.isLetter || $0.isNumber }
+        return String(allowed.prefix(10)).lowercased()
+    }
 }
 
 public enum TorrentFileAssemblerError: Error, LocalizedError {
     case incompleteExport
+    case pathTraversal(String)
 
     public var errorDescription: String? {
         switch self {
         case .incompleteExport:
             "Download finished but the media file could not be assembled."
+        case .pathTraversal(let path):
+            "Torrent contains a file with an unsafe path: \(path)"
         }
     }
 }

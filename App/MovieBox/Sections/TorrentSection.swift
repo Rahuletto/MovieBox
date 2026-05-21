@@ -29,8 +29,9 @@ struct TorrentSection: View {
     private var orchestrator: StreamingOrchestrator { appServices.streamingOrchestrator }
     private var downloadManager: DownloadManager { appServices.downloadManager }
     @State private var currentPage = 0
-    @State private var busyTorrentID: UUID?
+    @State private var streamBusyTorrentID: UUID?
     @State private var rowBufferingByID: [UUID: TorrentRowBufferingSnapshot] = [:]
+    @State private var downloadBusyTorrentID: UUID?
     @State private var cardErrors: [UUID: String] = [:]
     @State private var errorDismissTasks: [UUID: Task<Void, Never>] = [:]
     @State private var downloadWatchTask: Task<Void, Never>?
@@ -108,7 +109,8 @@ struct TorrentSection: View {
                 TorrentVersionList(
                     models: visibleCardModels,
                     mode: .detail(
-                        busyTorrentID: busyTorrentID,
+                        streamBusyTorrentID: streamBusyTorrentID,
+                        downloadBusyTorrentID: downloadBusyTorrentID,
                         bufferingByID: rowBufferingByID,
                         cardErrors: cardErrors,
                         onStream: { startStream(for: $0) },
@@ -123,6 +125,7 @@ struct TorrentSection: View {
         .onAppear {
             TorrentBackendSync.apply(from: settings.first)
             rebuildVisibleCardModels()
+            syncStreamRowState(from: appServices.persistentPlayback.uiTick)
         }
         .onChange(of: movie.id) { _, _ in
             currentPage = 0
@@ -139,6 +142,26 @@ struct TorrentSection: View {
         .onChange(of: settings.first?.appToken) { _, _ in
             TorrentBackendSync.apply(from: settings.first)
         }
+        .onChange(of: appServices.persistentPlayback.uiTick) { _, tick in
+            syncStreamRowState(from: tick)
+            guard tick.movieId == movie.id,
+                  let torrentID = tick.torrentId,
+                  tick.phaseLabel == "Failed"
+            else { return }
+            let message = tick.phaseDetail.isEmpty ? tick.statusLine : tick.phaseDetail
+            guard !message.isEmpty else { return }
+            presentError(message, for: torrentID)
+        }
+    }
+
+    private func syncStreamRowState(from tick: PersistentPlaybackUITick) {
+        guard tick.isActive, tick.movieId == movie.id, let torrentID = tick.torrentId else {
+            streamBusyTorrentID = nil
+            rowBufferingByID = [:]
+            return
+        }
+        streamBusyTorrentID = torrentID
+        rowBufferingByID[torrentID] = tick.rowSnapshot
     }
 
     private func rebuildVisibleCardModels() {
@@ -218,56 +241,50 @@ struct TorrentSection: View {
     // MARK: - Actions (single shared session / download manager)
 
     private func startStream(_ torrent: TorrentResult) {
-        busyTorrentID = torrent.id
+        streamBusyTorrentID = torrent.id
         rowBufferingByID[torrent.id] = .starting
         clearError(for: torrent.id)
+
+        WatchProgressStore.ensureRecord(
+            movie: movie,
+            kind: isTV ? .tv : .movie,
+            genres: movie.genreIds,
+            in: modelContext,
+            existing: storedMovies
+        )
 
         let playback = PlaybackSettings(
             appearance: subtitleAppearance,
             fontSize: subtitleFontSize
         )
+        let posterURL = MetadataClient().posterDisplayURL(
+            posterPath: movie.posterPath,
+            backdropPath: movie.backdropPath
+        )
+        let persistentRequest = PersistentPlaybackStartRequest(
+            mode: .single(torrent),
+            movieId: movie.id,
+            mediaKind: isTV ? .tv : .movie,
+            allTorrents: torrents,
+            posterURL: posterURL,
+            title: movie.title,
+            episodeTitle: episodeLabel,
+            displayTitle: movie.title,
+            subtitleURL: subtitleURL,
+            playback: playback,
+            resumePosition: WatchProgressStore.resumePosition(for: movie.id, in: storedMovies),
+            knownDurationSeconds: movie.runtime.map { Double($0) * 60 }
+        )
 
-        Task { @MainActor in
-            defer {
-                withAnimation(MovieBoxMotion.player) {
-                    busyTorrentID = nil
-                    rowBufferingByID.removeValue(forKey: torrent.id)
-                }
-            }
-            do {
-                WatchProgressStore.ensureRecord(
-                    movie: movie,
-                    kind: isTV ? .tv : .movie,
-                    genres: movie.genreIds,
-                    in: modelContext,
-                    existing: storedMovies
-                )
-
-                try await TorrentPlaybackService.play(
-                    request: TorrentPlaybackService.Request(
-                        torrent: torrent,
-                        allTorrents: torrents,
-                        movieId: movie.id,
-                        subtitleURL: subtitleURL,
-                        playback: playback,
-                        episodeTitle: episodeLabel,
-                        displayTitle: movie.title,
-                        resumePosition: WatchProgressStore.resumePosition(for: movie.id, in: storedMovies),
-                        onBufferingUpdate: { snapshot in
-                            rowBufferingByID[torrent.id] = snapshot
-                        }
-                    ),
-                    appServices: appServices,
-                    playerState: playerState
-                )
-            } catch {
-                presentError(error.localizedDescription, for: torrent.id)
-            }
-        }
+        _ = appServices.persistentPlayback.start(
+            request: persistentRequest,
+            appServices: appServices,
+            playerState: playerState
+        )
     }
 
     private func startDownload(_ torrent: TorrentResult) {
-        busyTorrentID = torrent.id
+        downloadBusyTorrentID = torrent.id
         clearError(for: torrent.id)
 
         let taskId = downloadManager.startDownload(
@@ -286,21 +303,21 @@ struct TorrentSection: View {
     }
 
     private func watchDownload(taskId: UUID, torrentID: UUID) async {
-        while !Task.isCancelled, busyTorrentID == torrentID {
+        while !Task.isCancelled, downloadBusyTorrentID == torrentID {
             guard let task = downloadManager.tasks.first(where: { $0.id == taskId }) else {
-                await MainActor.run { busyTorrentID = nil }
+                await MainActor.run { downloadBusyTorrentID = nil }
                 return
             }
             switch task.state {
             case .downloading where task.totalBytes > 0:
-                await MainActor.run { busyTorrentID = nil }
+                await MainActor.run { downloadBusyTorrentID = nil }
                 return
             case .completed, .paused:
-                await MainActor.run { busyTorrentID = nil }
+                await MainActor.run { downloadBusyTorrentID = nil }
                 return
             case .failed:
                 await MainActor.run {
-                    busyTorrentID = nil
+                    downloadBusyTorrentID = nil
                     presentError("Download failed for this release.", for: torrentID)
                 }
                 return

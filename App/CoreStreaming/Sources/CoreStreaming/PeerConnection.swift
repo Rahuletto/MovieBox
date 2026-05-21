@@ -174,7 +174,7 @@ public final class PeerConnection: ObservableObject {
     }
 
     private var connection: NWConnection?
-    private var buffer = Data()
+    private let parserBuffer = PeerConnectionBuffer()
     private var isChoked = true
     private var peerBitfield: Data = Data()
     private var pieceManager: PieceManager?
@@ -249,9 +249,15 @@ public final class PeerConnection: ObservableObject {
         sendLeecherBitfield(pieceCount: pieceCount)
         await sendInterested()
 
-        while let message = parseNextMessage() {
-            await handleMessage(message)
-            guard isActive else { return }
+        do {
+            while let message = try parseNextMessageFromBuffer(buffer: parserBuffer, ip: peerInfo.ip, port: peerInfo.port) {
+                await handleMessage(message)
+                guard isActive else { return }
+            }
+        } catch {
+            TorrentLog.warn("[PeerConnection] Error parsing handshake trailer from \(peerInfo.ip):\(peerInfo.port): \(error.localizedDescription)")
+            disconnect()
+            return
         }
 
         if isActive, !isChoked {
@@ -272,7 +278,12 @@ public final class PeerConnection: ObservableObject {
         keepaliveTask?.cancel()
         keepaliveTask = nil
         recycleOutstandingRequests()
-        buffer.removeAll(keepingCapacity: false)
+        parserBuffer.modify { $0.removeAll(keepingCapacity: false) }
+        peerBitfield = Data()
+        // Release closure captures (they hold strong refs to TorrentEngine callbacks).
+        onPieceReceived = nil
+        onPeersDiscovered = nil
+        pieceManager = nil
         connection?.cancel()
         connection = nil
         state = .disconnected
@@ -384,7 +395,7 @@ public final class PeerConnection: ObservableObject {
 
         let handshake = pending.prefix(Self.handshakeLength)
         if pending.count > Self.handshakeLength {
-            buffer.append(pending.suffix(from: Self.handshakeLength))
+            parserBuffer.append(pending.suffix(from: Self.handshakeLength))
         }
 
         guard handshake.count == Self.handshakeLength else {
@@ -421,15 +432,15 @@ public final class PeerConnection: ObservableObject {
 
     private func receiveSocketChunk(maxLength: Int) async -> Data? {
         await withCheckedContinuation { continuation in
-            connection?.receive(minimumIncompleteLength: 1, maximumLength: maxLength) { data, _, isComplete, error in
-                Task { @MainActor in
+            connection?.receive(minimumIncompleteLength: 1, maximumLength: maxLength) { [weak self] data, _, isComplete, error in
+                Task { @MainActor [weak self] in
                     if let error {
-                        self.state = .error(error.localizedDescription)
+                        self?.state = .error(error.localizedDescription)
                         continuation.resume(returning: nil)
                         return
                     }
                     if isComplete {
-                        self.state = .disconnected
+                        self?.state = .disconnected
                         continuation.resume(returning: nil)
                         return
                     }
@@ -476,9 +487,45 @@ public final class PeerConnection: ObservableObject {
     }
 
     private func receiveMessages() async {
-        connection?.receive(minimumIncompleteLength: 1, maximumLength: 262144) { [weak self] data, _, isComplete, error in
+        guard isActive, let conn = connection else { return }
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 262144) { [weak self] data, _, isComplete, error in
+            guard let self else { return }
+
+            let suffix = data
+            let buffer = self.parserBuffer
+            let ip = self.peerInfo.ip
+            let port = self.peerInfo.port
+
+            var parsedMessages: [WireMessage] = []
+            var shouldDisconnect = false
+            var disconnectReason = ""
+
+            if let suffix, !suffix.isEmpty {
+                buffer.append(suffix)
+                let count = buffer.modify { $0.count }
+                if count > 512 * 1024 {
+                    shouldDisconnect = true
+                    disconnectReason = "Wire buffer exceeded 512 KB"
+                } else {
+                    do {
+                        while let message = try self.parseNextMessageFromBuffer(buffer: buffer, ip: ip, port: port) {
+                            parsedMessages.append(message)
+                        }
+                    } catch ParseError.invalidLength(let length) {
+                        shouldDisconnect = true
+                        disconnectReason = "Invalid wire length \(length) (likely encrypted or misaligned stream)"
+                    } catch ParseError.undecodable(let len) {
+                        shouldDisconnect = true
+                        disconnectReason = "Undecodable \(len)B wire frame (stream desync)"
+                    } catch {
+                        shouldDisconnect = true
+                        disconnectReason = "Parse error: \(error.localizedDescription)"
+                    }
+                }
+            }
+
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self, self.isActive else { return }
 
                 if let error {
                     self.state = .error(error.localizedDescription)
@@ -486,12 +533,15 @@ public final class PeerConnection: ObservableObject {
                     return
                 }
 
-                if let data, !data.isEmpty {
-                    self.buffer.append(data)
-                    while self.isActive, let message = self.parseNextMessage() {
-                        await self.handleMessage(message)
-                    }
-                    guard self.isActive else { return }
+                if shouldDisconnect {
+                    TorrentLog.warn("[PeerConnection] \(disconnectReason) from \(self.peerInfo.ip):\(self.peerInfo.port) — disconnecting")
+                    self.disconnect()
+                    return
+                }
+
+                for message in parsedMessages {
+                    guard self.isActive else { break }
+                    await self.handleMessage(message)
                 }
 
                 if isComplete {
@@ -506,50 +556,37 @@ public final class PeerConnection: ObservableObject {
         }
     }
 
-    private static let maxWireBufferBytes = 512 * 1024
+    nonisolated private func parseNextMessageFromBuffer(buffer: PeerConnectionBuffer, ip: String, port: Int) throws -> WireMessage? {
+        try buffer.modify { data in
+            guard data.count >= 4 else { return nil }
 
-    private func parseNextMessage() -> WireMessage? {
-        guard buffer.count >= 4 else { return nil }
+            let start = data.startIndex
+            let b0 = UInt32(data[start])
+            let b1 = UInt32(data[start + 1])
+            let b2 = UInt32(data[start + 2])
+            let b3 = UInt32(data[start + 3])
+            let length = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
 
-        if buffer.count > Self.maxWireBufferBytes {
-            TorrentLog.warn(
-                "[PeerConnection] Wire buffer exceeded \(Self.maxWireBufferBytes) bytes from \(peerInfo.ip):\(peerInfo.port) — disconnecting"
-            )
-            disconnect()
-            return nil
+            if length == 0 {
+                data.removeSubrange(start..<(start + 4))
+                return .keepAlive
+            }
+
+            guard length <= 262_144 else {
+                throw ParseError.invalidLength(length)
+            }
+
+            let totalLength = 4 + Int(length)
+            guard totalLength > 4, data.count >= totalLength else { return nil }
+
+            let messageData = Data(data[start..<(start + totalLength)])
+            guard let message = WireMessage.decode(messageData) else {
+                throw ParseError.undecodable(totalLength)
+            }
+
+            data.removeSubrange(start..<(start + totalLength))
+            return message
         }
-
-        let start = buffer.startIndex
-        let length = UInt32(buffer[start]) << 24 | UInt32(buffer[start + 1]) << 16
-            | UInt32(buffer[start + 2]) << 8 | UInt32(buffer[start + 3])
-
-        if length == 0 {
-            buffer.removeSubrange(0..<4)
-            return .keepAlive
-        }
-
-        guard length <= 262_144 else {
-            TorrentLog.warn(
-                "[PeerConnection] Invalid wire length \(length) from \(peerInfo.ip):\(peerInfo.port) — disconnecting (likely encrypted or misaligned stream)"
-            )
-            disconnect()
-            return nil
-        }
-
-        let totalLength = 4 + Int(length)
-        guard totalLength > 4, buffer.count >= totalLength else { return nil }
-
-        let messageData = Data(buffer[start..<(start + totalLength)])
-        guard let message = WireMessage.decode(messageData) else {
-            TorrentLog.warn(
-                "[PeerConnection] Undecodable \(totalLength)B wire frame from \(peerInfo.ip):\(peerInfo.port) — disconnecting (stream desync)"
-            )
-            disconnect()
-            return nil
-        }
-
-        buffer.removeSubrange(0..<totalLength)
-        return message
     }
 
     private func handleMessage(_ message: WireMessage) async {
@@ -616,6 +653,9 @@ public final class PeerConnection: ObservableObject {
     private func setPeerHasPiece(_ pieceIndex: UInt32) {
         let byteIndex = Int(pieceIndex / 8)
         let bitIndex = Int(pieceIndex % 8)
+        // Cap growth: a bitfield for 1M pieces is 125 KB. Reject absurd indices from
+        // buggy/malicious peers that would balloon this Data per connection.
+        guard byteIndex < 131_072 else { return } // 1M piece cap
         if peerBitfield.count <= byteIndex {
             peerBitfield.append(contentsOf: [UInt8](repeating: 0, count: byteIndex - peerBitfield.count + 1))
         }
@@ -629,7 +669,7 @@ public final class PeerConnection: ObservableObject {
     }
 
     private func requestPieces() async {
-        guard let pieceManager, !isChoked else { return }
+        guard let pieceManager, !isChoked, !peerBitfield.isEmpty else { return }
 
         let availableSlots = maxOutstanding - outstandingRequests.count
         guard availableSlots > 0 else { return }
@@ -641,6 +681,13 @@ public final class PeerConnection: ObservableObject {
 
             outstandingRequests.insert(request)
             requestSentAt[request] = Date.now
+
+            // Cap the request-time dictionary; stale entries from out-of-order delivery
+            // would otherwise accumulate to the lifetime of the connection.
+            if requestSentAt.count > 256 {
+                let cutoff = Date.now.addingTimeInterval(-requestTimeout * 2)
+                requestSentAt = requestSentAt.filter { $0.value > cutoff }
+            }
 
             let message = WireMessage.request(
                 pieceIndex: request.pieceIndex,
@@ -698,4 +745,26 @@ private final class PeerConnectionGate: @unchecked Sendable {
         self.continuation = nil
         continuation.resume()
     }
+}
+
+private final class PeerConnectionBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _data = Data()
+
+    func append(_ other: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        _data.append(other)
+    }
+
+    func modify<T>(_ body: (inout Data) throws -> T) rethrows -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return try body(&_data)
+    }
+}
+
+private enum ParseError: Error {
+    case invalidLength(UInt32)
+    case undecodable(Int)
 }

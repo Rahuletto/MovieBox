@@ -22,6 +22,7 @@ struct DetailHeroHeader: View {
       let isPreparingTrailer: Bool
       let currentRating: Float?
       var playButtonTitle: String = "Play Now"
+      var playButtonDisabled: Bool = false
       
       private var isInList: Bool {
           storedMovies.contains { $0.tmdbId == detail.movie.id }
@@ -135,16 +136,12 @@ struct DetailHeroHeader: View {
                   .shadow(color: .black.opacity(0.5), radius: 10, x: 0, y: 3)
 
                   HStack(spacing: 12) {
-                      Button(action: onPlayNow) {
-                          Label(playButtonTitle, systemImage: "play.fill")
-                              .font(.headline)
-                              .padding(.horizontal, 16)
-                              .padding(.vertical, 8)
-                              .background(.white, in: Capsule())
-                              .foregroundStyle(.black)
-                      }
-                      .buttonStyle(.plain)
-                      .disabled(kind == .tv && playButtonTitle == "Select Episode")
+                      PlayNowButton(
+                          movieId: detail.movie.id,
+                          title: playButtonTitle,
+                          isDisabled: playButtonDisabled,
+                          onPlay: onPlayNow
+                      )
 
                       GlassButton(action: addToMyList, glassStrength: .ultraThin) {
                           Label(isInList ? "Added to List" : "Add To My List", systemImage: isInList ? "checkmark" : "plus")

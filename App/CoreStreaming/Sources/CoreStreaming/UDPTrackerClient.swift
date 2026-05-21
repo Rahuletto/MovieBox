@@ -92,6 +92,16 @@ public actor UDPTrackerClient {
             return session.connectionId
         }
 
+        // Evict expired sessions and cap the dictionary size to prevent unbounded growth
+        // when many different tracker URLs are cycled through.
+        let now = Date.now
+        sessions = sessions.filter { $0.value.expiry > now }
+        if sessions.count > 128 {
+            // Keep only the most recently expiring 64 sessions.
+            let sorted = sessions.sorted { $0.value.expiry > $1.value.expiry }.prefix(64)
+            sessions = Dictionary(uniqueKeysWithValues: sorted.map { ($0.key, $0.value) })
+        }
+
         let transactionId = UInt32.random(in: 1...UInt32.max)
         let magicConnectionId: UInt64 = 0x41727101980
 

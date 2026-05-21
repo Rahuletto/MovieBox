@@ -12,7 +12,7 @@ public enum TorrentSearchQuery {
 
         guard !cleaned.isEmpty else { return title.trimmingCharacters(in: .whitespacesAndNewlines) }
 
-        if let year, (1900...2100).contains(year) {
+        if let year, (1900...2100).contains(year), !containsReleaseYear(cleaned, year: year) {
             return "\(cleaned) \(year)"
         }
         return cleaned
@@ -30,10 +30,19 @@ public enum TorrentSearchQuery {
         let episodeText = String(format: "%02d", max(episode, 0))
         let base = "\(cleaned) S\(seasonText)E\(episodeText)"
 
-        if let year, (1900...2100).contains(year) {
+        if let year, (1900...2100).contains(year), !containsReleaseYear(base, year: year) {
             return "\(base) \(year)"
         }
         return base
+    }
+
+    private static func containsReleaseYear(_ text: String, year: Int) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // "2010", "1917" — the whole title is a year token, not an existing release-year suffix.
+        if trimmed.range(of: #"^(19|20)\d{2}$"#, options: .regularExpression) != nil {
+            return trimmed == String(year)
+        }
+        return text.range(of: #"\b\#(year)\b"#, options: .regularExpression) != nil
     }
 }
 

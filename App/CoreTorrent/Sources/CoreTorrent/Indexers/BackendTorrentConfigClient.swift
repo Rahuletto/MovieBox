@@ -14,21 +14,39 @@ public struct TorrentIndexerCatalogEntry: Sendable, Identifiable, Hashable {
     }
 }
 
+public struct BackendTorrentConfig: Sendable {
+    public let indexers: [TorrentIndexerCatalogEntry]
+    public let defaultEnabledIndexerIDs: [String]
+
+    public init(indexers: [TorrentIndexerCatalogEntry], defaultEnabledIndexerIDs: [String]) {
+        self.indexers = indexers
+        self.defaultEnabledIndexerIDs = defaultEnabledIndexerIDs
+    }
+}
+
 public enum TorrentIndexerPreferences {
+    /// Legacy fallback when the backend catalog is unavailable.
     public static let defaultIDs: Set<String> = ["torrentio", "yts", "eztv", "piratebay", "1337x"]
 
-    public static func parseCSV(_ raw: String) -> Set<String> {
+    /// Parses a comma-separated indexer list. An empty string means all disabled.
+    /// When `knownIDs` is provided, unknown ids are dropped (stale entries after catalog changes).
+    public static func parseCSV(_ raw: String, knownIDs: Set<String>? = nil) -> Set<String> {
         let ids = raw
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
             .filter { !$0.isEmpty }
-        let known = defaultIDs
-        let filtered = Set(ids.filter { known.contains($0) })
-        return filtered.isEmpty ? defaultIDs : filtered
+        let parsed = Set(ids)
+        guard let knownIDs, !knownIDs.isEmpty else { return parsed }
+        return Set(parsed.filter { knownIDs.contains($0) })
     }
 
-    public static func serialize(_ ids: Set<String>) -> String {
-        defaultIDs.filter { ids.contains($0) }.joined(separator: ",")
+    /// Serializes enabled ids. Pass `order` (e.g. backend catalog order) for stable CSV.
+    public static func serialize(_ ids: Set<String>, order: [String]? = nil) -> String {
+        guard !ids.isEmpty else { return "" }
+        if let order, !order.isEmpty {
+            return order.filter { ids.contains($0) }.joined(separator: ",")
+        }
+        return ids.sorted().joined(separator: ",")
     }
 }
 
@@ -43,7 +61,7 @@ public actor BackendTorrentConfigClient {
         self.session = session
     }
 
-    public func fetchCatalog() async throws -> [TorrentIndexerCatalogEntry] {
+    public func fetchCatalog() async throws -> BackendTorrentConfig {
         let url = baseURL.appending(path: "api/config")
         var request = URLRequest(url: url)
         request.setValue(appToken, forHTTPHeaderField: "X-MovieBox-Token")
@@ -58,7 +76,7 @@ public actor BackendTorrentConfigClient {
         }
 
         let payload = try JSONDecoder().decode(BackendConfigResponse.self, from: data)
-        return payload.indexers.map {
+        let indexers = payload.indexers.map {
             TorrentIndexerCatalogEntry(
                 id: $0.id,
                 name: $0.name,
@@ -66,11 +84,16 @@ public actor BackendTorrentConfigClient {
                 kinds: $0.kinds
             )
         }
+        return BackendTorrentConfig(
+            indexers: indexers,
+            defaultEnabledIndexerIDs: payload.defaultEnabledIndexers
+        )
     }
 }
 
 private struct BackendConfigResponse: Decodable {
     let indexers: [BackendIndexerRow]
+    let defaultEnabledIndexers: [String]
 }
 
 private struct BackendIndexerRow: Decodable {

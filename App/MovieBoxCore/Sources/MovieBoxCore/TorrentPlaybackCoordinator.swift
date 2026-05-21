@@ -53,7 +53,8 @@ public final class TorrentPlaybackCoordinator {
         subtitleFontSize: CGFloat = 20,
         episodeTitle: String? = nil,
         displayTitle: String? = nil,
-        resumePosition: Double? = nil
+        resumePosition: Double? = nil,
+        knownDurationSeconds: Double? = nil
     ) throws {
         configureSources(on: playerState, torrents: allTorrents, selected: torrent)
 
@@ -78,9 +79,11 @@ public final class TorrentPlaybackCoordinator {
             fontSize: subtitleFontSize,
             episodeTitle: episodeTitle,
             hudTitle: hudTitle,
-            resume: resumePosition
+            resume: resumePosition,
+            knownDuration: knownDurationSeconds
         )
-        DispatchQueue.main.async {
+        Task { @MainActor in
+            await Task.yield()
             playerState.load(
                 url: loadPayload.url,
                 title: loadPayload.title,
@@ -91,7 +94,8 @@ public final class TorrentPlaybackCoordinator {
                 subtitleFontSize: loadPayload.fontSize,
                 episodeTitle: loadPayload.episodeTitle,
                 displayTitle: loadPayload.hudTitle,
-                resumePosition: loadPayload.resume
+                resumePosition: loadPayload.resume,
+                knownDurationSeconds: loadPayload.knownDuration
             )
         }
     }

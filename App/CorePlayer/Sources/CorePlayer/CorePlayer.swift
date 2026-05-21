@@ -41,6 +41,12 @@ public final class PlayerState {
     public var videoGravity: AVLayerVideoGravity = .resizeAspect
     public var movieId: Int
     public var isPresented: Bool
+    /// True when the player was opened for a torrent stream (not trailer/clip-only).
+    public var isStreamingTorrent: Bool = false
+    /// Full-screen player chrome is hidden while playback continues (e.g. PiP + browsing).
+    public var isPlaybackChromeHidden: Bool = false
+    /// When true, closing PiP (X) dismisses playback instead of restoring the in-app player.
+    fileprivate var dismissPlaybackWhenPiPCloses: Bool = false
     /// Fades the player layer in after app chrome has faded out.
     public var isPlayerRevealed: Bool
     public var isPlaying: Bool
@@ -117,6 +123,23 @@ public final class PlayerState {
     private var previousWindowFrame: NSRect? = nil
     private var hasResizedForCurrentVideo = false
     private var presentationTransitionTask: Task<Void, Never>?
+    private var lastPlaybackLoad: StoredPlaybackLoad?
+    private var streamsFromLocalTorrentServer = false
+
+    private struct StoredPlaybackLoad: Sendable {
+        let url: URL
+        let title: String
+        let movieId: Int
+        let subtitleURL: URL?
+        let hdrType: PlayerHDRType?
+        let subtitleAppearance: SubtitleAppearance
+        let subtitleFontSize: CGFloat
+        let episodeTitle: String?
+        let episodes: [PlayerEpisode]
+        let currentEpisodeIndex: Int?
+        let displayTitle: String?
+        let resumePosition: Double?
+    }
 
     private static let positionReportInterval: TimeInterval = 5
     private static let positionReportMinimumDelta: Double = 8
@@ -195,9 +218,12 @@ public final class PlayerState {
         episodes: [PlayerEpisode] = [],
         currentEpisodeIndex: Int? = nil,
         displayTitle: String? = nil,
-        resumePosition: Double? = nil
+        resumePosition: Double? = nil,
+        knownDurationSeconds: Double? = nil
     ) {
         stopPlaybackResources()
+
+        streamsFromLocalTorrentServer = url.host.map { $0 == "127.0.0.1" || $0 == "localhost" } ?? false
 
         self.title = title
         self.movieId = movieId
@@ -239,6 +265,13 @@ public final class PlayerState {
             pendingResumePosition = nil
         }
 
+        if let knownDurationSeconds, knownDurationSeconds.isFinite, knownDurationSeconds > 0 {
+            duration = knownDurationSeconds
+        } else {
+            duration = 0
+        }
+        currentTime = 0
+
         lastPositionReportTime = .distantPast
         lastReportedPosition = -1
         lastSubtitleSyncTime = -1
@@ -272,6 +305,21 @@ public final class PlayerState {
         thumbnailService = ThumbnailService(asset: asset)
 
         PlaybackLog.log("load url=\(PlaybackLog.redactURL(url)) title=\(title) movieId=\(movieId)")
+
+        lastPlaybackLoad = StoredPlaybackLoad(
+            url: url,
+            title: title,
+            movieId: movieId,
+            subtitleURL: subtitleURL,
+            hdrType: hdrType,
+            subtitleAppearance: subtitleAppearance,
+            subtitleFontSize: subtitleFontSize,
+            episodeTitle: episodeTitle,
+            episodes: episodes,
+            currentEpisodeIndex: currentEpisodeIndex,
+            displayTitle: displayTitle,
+            resumePosition: resumePosition
+        )
 
         let playerItem = AVPlayerItem(asset: asset)
         if player.currentItem == nil {
@@ -353,9 +401,19 @@ public final class PlayerState {
             if underlying.domain == NSOSStatusErrorDomain, underlying.code == -12935 {
                 return "This file cannot be streamed yet — the torrent buffer was incomplete or corrupt. Wait for more buffering or try another release."
             }
+            let underlyingText = underlying.localizedDescription.lowercased()
+            if underlying.code == -16849 || underlyingText.contains("503") || underlyingText.contains("service unavailable") {
+                return "The torrent has not buffered that part of the file yet. Leave the download running, then tap play again — it does not recover by itself on this screen."
+            }
+        }
+        if ns.domain == AVFoundationErrorDomain, ns.code == -11828 {
+            return "The player could not read the stream (often incomplete MKV/MP4 index or a bad range response). This is not “unsupported format.” Buffer more — especially the end of the file — then tap play again."
         }
         let trimmed = ns.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty || trimmed.lowercased() == "unknown error" {
+            if ns.domain == NSURLErrorDomain, ns.code == -1 {
+                return "Playback failed — the stream was not ready (container index or buffer missing). Wait for buffering to finish, then tap Retry."
+            }
             return "Playback failed (error \(ns.code)). Try another version or format."
         }
         return trimmed
@@ -500,9 +558,10 @@ public final class PlayerState {
     }
 
     private func disableEmbeddedCaptions(on playerItem: AVPlayerItem, asset: AVURLAsset) {
-        Task {
+        Task { [weak self] in
             guard let group = try? await asset.loadMediaSelectionGroup(for: .legible) else { return }
-            await MainActor.run {
+            await MainActor.run { [weak self] in
+                guard let self, playerItem === self.observedPlayerItem else { return }
                 playerItem.select(nil, in: group)
             }
         }
@@ -601,6 +660,31 @@ public final class PlayerState {
         window.toggleFullScreen(nil)
     }
 
+    public func retryPlayback() {
+        guard let last = lastPlaybackLoad else {
+            PlaybackLog.log("retryPlayback skipped — no prior load")
+            return
+        }
+        let isTorrent = last.url.host.map { $0 == "127.0.0.1" || $0 == "localhost" } ?? false
+        let resume: Double? = isTorrent ? nil : (currentTime > 20 ? currentTime : last.resumePosition)
+        PlaybackLog.log("retryPlayback url=\(PlaybackLog.redactURL(last.url))")
+        load(
+            url: last.url,
+            title: last.title,
+            movieId: last.movieId,
+            subtitleURL: last.subtitleURL,
+            hdrType: last.hdrType,
+            subtitleAppearance: last.subtitleAppearance,
+            subtitleFontSize: last.subtitleFontSize,
+            episodeTitle: last.episodeTitle,
+            episodes: last.episodes,
+            currentEpisodeIndex: last.currentEpisodeIndex,
+            displayTitle: last.displayTitle,
+            resumePosition: resume,
+            knownDurationSeconds: duration > 0 ? duration : nil
+        )
+    }
+
     public func dismiss() {
         if let window = NSApplication.shared.keyWindow, window.styleMask.contains(.fullScreen) {
             window.toggleFullScreen(nil)
@@ -632,6 +716,9 @@ public final class PlayerState {
 
     private func finalizeDismissal() {
         stopPlaybackResources()
+        isStreamingTorrent = false
+        dismissPlaybackWhenPiPCloses = false
+        isPlaybackChromeHidden = false
         isPlayerRevealed = false
         isPresented = false
         currentTime = 0
@@ -652,6 +739,8 @@ public final class PlayerState {
         selectedPlaybackSourceID = nil
         isSwitchingSource = false
         onSelectPlaybackSource = nil
+        lastPlaybackLoad = nil
+        streamsFromLocalTorrentServer = false
         if let existing = thumbnailService {
             Task { await existing.clearCache() }
         }
@@ -714,9 +803,54 @@ public final class PlayerState {
             isPictureInPictureActive = false
             controller.stopPictureInPicture()
         } else {
+            dismissPlaybackWhenPiPCloses = false
             isPictureInPictureActive = true
             controller.startPictureInPicture()
         }
+    }
+
+    @discardableResult
+    public func startPictureInPictureIfPossible() -> Bool {
+        guard let controller = pipController else { return false }
+        if controller.isPictureInPictureActive { return true }
+        guard controller.isPictureInPicturePossible else { return false }
+        isPictureInPictureActive = true
+        controller.startPictureInPicture()
+        return true
+    }
+
+    /// Hides full-screen player chrome, keeps AVPlayer running, and enters PiP when supported.
+    public func minimizeToPictureInPicture() {
+        guard isPresented else { return }
+        dismissPlaybackWhenPiPCloses = true
+        presentationTransitionTask?.cancel()
+        withAnimation(.easeInOut(duration: 0.38)) {
+            isPlaybackChromeHidden = true
+            isPlayerRevealed = false
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(400))
+            for attempt in 0..<6 {
+                if startPictureInPictureIfPossible() { return }
+                try? await Task.sleep(for: .milliseconds(120))
+            }
+        }
+    }
+
+    public func restorePlaybackChrome() {
+        guard isPresented else { return }
+        dismissPlaybackWhenPiPCloses = false
+        presentationTransitionTask?.cancel()
+        withAnimation(.easeInOut(duration: 0.38)) {
+            isPlaybackChromeHidden = false
+            isPlayerRevealed = true
+        }
+    }
+
+    /// PiP closed via X while browsing — stop video, do not reopen the in-app player.
+    fileprivate func dismissFromDetachedPiPClose() {
+        dismissPlaybackWhenPiPCloses = false
+        dismiss()
     }
 
     public func togglePlayback() {
@@ -733,6 +867,9 @@ public final class PlayerState {
     public func play() {
         if playbackRate <= 0 {
             playbackRate = 1.0
+        }
+        if streamsFromLocalTorrentServer, shouldRestartTorrentStreamFromBeginning() {
+            seek(to: 0)
         }
         player.play()
         player.rate = Float(playbackRate)
@@ -859,34 +996,33 @@ public final class PlayerState {
             forInterval: CMTime(seconds: Self.timeObserverInterval, preferredTimescale: 600),
             queue: .main
         ) { [weak self] time in
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                let seconds = time.seconds
-                self.currentTime = seconds
-                if let item = self.player.currentItem {
-                    self.bufferedTimeRanges = item.loadedTimeRanges.compactMap { value in
-                        let range = value.timeRangeValue
-                        let start = CMTimeGetSeconds(range.start)
-                        let end = CMTimeGetSeconds(CMTimeAdd(range.start, range.duration))
-                        guard start.isFinite, end.isFinite, end > start else { return nil }
-                        return start...end
-                    }
-                } else {
-                    self.bufferedTimeRanges = []
+            guard let self else { return }
+            let seconds = time.seconds
+            self.currentTime = seconds
+            if let item = self.player.currentItem {
+                self.bufferedTimeRanges = item.loadedTimeRanges.compactMap { value in
+                    let range = value.timeRangeValue
+                    let start = CMTimeGetSeconds(range.start)
+                    let end = CMTimeGetSeconds(CMTimeAdd(range.start, range.duration))
+                    guard start.isFinite, end.isFinite, end > start else { return nil }
+                    return start...end
                 }
-                self.updateSubtitle(at: seconds)
-
-                guard self.movieId != 0, self.duration > 0 else { return }
-                let now = Date()
-                let positionDelta = abs(seconds - self.lastReportedPosition)
-                let elapsed = now.timeIntervalSince(self.lastPositionReportTime)
-                guard elapsed >= Self.positionReportInterval || positionDelta >= Self.positionReportMinimumDelta else {
-                    return
-                }
-                self.lastPositionReportTime = now
-                self.lastReportedPosition = seconds
-                self.onPositionUpdate?(self.movieId, seconds, self.duration)
+            } else {
+                self.bufferedTimeRanges = []
             }
+            self.updateSubtitle(at: seconds)
+            self.tryApplyPendingResume()
+
+            guard self.movieId != 0, self.duration > 0 else { return }
+            let now = Date()
+            let positionDelta = abs(seconds - self.lastReportedPosition)
+            let elapsed = now.timeIntervalSince(self.lastPositionReportTime)
+            guard elapsed >= Self.positionReportInterval || positionDelta >= Self.positionReportMinimumDelta else {
+                return
+            }
+            self.lastPositionReportTime = now
+            self.lastReportedPosition = seconds
+            self.onPositionUpdate?(self.movieId, seconds, self.duration)
         }
 
         guard let currentItem = player.currentItem else { return }
@@ -921,11 +1057,7 @@ public final class PlayerState {
                     PlaybackLog.log("AVPlayerItem readyToPlay duration=\(self.duration)s")
                     self.errorMessage = nil
                     self.bufferingDetail = nil
-                    if let resume = self.pendingResumePosition, resume > 20 {
-                        self.pendingResumePosition = nil
-                        PlaybackLog.log("resume playback at \(Int(resume))s")
-                        self.seek(to: resume)
-                    }
+                    self.tryApplyPendingResume()
                     self.updateBufferingState(for: item)
                 case .unknown:
                     PlaybackLog.log("AVPlayerItem status=unknown (buffering)")
@@ -980,6 +1112,38 @@ public final class PlayerState {
                 }
             }
             .store(in: &cancellables)
+    }
+
+    private func tryApplyPendingResume() {
+        guard let resume = pendingResumePosition, resume > 20 else { return }
+        guard observedPlayerItem?.status == .readyToPlay else { return }
+        if streamsFromLocalTorrentServer, !isPlaybackTimeBuffered(resume) { return }
+        pendingResumePosition = nil
+        PlaybackLog.log("resume at \(Int(resume))s")
+        seek(to: resume)
+    }
+
+    private func isPlaybackTimeBuffered(_ seconds: Double) -> Bool {
+        if seconds < 45 { return true }
+        guard let item = observedPlayerItem else { return false }
+        for value in item.loadedTimeRanges {
+            let range = value.timeRangeValue
+            let start = CMTimeGetSeconds(range.start)
+            let end = start + CMTimeGetSeconds(range.duration)
+            guard start.isFinite, end.isFinite, end > start else { continue }
+            if seconds >= start - 1, seconds < end { return true }
+        }
+        return false
+    }
+
+    private func shouldRestartTorrentStreamFromBeginning() -> Bool {
+        let t = currentTime
+        if !t.isFinite || t < 1 { return true }
+        if duration > 0, t >= max(0, duration - 3) { return true }
+        if pendingResumePosition != nil, !isPlaybackTimeBuffered(t) { return true }
+        if observedPlayerItem?.status == .failed { return true }
+        let size = observedPlayerItem?.presentationSize ?? .zero
+        return size.width < 2 && size.height < 2
     }
 
     private func updateBufferingState(for item: AVPlayerItem? = nil) {
@@ -1229,11 +1393,22 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
     }
 
     private var bufferingOverlay: some View {
-        ProgressView()
-            .controlSize(.large)
-            .tint(.white)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .allowsHitTesting(false)
+        VStack(spacing: 14) {
+            ProgressView()
+                .controlSize(.large)
+                .tint(.white)
+            if let detail = state.bufferingDetail?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !detail.isEmpty {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.88))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: 520)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .allowsHitTesting(false)
     }
 
     private func playbackErrorOverlay(message: String) -> some View {
@@ -1261,37 +1436,48 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
                         .lineLimit(4)
                 }
 
-                // Buttons - match RetryCard layout
-                HStack(spacing: 12) {
+                VStack(spacing: 10) {
+                    HStack(spacing: 10) {
+                        Button(action: { state.retryPlayback() }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 11, weight: .semibold))
+                                Text("Retry")
+                                    .font(.system(size: 13, weight: .semibold))
+                            }
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Color(red: 0.98, green: 0.36, blue: 0.18))
+                            .clipShape(Capsule(style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .keyboardShortcut(.defaultAction)
+
+                        Button(action: { state.dismiss() }) {
+                            Text("Close")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(.primary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                                .background(Color.primary.opacity(0.12))
+                                .clipShape(Capsule(style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .keyboardShortcut(.cancelAction)
+                    }
+
                     Button(action: { copyPlaybackDiagnostics() }) {
                         HStack(spacing: 6) {
                             Image(systemName: "doc.on.doc")
                                 .font(.system(size: 11))
                             Text("Copy Logs")
-                                .font(.system(size: 13, weight: .semibold))
+                                .font(.system(size: 12, weight: .medium))
                         }
-                        .foregroundStyle(.primary)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .background(Color.primary.opacity(0.12))
-                        .clipShape(Capsule(style: .continuous))
+                        .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
                     .keyboardShortcut("c", modifiers: [.command, .shift])
-
-                    Spacer()
-
-                    Button(action: { state.dismiss() }) {
-                        Text("OK")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 20)
-                            .padding(.vertical, 10)
-                            .background(Color(red: 0.98, green: 0.36, blue: 0.18))
-                            .clipShape(Capsule(style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                    .keyboardShortcut(.defaultAction)
                 }
             }
             .padding(24)
@@ -1312,6 +1498,14 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
             return "The video file could not be found. This usually means the source is no longer available or the URL is invalid."
         } else if lower.contains("timeout") || lower.contains("timed out") {
             return "The connection took too long to respond. Check your internet connection and try again."
+        } else if lower.contains("503") || lower.contains("service unavailable") || lower.contains("buffering from the torrent") {
+            return "That part of the file is not downloaded yet. Keep the torrent running and tap play again later — waiting on this error screen alone will not start playback."
+        } else if lower.contains("cannot open") {
+            return "The stream could not be opened yet (buffer or index data missing). Keep downloading, then tap play again — especially for MKV, the end of the file matters."
+        } else if lower.contains("incomplete or corrupt")
+            || lower.contains("buffer was incomplete")
+            || lower.contains("not buffered that part") {
+            return rawMessage
         } else if lower.contains("network") || lower.contains("connection refused") {
             return "Network connection failed. Check your internet connection and make sure the server is reachable."
         } else if lower.contains("authorization") || lower.contains("forbidden") || lower.contains("403") {
@@ -1579,7 +1773,9 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
                         .font(.system(size: 11, weight: .medium))
                         .monospacedDigit()
                         .foregroundStyle(.white.opacity(0.4))
-                        .frame(width: 44, alignment: .trailing)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .frame(width: 56, alignment: .trailing)
 
                     ScrubberSlider(
                         value: Binding(
@@ -1599,7 +1795,9 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
                         .font(.system(size: 11, weight: .medium))
                         .monospacedDigit()
                         .foregroundStyle(.white.opacity(0.4))
-                        .frame(width: 44, alignment: .leading)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .frame(width: 56, alignment: .leading)
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
@@ -2494,7 +2692,38 @@ public final class PlayerPiPDelegate: NSObject, AVPictureInPictureControllerDele
         let activeState = self.state
         Task { @MainActor in
             activeState.isPictureInPictureActive = false
+            guard activeState.isPlaybackChromeHidden, activeState.isPresented else { return }
+            if activeState.dismissPlaybackWhenPiPCloses {
+                activeState.dismissFromDetachedPiPClose()
+            }
         }
+    }
+
+    public func pictureInPictureController(
+        _ pictureInPictureController: AVPictureInPictureController,
+        restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
+    ) {
+        let completion = PiPRestoreCompletion(completionHandler)
+        let activeState = self.state
+        Task { @MainActor in
+            activeState.dismissPlaybackWhenPiPCloses = false
+            if activeState.isPresented {
+                activeState.restorePlaybackChrome()
+            }
+            completion.finish(true)
+        }
+    }
+}
+
+private final class PiPRestoreCompletion: @unchecked Sendable {
+    private let handler: (Bool) -> Void
+
+    init(_ handler: @escaping (Bool) -> Void) {
+        self.handler = handler
+    }
+
+    func finish(_ success: Bool) {
+        handler(success)
     }
 }
 

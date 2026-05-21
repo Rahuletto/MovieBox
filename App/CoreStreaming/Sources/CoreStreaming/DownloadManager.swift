@@ -341,9 +341,11 @@ public final class DownloadManager: ObservableObject {
         let dir = task.storageDirectory?.path ?? downloadDirectory.path
         let bitmap: Data
         if let store = pieceStores[task.id] {
-            Task {
+            let taskId = task.id
+            Task { [weak self] in
                 let encoded = await store.encodedBitmap()
-                await MainActor.run {
+                await MainActor.run { [weak self] in
+                    guard let self, self.tasks.contains(where: { $0.id == taskId }) else { return }
                     self.persistenceDelegate?.downloadManager(
                         self,
                         didUpdate: DownloadPersistenceSnapshot(

@@ -7,6 +7,7 @@ struct DetailHeroOverlay: View {
     let techKinds: [MediaTechKind]
     let accessibilityTags: [String]
     let playButtonTitle: String
+    let playButtonDisabled: Bool
     let addToMyList: () -> Void
     let onRate: (Float) -> Void
     let onPlayNow: () -> Void
@@ -29,7 +30,8 @@ struct DetailHeroOverlay: View {
                     onPlayTrailer: onPlayTrailer,
                     isPreparingTrailer: isPreparingTrailer,
                     currentRating: currentRating,
-                    playButtonTitle: playButtonTitle
+                    playButtonTitle: playButtonTitle,
+                    playButtonDisabled: playButtonDisabled
                 )
                 .padding(.horizontal, DetailLayoutMetrics.horizontalPadding)
                 .padding(.bottom, 28)

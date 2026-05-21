@@ -22,4 +22,13 @@ describe('sanitizeQuery', () => {
   it('leaves title unchanged when year param is absent', () => {
     expect(sanitizeQuery('Fight Club 1999', null)).toBe('Fight Club 1999')
   })
+
+  it('appends release year when the title is only a different year token', () => {
+    expect(sanitizeQuery('2010', 1984)).toBe('2010 1984')
+    expect(sanitizeQuery('1917', 2019)).toBe('1917 2019')
+  })
+
+  it('does not duplicate when a year-only title matches the release year', () => {
+    expect(sanitizeQuery('2010', 2010)).toBe('2010')
+  })
 })

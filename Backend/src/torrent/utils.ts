@@ -17,6 +17,18 @@ export function magnetFor(infoHash: string, title: string): string {
   return `magnet:?xt=urn:btih:${hash}&dn=${encodeURIComponent(title)}${trackerParams}`
 }
 
+const YEAR_ONLY_TITLE = /^(19|20)\d{2}$/
+
+/** True when `year` is already present and should not be appended again. */
+export function releaseYearAlreadyInQuery(cleaned: string, year: number): boolean {
+  // Titles that are only a year ("2010", "1917"): the token is the film name, not a release-year suffix.
+  // Still append when the release year differs ("2010" + 1984 → "2010 1984", "1917" + 2019 → "1917 2019").
+  if (YEAR_ONLY_TITLE.test(cleaned)) {
+    return cleaned === String(year)
+  }
+  return new RegExp(`\\b${year}\\b`).test(cleaned)
+}
+
 export function sanitizeQuery(title: string, year?: number | null): string {
   let cleaned = title.replace(/%/g, '').replace(/\s+/g, ' ').trim()
   if (!cleaned) return title.replace(/%/g, '').trim()
@@ -26,7 +38,7 @@ export function sanitizeQuery(title: string, year?: number | null): string {
 
   if (year && year >= 1900 && year <= 2100) {
     // The macOS app sends `q` with year baked in (TorrentSearchQuery.make) plus `year=`.
-    if (new RegExp(`\\b${year}\\b`).test(cleaned)) return cleaned
+    if (releaseYearAlreadyInQuery(cleaned, year)) return cleaned
     return `${cleaned} ${year}`
   }
   return cleaned

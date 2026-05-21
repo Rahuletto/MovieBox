@@ -105,7 +105,7 @@ final class ProgressiveStreamingTests: XCTestCase {
 
     func testFastStartMP4Detection() {
         var data = Data()
-        data.append(contentsOf: [0, 0, 0, 32])
+        data.append(contentsOf: [0, 0, 0, 20])
         data.append(contentsOf: "ftyp".utf8)
         data.append(contentsOf: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
         data.append(contentsOf: [0, 0, 0, 40])
@@ -124,6 +124,19 @@ final class ProgressiveStreamingTests: XCTestCase {
         XCTAssertEqual(StreamTailPlanner.moovTailProbe(in: data, endsAtFileEOF: true), .complete)
     }
 
+    func testMoovTailProbeDoesNotTrapOn64BitBoxSize() {
+        // size32 == 1 with 64-bit size larger than Int64.max — must not fatal when probing.
+        var data = Data()
+        data.append(contentsOf: UInt32(1).bigEndianBytes)
+        data.append(contentsOf: "moov".utf8)
+        var largeSize: UInt64 = UInt64(Int64.max) + 1024
+        for shift in stride(from: 56, through: 0, by: -8) {
+            data.append(UInt8((largeSize >> UInt64(shift)) & 0xFF))
+        }
+        data.append(Data(repeating: 0, count: 32))
+        XCTAssertEqual(StreamTailPlanner.moovTailProbe(in: data, endsAtFileEOF: true), .incomplete)
+    }
+
     func testMoovTailProbeIncompleteWhenTruncated() {
         var full = Data()
         let moovSize = 128
@@ -139,9 +152,72 @@ final class ProgressiveStreamingTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(span, 32 * 1024 * 1024)
     }
 
+    func testParseEBMLSizeOneByte() {
+        // VINT 0x8A → width 1, value 10
+        let data = Data([0x8A])
+        let parsed = StreamTailPlanner.parseEBMLSize(data: data, offset: 0)
+        XCTAssertEqual(parsed?.size, 10)
+        XCTAssertEqual(parsed?.headerBytes, 1)
+    }
+
+    func testParseEBMLSizeEightByteDoesNotTrap() {
+        // 8-octet VINT: marker 0x01 in LSB, value bits in upper 7 of first byte + 7 more bytes.
+        let data = Data([0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0A])
+        let parsed = StreamTailPlanner.parseEBMLSize(data: data, offset: 0)
+        XCTAssertEqual(parsed?.headerBytes, 8)
+        XCTAssertEqual(parsed?.size, 10)
+    }
+
+    func testParseEBMLSizeUnknownOneByte() {
+        let data = Data([0xFF])
+        let parsed = StreamTailPlanner.parseEBMLSize(data: data, offset: 0)
+        XCTAssertEqual(parsed?.size, UInt64.max)
+        XCTAssertEqual(parsed?.headerBytes, 1)
+    }
+
+    func testSegmentBodyOffsetFromHead() {
+        var head = Data()
+        head.append(contentsOf: [0x18, 0x53, 0x80, 0x67]) // Segment
+        head.append(0x88) // VINT size 8
+        head.append(Data(repeating: 0, count: 8))
+        let offset = StreamTailPlanner.segmentBodyOffset(in: head, fileOffset: 1000)
+        XCTAssertEqual(offset, 1005)
+    }
+
+    func testAnalyzeMKVCuesExtractsClusterOffset() {
+        var tail = Data()
+        tail.append(contentsOf: [0x1C, 0x53, 0xBB, 0x6B]) // Cues
+        tail.append(0x85) // Cues body size 5
+        tail.append(0xBB) // CuePoint
+        tail.append(0x83) // CuePoint body size 3
+        tail.append(0xF1) // CueClusterPosition
+        tail.append(0x81) // value size 1
+        tail.append(0x2A) // cluster at relative offset 42
+        let analysis = StreamTailPlanner.analyzeMKVCues(in: tail, segmentBodyOffset: 5000)
+        XCTAssertEqual(analysis?.firstClusterOffsets.first, 42)
+        XCTAssertEqual(analysis?.segmentBodyOffset, 5000)
+    }
+
+    func testMinimumHeadBytesForMKV() {
+        XCTAssertEqual(StreamPlaybackThreshold.minimumHeadBytesForMKV, 3 * 1024 * 1024)
+    }
+
+    func testMKVSeekTableProbeCompleteWhenCuesFullyPresent() {
+        // Cues ID + 1-byte size (5) + 5 payload bytes
+        var data = Data([0x1C, 0x53, 0xBB, 0x6B, 0x85])
+        data.append(contentsOf: [0x01, 0x02, 0x03, 0x04, 0x05])
+        XCTAssertEqual(StreamTailPlanner.mkvSeekTableProbe(in: data), .complete)
+    }
+
+    func testMKVSeekTableProbeIncompleteWhenCuesTruncated() {
+        var data = Data([0x1C, 0x53, 0xBB, 0x6B, 0x85])
+        data.append(contentsOf: [0x01, 0x02])
+        XCTAssertEqual(StreamTailPlanner.mkvSeekTableProbe(in: data), .incomplete)
+    }
+
     func testMoovSubstringInsideMdatIsNotFastStart() {
         var data = Data()
-        data.append(contentsOf: [0, 0, 0, 32])
+        data.append(contentsOf: [0, 0, 0, 20])
         data.append(contentsOf: "ftyp".utf8)
         data.append(contentsOf: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
         data.append(contentsOf: [0, 0, 0, 48])
@@ -248,17 +324,19 @@ final class HTTPRangeServerTests: XCTestCase {
 
         let blockSize = 16_384
         let pattern = Data("MOVIEBOX-OPEN-RANGE".utf8)
-        for blockIndex in 0..<16 {
-            var block = Data()
-            while block.count < blockSize {
-                block.append(pattern)
+        for pieceIndex in 0..<8 {
+            for blockIndex in 0..<16 {
+                var block = Data()
+                while block.count < blockSize {
+                    block.append(pattern)
+                }
+                block = block.prefix(blockSize)
+                try await store.writeBlock(
+                    pieceIndex: pieceIndex,
+                    blockOffset: Int64(blockIndex * blockSize),
+                    data: block
+                )
             }
-            block = block.prefix(blockSize)
-            try await store.writeBlock(
-                pieceIndex: 0,
-                blockOffset: Int64(blockIndex * blockSize),
-                data: block
-            )
         }
 
         let server = HTTPRangeServer()

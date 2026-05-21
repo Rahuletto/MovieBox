@@ -39,14 +39,22 @@ final class MockStreamingOrchestrator: StreamingOrchestration, @unchecked Sendab
         return headBytes
     }
 
+    func verifiedMediaBytesFromStart() async -> Int64 {
+        guard verifiedPieces > 0 else { return 0 }
+        return headBytes
+    }
+
     func streamHeadContiguousBytes() async -> Int64 { headBytes }
     var needsTailProbe = false
     var tailPieceReady = true
+    var allPiecesVerified = false
     func streamTargetNeedsTailProbe() async -> Bool { needsTailProbe }
     func streamIndexProbeLabel() async -> String { "file index" }
     func streamTailPieceCount() async -> Int { needsTailProbe ? 3 : 1 }
     func streamTailPiecesVerified() async -> Int { tailPieceReady ? (needsTailProbe ? 3 : 1) : 0 }
+    func streamTailPiecesProgress() async -> Double { tailPieceReady ? 1.0 : 0.0 }
     func isStreamTailPieceReady() async -> Bool { tailPieceReady }
+    func allStreamPiecesVerified() async -> Bool { allPiecesVerified }
     func downloadSpeed() async -> Double { speed }
     func peerCount() async -> Int { peers }
     func transferringPeerCount() async -> Int { peers > 0 ? 1 : 0 }
@@ -193,11 +201,13 @@ final class StreamSessionIntegrationTests: XCTestCase {
         }
     }
 
-    func testBecomesReadyWithOneVerifiedPiece() async throws {
+    func testBecomesReadyWhenHeadTailAndPeersSatisfied() async throws {
         let mock = MockStreamingOrchestrator()
         mock.streamURL = URL(string: "http://127.0.0.1:8082/stream")!
         mock.verifiedPieces = 1
-        mock.headBytes = 1024
+        mock.headBytes = StreamPlaybackThreshold.minimumHeadBytes
+        mock.peers = 2
+        mock.needsTailProbe = false
 
         let session = StreamSession(orchestrator: mock)
         let torrent = makeTestTorrent(seeders: 5, quality: .p1080, codec: .h265, source: .bluray)
@@ -207,7 +217,25 @@ final class StreamSessionIntegrationTests: XCTestCase {
         if case .ready = session.state {
             // expected
         } else {
-            XCTFail("Expected ready with verified piece, got \(session.state)")
+            XCTFail("Expected ready when head threshold and live peers are met, got \(session.state)")
+        }
+    }
+
+    func testFullyCachedResumeBypassesPeerGate() async throws {
+        let mock = MockStreamingOrchestrator()
+        mock.streamURL = URL(string: "http://127.0.0.1:8084/stream")!
+        mock.headBytes = StreamPlaybackThreshold.minimumHeadBytes
+        mock.needsTailProbe = false
+        mock.allPiecesVerified = true
+        mock.peers = 0
+
+        let session = StreamSession(orchestrator: mock)
+        await session.start(torrent: makeTestTorrent())
+
+        if case .ready = session.state {
+            // expected — offline resume with entire file on disk
+        } else {
+            XCTFail("Expected ready for fully cached file without peers, got \(session.state)")
         }
     }
 }

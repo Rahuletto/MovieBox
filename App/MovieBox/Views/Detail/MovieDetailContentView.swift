@@ -28,6 +28,7 @@ struct MovieDetailContentView: View {
     let isPreparingStream: Bool
     let preparingVideoURL: URL?
     let playButtonTitle: String
+    let playButtonDisabled: Bool
     let onTVSeasonChange: (Int) -> Void
     let onEpisodeSelect: (TVEpisode) -> Void
     let onRetryTVSeasons: () -> Void
@@ -65,6 +66,7 @@ struct MovieDetailContentView: View {
                     techKinds: detailTechKinds(from: torrents),
                     accessibilityTags: accessibilityTags,
                     playButtonTitle: playButtonTitle,
+                    playButtonDisabled: playButtonDisabled,
                     addToMyList: onAddToList,
                     onRate: onRate,
                     onPlayNow: onPlayNow,

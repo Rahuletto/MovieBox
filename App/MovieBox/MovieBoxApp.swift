@@ -36,7 +36,7 @@ struct MovieBoxApp: App {
                 .environment(errorCenter)
                 .modelContainer(sharedModelContainer)
                 .onChange(of: playerState.isPresented) { _, presented in
-                    if !presented {
+                    if !presented, playerState.isStreamingTorrent {
                         Task { await appServices.cancelActiveStream() }
                     }
                 }

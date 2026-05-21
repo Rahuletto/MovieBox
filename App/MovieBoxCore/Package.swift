@@ -25,6 +25,11 @@ let package = Package(
                 "CoreStreaming",
             ]
         ),
+        .testTarget(
+            name: "MovieBoxCoreTests",
+            dependencies: ["MovieBoxCore"],
+            exclude: ["PERSISTENT_PLAYBACK_QA.md"]
+        ),
     ],
     swiftLanguageModes: [.v6]
 )

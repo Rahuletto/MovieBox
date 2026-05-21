@@ -161,6 +161,11 @@ public actor PieceStore {
 
     public func markPieceVerified(pieceIndex: Int) {
         guard pieceIndex >= 0, pieceIndex < pieceCount else { return }
+        // Flush BEFORE setting bitmap — any reader that checks hasPiece()
+        // after this call will find the data on disk, not in the cache.
+        // Without this flush, AVPlayer's range requests race the next cache
+        // flush boundary and pile up as 300s read-timeout waiters.
+        try? flushCache()
         bitmap[pieceIndex] = true
     }
 
@@ -198,6 +203,8 @@ public actor PieceStore {
         try flushCache()
 
         try await waitForReadable(offset: offset, length: clampedLength)
+
+        try flushCache()
 
         guard let readHandle else {
             throw PieceStoreError.ioError("Read handle unavailable")
@@ -252,12 +259,76 @@ public actor PieceStore {
         streamHeadContiguousEnd
     }
 
+    public func readableLength(offset: Int64, length: Int) -> Int {
+        readableSpan(offset: offset, length: length, preferSuffix: false)?.length ?? 0
+    }
+
+    public func readableSpan(
+        offset: Int64,
+        length: Int,
+        preferSuffix: Bool = false
+    ) -> (offset: Int64, length: Int)? {
+        let rangeEnd = min(offset + Int64(length), totalSize)
+        guard offset >= 0, offset < totalSize, rangeEnd > offset else { return nil }
+
+        if !preferSuffix {
+            let prefix = readablePrefixLength(offset: offset, rangeEnd: rangeEnd)
+            return prefix > 0 ? (offset, prefix) : nil
+        }
+
+        let firstPiece = Int(offset / pieceSize)
+        let lastPiece = Int((rangeEnd - 1) / pieceSize)
+        for pieceIndex in stride(from: lastPiece, through: firstPiece, by: -1) {
+            let pieceStart = Int64(pieceIndex) * pieceSize
+            let spanStart = max(offset, pieceStart)
+            let spanEnd = min(rangeEnd, pieceStart + pieceSize(for: pieceIndex))
+            let spanLen = Int(spanEnd - spanStart)
+            guard spanLen > 0 else { continue }
+            let available = readablePrefixLength(offset: spanStart, rangeEnd: spanEnd)
+            if available > 0 {
+                return (spanStart, available)
+            }
+        }
+        return nil
+    }
+
+    private func readablePrefixLength(offset: Int64, rangeEnd: Int64) -> Int {
+        var position = offset
+        while position < rangeEnd {
+            let pieceIndex = Int(position / pieceSize)
+            if hasPiece(pieceIndex) {
+                let pieceStart = Int64(pieceIndex) * pieceSize
+                let pieceEnd = min(rangeEnd, pieceStart + pieceSize(for: pieceIndex))
+                position = pieceEnd
+                continue
+            }
+
+            // Check if within the contiguous unverified stream head.
+            let mediaOffset = position - streamMediaByteOffset
+            if mediaOffset >= 0 && mediaOffset < streamHeadContiguousEnd {
+                let mediaEnd = min(rangeEnd - streamMediaByteOffset, streamHeadContiguousEnd)
+                position = mediaEnd + streamMediaByteOffset
+                continue
+            }
+
+            break
+        }
+        return Int(position - offset)
+    }
+
     public func cleanup() async {
         try? writeHandle?.close()
         try? readHandle?.close()
         writeHandle = nil
         readHandle = nil
         try? FileManager.default.removeItem(at: storageURL)
+    }
+
+    public func closeHandles() async {
+        try? writeHandle?.close()
+        try? readHandle?.close()
+        writeHandle = nil
+        readHandle = nil
     }
 
     deinit {
@@ -281,7 +352,7 @@ public actor PieceStore {
                     "[PieceStore] Waiting for readable bytes \(offset)-\(end) (head contiguous: \(streamHeadContiguousEnd))"
                 )
             }
-            if waitCount >= 300 {
+            if waitCount >= 3000 {
                 TorrentLog.error("[PieceStore] Read timeout waiting for range \(offset)-\(end)")
                 throw PieceStoreError.readTimeout(offset, length)
             }

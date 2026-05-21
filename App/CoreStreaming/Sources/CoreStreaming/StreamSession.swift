@@ -35,6 +35,8 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
     public private(set) var swarmSeeders: Int = 0
     public private(set) var swarmLeechers: Int = 0
     public private(set) var activeTorrent: TorrentResult?
+    /// Cached row/pill metrics — updated by the session monitor (avoid duplicate heavy polling).
+    @Published public private(set) var rowMetrics: StreamRowBufferingMetrics?
 
     private let orchestrator: O
     private var monitorTask: Task<Void, Never>?
@@ -45,6 +47,17 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
         self.orchestrator = orchestrator
     }
 
+    deinit {
+        let watchdog = bufferingWatchdogTask
+        let monitor = monitorTask
+        let orch = orchestrator
+        Task { @MainActor in
+            watchdog?.cancel()
+            monitor?.cancel()
+            await orch.stop()
+        }
+    }
+
     public func start(torrent: TorrentResult) async {
         bufferingWatchdogTask?.cancel()
         bufferingWatchdogTask = nil
@@ -53,6 +66,7 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
 
         state = .preparing
         streamURL = nil
+        rowMetrics = nil
         bufferedPieces = 0
         bufferedBytes = 0
         activeTorrent = torrent
@@ -100,9 +114,9 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
 
     private func refreshBufferMetrics() async {
         bufferedPieces = await orchestrator.contiguousPiecesFromStart()
-        let verifiedBytes = await orchestrator.contiguousBytesFromStreamStart()
-        let headBytes = await orchestrator.streamHeadContiguousBytes()
-        bufferedBytes = max(verifiedBytes, headBytes)
+        let verifiedBytes = await orchestrator.verifiedMediaBytesFromStart()
+        let inFlightBytes = await orchestrator.streamHeadContiguousBytes()
+        bufferedBytes = max(verifiedBytes, inFlightBytes)
     }
 
     private func tailBufferProgress() async -> (verified: Int, total: Int) {
@@ -128,11 +142,47 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
     private func startBufferingWatchdog() {
         bufferingWatchdogTask?.cancel()
         bufferingWatchdogTask = Task { @MainActor [weak self] in
+            guard let timeout = await self?.bufferingWatchdogSeconds() else { return }
+            
+            var lastProgressTime = Date.now
+            var lastVerifiedBytes: Int64 = 0
+            var lastInFlightBytes: Int64 = 0
+            var lastTailVerified = 0
+            
+            let checkInterval: UInt64 = 5
+            
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(checkInterval))
+                } catch {
+                    return
+                }
+                
+                guard let self else { return }
+                if case .ready = state { return }
+                
+                let currentVerifiedBytes = await orchestrator.verifiedMediaBytesFromStart()
+                let currentInFlightBytes = await orchestrator.streamHeadContiguousBytes()
+                let (currentTailVerified, _) = await tailBufferProgress()
+                
+                if currentVerifiedBytes > lastVerifiedBytes || currentInFlightBytes > lastInFlightBytes || currentTailVerified > lastTailVerified || downloadSpeed > 0 {
+                    lastProgressTime = Date.now
+                }
+                
+                lastVerifiedBytes = currentVerifiedBytes
+                lastInFlightBytes = currentInFlightBytes
+                lastTailVerified = currentTailVerified
+                
+                let elapsedStall = Date.now.timeIntervalSince(lastProgressTime)
+                if elapsedStall >= Double(timeout) {
+                    break
+                }
+            }
+            
             guard let self else { return }
-            let timeout = await self.bufferingWatchdogSeconds()
-            try? await Task.sleep(for: .seconds(timeout))
             guard !Task.isCancelled else { return }
             if case .ready = state { return }
+            
             switch state {
             case .preparing, .buffering:
                 let peersSnapshot = await orchestrator.peerCount()
@@ -141,7 +191,10 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
                 let inFlightKB = await orchestrator.streamHeadContiguousBytes() / 1024
                 let needsTail = await orchestrator.streamTargetNeedsTailProbe()
                 let hasTail = needsTail ? await orchestrator.isStreamTailPieceReady() : true
-                let minKB = StreamPlaybackThreshold.minimumHeadBytes / 1024
+                let indexLabel = await orchestrator.streamIndexProbeLabel()
+                let minKB = (indexLabel.contains("MKV")
+                    ? StreamPlaybackThreshold.minimumHeadBytesForMKV
+                    : StreamPlaybackThreshold.minimumHeadBytes) / 1024
                 let (tailVerified, tailTotal) = await tailBufferProgress()
                 await orchestrator.stop()
                 let message: String
@@ -186,6 +239,7 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
         bufferingWatchdogTask = nil
         state = .cancelled
         activeTorrent = nil
+        rowMetrics = nil
         monitorTask?.cancel()
         monitorTask = nil
         await orchestrator.stop()
@@ -203,20 +257,37 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
 
     private func startMonitoring() {
         monitorTask = Task { @MainActor [weak self] in
-            guard let self else { return }
             while !Task.isCancelled {
-                let progress = await orchestrator.progress()
-                let speed = await orchestrator.downloadSpeed()
-                let peers = await orchestrator.peerCount()
-                let transferring = await orchestrator.transferringPeerCount()
+                var shouldContinue = false
+                do {
+                    guard let strongSelf = self else { break }
+                    let progress = await strongSelf.orchestrator.progress()
+                    let speed = await strongSelf.orchestrator.downloadSpeed()
+                    let peers = await strongSelf.orchestrator.peerCount()
+                    let transferring = await strongSelf.orchestrator.transferringPeerCount()
 
-                downloadSpeed = speed
-                peerCount = peers
-                transferringPeerCount = transferring
-                await refreshBufferMetrics()
-                await updatePlaybackReadiness(progress: progress)
+                    strongSelf.downloadSpeed = speed
+                    strongSelf.peerCount = peers
+                    strongSelf.transferringPeerCount = transferring
+                    await strongSelf.refreshBufferMetrics()
+                    await strongSelf.updatePlaybackReadiness(progress: progress)
+                    await strongSelf.refreshRowMetrics()
+                    switch strongSelf.state {
+                    case .failed, .cancelled:
+                        break
+                    default:
+                        shouldContinue = true
+                    }
+                }
 
-                try? await Task.sleep(for: .milliseconds(300))
+                guard shouldContinue else { break }
+
+                do {
+                    try? await Task.yield()
+                    try await Task.sleep(for: .milliseconds(900))
+                } catch {
+                    break
+                }
             }
         }
     }
@@ -227,29 +298,68 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
             return
         }
 
-        let verifiedHeadBytes = await orchestrator.contiguousBytesFromStreamStart()
-        let unverifiedHeadBytes = await orchestrator.streamHeadContiguousBytes()
-        let headBytes = max(verifiedHeadBytes, unverifiedHeadBytes)
-        let hasEnoughHead = headBytes >= StreamPlaybackThreshold.minimumHeadBytes
+        // Terminal states: stop tail/index probing (avoids log spam after ready or failure).
+        switch state {
+        case .ready, .failed, .cancelled:
+            return
+        default:
+            break
+        }
+
+        let indexLabel = await orchestrator.streamIndexProbeLabel()
+        let isMKV = indexLabel.contains("MKV")
+        let headThreshold = isMKV
+            ? StreamPlaybackThreshold.minimumHeadBytesForMKV
+            : StreamPlaybackThreshold.minimumHeadBytes
+
+        let verifiedHeadBytes = await orchestrator.verifiedMediaBytesFromStart()
+        let inFlightHeadBytes = await orchestrator.streamHeadContiguousBytes()
+        // bufferedPieces >= 1 used to short-circuit this gate, but a cached bitmap
+        // would flip it true on resume before the tail / peer state was real, so
+        // AVPlayer launched against an unreachable stream and died. Require the
+        // actual verified-head threshold every time.
+        let hasEnoughHead = verifiedHeadBytes >= headThreshold
+            || inFlightHeadBytes >= headThreshold
         let needsTail = await orchestrator.streamTargetNeedsTailProbe()
         let hasTail = needsTail ? await orchestrator.isStreamTailPieceReady() : true
 
         if hasEnoughHead, hasTail {
-            if case .ready = state {} else {
-                let (tailVerified, tailTotal) = await tailBufferProgress()
-                TorrentLog.info(
-                    "[StreamSession] buffer ready — \(headBytes / 1024) KB head (need \(StreamPlaybackThreshold.minimumHeadBytes / 1024) KB), tail=\(tailVerified)/\(tailTotal) pieces, \(bufferedPieces) contiguous head piece(s), \(peerCount) live peers (\(transferringPeerCount) transferring)"
-                )
-                state = .ready(streamURL: url)
+            // Live peer gate: a resumed session with cached pieces but 0 peers will
+            // fail the moment AVPlayer requests a byte we don't have. Only bypass
+            // the gate if literally every piece in this file is already on disk.
+            let hasLivePeers = peerCount > 0 || transferringPeerCount > 0
+            let fullyCached = await orchestrator.allStreamPiecesVerified()
+            guard hasLivePeers || fullyCached else {
+                let tailFraction = await orchestrator.streamTailPiecesProgress()
+                let headProgress = min(1.0, Double(verifiedHeadBytes) / Double(headThreshold))
+                let tailProgress = min(1.0, tailFraction)
+                let overallProgress = (headProgress * 0.90) + (tailProgress * 0.10)
+                let hint = max(progress, overallProgress, 0.15)
+                if case .preparing = state {
+                    TorrentLog.info(
+                        "[StreamSession] buffering — head ready but no live peers yet (\(peerCount) live, \(transferringPeerCount) transferring) — holding ready"
+                    )
+                }
+                state = .buffering(progress: hint)
+                return
             }
+
+            let (tailVerified, tailTotal) = await tailBufferProgress()
+            TorrentLog.info(
+                "[StreamSession] buffer ready — \(verifiedHeadBytes / 1024) KB verified head (\(inFlightHeadBytes / 1024) KB in-flight, need \(headThreshold / 1024) KB), tail=\(tailVerified)/\(tailTotal) pieces, \(bufferedPieces) contiguous head piece(s), \(peerCount) live peers (\(transferringPeerCount) transferring), fullyCached=\(fullyCached)"
+            )
+            state = .ready(streamURL: url)
         } else {
-            // Drive progress from head accumulation (0→90%). Tail is no longer a hard gate —
+            // Drive progress from head accumulation (0→90%) + tail progress (0→10%).
             // AVPlayer fetches moov/index tail via range requests once pieces are downloaded.
-            let headProgress = min(1, Double(headBytes) / Double(StreamPlaybackThreshold.minimumHeadBytes))
-            let hint = max(progress, headProgress * 0.90, 0.02)
+            let tailFraction = await orchestrator.streamTailPiecesProgress()
+            let headProgress = min(1.0, Double(verifiedHeadBytes) / Double(headThreshold))
+            let tailProgress = min(1.0, tailFraction)
+            let overallProgress = (headProgress * 0.90) + (tailProgress * 0.10)
+            let hint = max(progress, overallProgress, 0.02)
             if case .preparing = state {
                 TorrentLog.info(
-                    "[StreamSession] buffering — \(headBytes / 1024)/\(StreamPlaybackThreshold.minimumHeadBytes / 1024) KB head, \(peerCount) live peers (\(transferringPeerCount) transferring, indexer: \(swarmSeeders) seeders), \(Int(downloadSpeed / 1024)) KB/s"
+                    "[StreamSession] buffering — \(verifiedHeadBytes / 1024)/\(headThreshold / 1024) KB verified head (\(inFlightHeadBytes / 1024) KB in-flight), \(peerCount) live peers (\(transferringPeerCount) transferring, indexer: \(swarmSeeders) seeders), \(Int(downloadSpeed / 1024)) KB/s"
                 )
             }
             state = .buffering(progress: hint)
@@ -258,7 +368,7 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
 
     /// Verified bytes from the stream file start (hash-checked). Safe to call from app modules.
     public func verifiedHeadBytes() async -> Int64 {
-        await orchestrator.contiguousBytesFromStreamStart()
+        await orchestrator.verifiedMediaBytesFromStart()
     }
 
     var activeStreamURL: URL? {
@@ -278,7 +388,16 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
         }
     }
 
+    private func refreshRowMetrics() async {
+        rowMetrics = await buildRowBufferingMetrics()
+    }
+
     public func rowBufferingMetrics() async -> StreamRowBufferingMetrics {
+        if let rowMetrics { return rowMetrics }
+        return await buildRowBufferingMetrics()
+    }
+
+    private func buildRowBufferingMetrics() async -> StreamRowBufferingMetrics {
         let progress: Double
         let isPreparing: Bool
         let isReady: Bool

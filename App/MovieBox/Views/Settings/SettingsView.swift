@@ -10,6 +10,7 @@ struct SettingsView: View {
     @Query private var settingsRows: [AppSettings]
     @State private var draft = SettingsDraft()
     @State private var isHydratingDraft = false
+    @State private var hasLoadedSettings = false
 
     var body: some View {
         TabView {
@@ -35,16 +36,22 @@ struct SettingsView: View {
         .scenePadding()
         .frame(width: 550)
         .onAppear { loadSettings() }
+        .onChange(of: settingsRows) { _, _ in loadSettings() }
         .onChange(of: draft) { _, _ in
             guard !isHydratingDraft else { return }
+            hasLoadedSettings = true
             save()
         }
     }
 
     private func loadSettings() {
-        isHydratingDraft = true
-        draft = SettingsDraft(settings: settingsRows.first)
-        isHydratingDraft = false
+        guard !hasLoadedSettings else { return }
+        if let settings = settingsRows.first {
+            isHydratingDraft = true
+            draft = SettingsDraft(settings: settings)
+            hasLoadedSettings = true
+            isHydratingDraft = false
+        }
     }
 
     private func save() {
@@ -55,7 +62,11 @@ struct SettingsView: View {
             draft.apply(to: newSettings)
             modelContext.insert(newSettings)
         }
-        try? modelContext.save()
+        do {
+            try modelContext.save()
+        } catch {
+            NSLog("MovieBox Settings: failed to save — \(error.localizedDescription)")
+        }
     }
 }
 
@@ -140,8 +151,11 @@ private struct MetadataSettingsSection: View {
 private struct TorrentSettingsSection: View {
     @Binding var draft: SettingsDraft
     @State private var catalog: [TorrentIndexerCatalogEntry] = []
+    @State private var defaultEnabledIndexerIDs: [String] = Array(TorrentIndexerPreferences.defaultIDs)
     @State private var catalogError: String?
     @State private var isLoadingCatalog = false
+
+    private var catalogIDs: Set<String> { Set(catalog.map(\.id)) }
 
     var body: some View {
         Form {
@@ -159,7 +173,12 @@ private struct TorrentSettingsSection: View {
                         .foregroundStyle(.secondary)
                 } else {
                     HStack {
-                        Button("Enable all") { draft.enabledTorrentIndexers = TorrentIndexerPreferences.serialize(TorrentIndexerPreferences.defaultIDs) }
+                        Button("Enable all") {
+                            draft.enabledTorrentIndexers = TorrentIndexerPreferences.serialize(
+                                Set(defaultEnabledIndexerIDs),
+                                order: catalog.map(\.id)
+                            )
+                        }
                         Button("Disable all") { draft.enabledTorrentIndexers = "" }
                     }
                     ForEach(catalog) { entry in
@@ -193,11 +212,15 @@ private struct TorrentSettingsSection: View {
 
     private func indexerBinding(_ id: String) -> Binding<Bool> {
         Binding(
-            get: { TorrentIndexerPreferences.parseCSV(draft.enabledTorrentIndexers).contains(id) },
+            get: {
+                TorrentIndexerPreferences
+                    .parseCSV(draft.enabledTorrentIndexers, knownIDs: catalogIDs)
+                    .contains(id)
+            },
             set: { enabled in
-                var set = TorrentIndexerPreferences.parseCSV(draft.enabledTorrentIndexers)
+                var set = TorrentIndexerPreferences.parseCSV(draft.enabledTorrentIndexers, knownIDs: catalogIDs)
                 if enabled { set.insert(id) } else { set.remove(id) }
-                draft.enabledTorrentIndexers = TorrentIndexerPreferences.serialize(set)
+                draft.enabledTorrentIndexers = TorrentIndexerPreferences.serialize(set, order: catalog.map(\.id))
                 draft.enableYTS = set.contains("yts")
             }
         )
@@ -214,10 +237,9 @@ private struct TorrentSettingsSection: View {
         defer { isLoadingCatalog = false }
         do {
             let client = BackendTorrentConfigClient(baseURL: url, appToken: draft.appToken)
-            catalog = try await client.fetchCatalog()
-            if draft.enabledTorrentIndexers.isEmpty {
-                draft.enabledTorrentIndexers = TorrentIndexerPreferences.serialize(TorrentIndexerPreferences.defaultIDs)
-            }
+            let config = try await client.fetchCatalog()
+            catalog = config.indexers
+            defaultEnabledIndexerIDs = config.defaultEnabledIndexerIDs
         } catch {
             catalog = fallbackCatalog
             catalogError = error.localizedDescription
@@ -428,13 +450,7 @@ private struct SettingsDraft: Equatable {
         preferredAudioLang = settings.preferredAudioLang
         preferredSubtitleLang = settings.preferredSubtitleLang
         enableYTS = settings.enableYTS
-        if settings.enabledTorrentIndexers.isEmpty {
-            var ids = TorrentIndexerPreferences.defaultIDs
-            if !settings.enableYTS { ids.remove("yts") }
-            enabledTorrentIndexers = TorrentIndexerPreferences.serialize(ids)
-        } else {
-            enabledTorrentIndexers = settings.enabledTorrentIndexers
-        }
+        enabledTorrentIndexers = settings.enabledTorrentIndexers
         enableSeeding = settings.enableSeeding
         maxActiveDownloads = settings.maxActiveDownloads
         maxActiveUploads = settings.maxActiveUploads

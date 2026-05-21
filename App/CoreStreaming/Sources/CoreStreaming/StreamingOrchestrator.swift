@@ -14,8 +14,22 @@ public final class StreamingOrchestrator: @unchecked Sendable {
     private var streamTarget: TorrentStreamTarget?
     private var peerId: String = ""
     private var dht: KademliaDHT?
+    private var fastStartWatcherTask: Task<Void, Never>?
 
     public init() {}
+
+    deinit {
+        let engine = torrentEngine
+        let server = rangeServer
+        let store = pieceStore
+        let dhtInstance = dht
+        Task { @MainActor in
+            engine?.stop()
+            await server.stop()
+            await store?.closeHandles()
+            dhtInstance?.stop()
+        }
+    }
 
     public func startStream(
         torrent: TorrentResult,
@@ -64,6 +78,25 @@ public final class StreamingOrchestrator: @unchecked Sendable {
             "[Streaming] Target file: \(target.file.relativePath) (\(target.byteLength) bytes, piece \(target.firstPieceIndex)+, tail pieces \(tailPieces.count))"
         )
 
+        let storageDir = FileManager.default.temporaryDirectory.appendingPathComponent("moviebox_streams")
+
+        // Clean up any other old cache files to maintain exactly 1 active/recent stream file
+        if let files = try? FileManager.default.contentsOfDirectory(at: storageDir, includingPropertiesForKeys: nil) {
+            for file in files {
+                let filename = file.lastPathComponent
+                if filename.hasPrefix("moviebox_") {
+                    if !filename.contains(metadata.infoHash) {
+                        try? FileManager.default.removeItem(at: file)
+                    }
+                }
+            }
+        }
+
+        // Load existing bitmap if any
+        let bitmapURL = storageDir.appendingPathComponent("moviebox_\(metadata.infoHash).bitmap")
+        let existingBitmap = try? Data(contentsOf: bitmapURL)
+        let recreateFile = existingBitmap == nil
+
         pieceStore = try await PieceStore(
             infoHash: metadata.infoHash,
             pieceCount: metadata.pieceCount,
@@ -71,8 +104,20 @@ public final class StreamingOrchestrator: @unchecked Sendable {
             totalSize: metadata.totalSize,
             streamFirstPiece: target.firstPieceIndex,
             streamMediaByteOffset: target.byteOffset,
-            storageDirectory: FileManager.default.temporaryDirectory.appendingPathComponent("moviebox_streams")
+            storageDirectory: storageDir,
+            existingBitmap: existingBitmap,
+            recreateFile: recreateFile
         )
+
+        var initialDownloaded = Set<UInt32>()
+        if let existingBitmap {
+            let bitmapBools = PieceStore.decodeBitmap(existingBitmap, pieceCount: metadata.pieceCount)
+            for (idx, isDownloaded) in bitmapBools.enumerated() {
+                if isDownloaded {
+                    initialDownloaded.insert(UInt32(idx))
+                }
+            }
+        }
 
         pieceManager = PieceManager(
             pieceCount: metadata.pieceCount,
@@ -84,6 +129,9 @@ public final class StreamingOrchestrator: @unchecked Sendable {
             streamMediaByteOffset: target.byteOffset,
             streamMediaByteLength: target.byteLength
         )
+        if !initialDownloaded.isEmpty {
+            await pieceManager!.setInitialDownloadedPieces(initialDownloaded)
+        }
 
         torrentEngine = TorrentEngine(
             metadata: metadata,
@@ -110,14 +158,32 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         TorrentLog.info(
             "[Streaming] HTTP range server — \(MovieBoxFileLogger.redactURL(url)) type=\(target.contentType) mediaBytes=\(target.byteLength)"
         )
+
+        // Spin up a watcher that synthesizes a virtual fast-start MP4 layout the
+        // moment the moov atom becomes parseable from contiguous verified tail
+        // pieces. This lets AVPlayer start playback after just the last 1–2
+        // pieces rather than the full 8–32 MB tail span.
+        startFastStartWatcher(target: target, metadata: metadata)
+
         return url
     }
 
     public func stop() async {
+        fastStartWatcherTask?.cancel()
+        fastStartWatcherTask = nil
         torrentEngine?.stop()
         torrentEngine = nil
         await rangeServer.stop()
-        await pieceStore?.cleanup()
+        
+        if let store = pieceStore, let metadata = metadata {
+            let bitmapData = await store.encodedBitmap()
+            let storageDir = FileManager.default.temporaryDirectory.appendingPathComponent("moviebox_streams")
+            let bitmapURL = storageDir.appendingPathComponent("moviebox_\(metadata.infoHash).bitmap")
+            try? FileManager.default.createDirectory(at: storageDir, withIntermediateDirectories: true)
+            try? bitmapData.write(to: bitmapURL)
+            await store.closeHandles()
+        }
+        
         pieceStore = nil
         pieceManager = nil
         metadata = nil
@@ -138,6 +204,10 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         await pieceStore?.contiguousBytesFromStreamStart() ?? 0
     }
 
+    public func verifiedMediaBytesFromStart() async -> Int64 {
+        await pieceStore?.verifiedMediaBytesFromStart() ?? 0
+    }
+
     public func streamHeadContiguousBytes() async -> Int64 {
         await pieceStore?.streamHeadContiguousBytes() ?? 0
     }
@@ -146,40 +216,373 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         guard let pieceStore, let target = streamTarget, let metadata else { return false }
         guard target.needsTailProbeForPlayback else { return true }
 
-        // Check for fast-start MP4 (moov before mdat) — can start immediately.
-        let headBytes = await pieceStore.streamHeadContiguousBytes()
-        if headBytes >= 64 * 1024 {
-            let readLength = min(Int(headBytes), 512 * 1024)
-            if let prefix = try? await pieceStore.read(
-                offset: target.byteOffset,
-                length: readLength
-            ), StreamTailPlanner.isFastStartMP4(in: prefix) {
-                TorrentLog.info("[Streaming] Fast-start MP4 detected — moov before mdat in head")
+        // If the fast-start watcher has already patched the HTTP server with a
+        // synthesized moov layout, playback is ready — AVPlayer reads moov from
+        // memory and streams mdat progressively.
+        let headThreshold = minimumHeadBytes(for: target)
+
+        if rangeServer.remuxedLayout != nil {
+            let verifiedHead = await pieceStore.verifiedMediaBytesFromStart()
+            if verifiedHead >= headThreshold {
                 return true
             }
         }
 
-        // For all other containers (non-fast-start MP4, MKV, WebM, etc.) AVPlayer
-        // cannot parse the asset until it can read the trailing index (moov/cues).
-        // The very first thing AVPlayer does after `replaceCurrentItem` is issue a
-        // suffix range request (e.g. `bytes=-N`); if those bytes aren't on disk the
-        // local HTTP server has to block while peers deliver them, and AVPlayer's
-        // internal asset-loader timeout fires after ~15–20 s with NSURLErrorTimedOut
-        // (-1001).
-        //
-        // We only require the *last* piece of the file (the one that satisfies a
-        // suffix range immediately). Any additional tail bytes AVPlayer needs to
-        // walk the moov/cues are still requested in priority order by the bootstrap
-        // priority in PieceManager and will be served by HTTPRangeServer as soon as
-        // those pieces arrive — but AVPlayer can now begin parsing right away.
-        let lastPiece = min(target.lastPieceIndex, metadata.pieceCount - 1)
-        guard await pieceStore.hasPiece(lastPiece) else {
-            return false
+        let verifiedHead = await pieceStore.verifiedMediaBytesFromStart()
+        guard verifiedHead >= headThreshold else { return false }
+
+        // Fast-start MP4 (moov before mdat) — verified head is enough.
+        let readLength = min(Int(verifiedHead), 512 * 1024)
+        if readLength >= 64 * 1024,
+           let prefix = try? await pieceStore.read(
+               offset: target.byteOffset,
+               length: readLength
+           ),
+           StreamTailPlanner.isFastStartMP4(in: prefix) {
+            TorrentLog.info("[Streaming] Fast-start MP4 detected — moov before mdat in head")
+            return true
         }
 
-        let verifiedHead = await pieceStore.verifiedMediaBytesFromStart()
-        let effectiveHead = max(verifiedHead, headBytes)
-        return effectiveHead >= 64 * 1024
+        let lastPiece = min(target.lastPieceIndex, metadata.pieceCount - 1)
+        guard await pieceStore.hasPiece(lastPiece) else { return false }
+
+        // MP4/MOV with trailing moov: require a complete moov in the verified tail window.
+        if target.needsMP4MoovTailProbe {
+            if let (tailData, _) = await readVerifiedTailWindow(
+                pieceStore: pieceStore,
+                target: target,
+                metadata: metadata
+            ) {
+                switch StreamTailPlanner.moovTailProbe(in: tailData, endsAtFileEOF: true) {
+                case .complete:
+                    TorrentLog.info("[Streaming] MP4 moov index verified in tail (\(tailData.count) bytes)")
+                    return true
+                case .incomplete:
+                    TorrentLog.debug("[Streaming] MP4 moov in tail is still incomplete")
+                    return false
+                case .notFound:
+                    break
+                }
+            } else {
+                return false
+            }
+        }
+
+        // MKV/WebM: require the actual EBML Cues element to be on disk, not a fraction
+        // of the tail span. Cues live at the very end of the file and a 33%-of-tail
+        // heuristic frequently misses them, causing AVPlayer to open the URL and die.
+        let ext = (target.file.relativePath as NSString).pathExtension.lowercased()
+        let isMKVLike = ext == "mkv" || ext == "webm" || target.contentType.contains("matroska")
+        if isMKVLike {
+            let headRead = min(Int(verifiedHead), 256 * 1024)
+            guard headRead >= 4096,
+                  let headData = try? await pieceStore.read(offset: target.byteOffset, length: headRead),
+                  let segmentBodyOffset = StreamTailPlanner.segmentBodyOffset(
+                      in: headData,
+                      fileOffset: target.byteOffset
+                  ) else {
+                TorrentLog.debug("[Streaming] MKV Segment not in verified head yet")
+                return false
+            }
+
+            guard let (tailData, _) = await readVerifiedTailWindow(
+                pieceStore: pieceStore,
+                target: target,
+                metadata: metadata
+            ) else {
+                return false
+            }
+
+            switch StreamTailPlanner.mkvSeekTableProbe(in: tailData) {
+            case .notFound, .incomplete:
+                TorrentLog.debug("[Streaming] MKV Cues not complete in tail window (\(tailData.count) bytes)")
+                return false
+            case .complete:
+                break
+            }
+
+            guard let analysis = StreamTailPlanner.analyzeMKVCues(
+                in: tailData,
+                segmentBodyOffset: segmentBodyOffset
+            ) else {
+                TorrentLog.debug("[Streaming] MKV Cues present but cluster entries not parseable yet")
+                return false
+            }
+
+            if let firstClusterRel = analysis.firstClusterOffsets.first {
+                let firstClusterAbs = analysis.segmentBodyOffset + firstClusterRel
+                let headWindowEnd = target.byteOffset + metadata.pieceLength * 4
+                let clusterPiece = Int(firstClusterAbs / metadata.pieceLength)
+                let isInHead = firstClusterAbs < headWindowEnd
+                let isDownloaded = await pieceStore.hasPiece(clusterPiece)
+
+                guard isInHead || isDownloaded else {
+                    TorrentLog.debug(
+                        "[Streaming] MKV first cluster at piece \(clusterPiece) (offset \(firstClusterAbs)) not downloaded yet"
+                    )
+                    return false
+                }
+            }
+
+            TorrentLog.info(
+                "[Streaming] MKV Cues + first cluster verified — ready (\(tailData.count) bytes tail, segment @ \(segmentBodyOffset))"
+            )
+            return true
+        }
+
+        // Generic moov-not-found fallback (other container types): require the last
+        // N contiguous tail pieces from the end of the file, not a fractional threshold.
+        // Cues / indexes live at the very end, so verifying the actual end is what matters.
+        let tailIndices = StreamTailPlanner.tailPieceIndices(
+            target: target,
+            pieceLength: metadata.pieceLength,
+            pieceCount: metadata.pieceCount
+        )
+        guard !tailIndices.isEmpty else { return true }
+
+        let requiredContiguousFromEnd = min(tailIndices.count, 4)
+        let sortedTail = tailIndices.sorted()
+        var contiguousFromEnd = 0
+        for index in sortedTail.reversed() {
+            guard await pieceStore.hasPiece(index) else { break }
+            contiguousFromEnd += 1
+            if contiguousFromEnd >= requiredContiguousFromEnd { break }
+        }
+        return contiguousFromEnd >= requiredContiguousFromEnd
+    }
+
+    /// True only when every piece spanning the stream target file is verified on disk —
+    /// used to detect a fully offline-resumable session that doesn't need network peers.
+    public func allStreamPiecesVerified() async -> Bool {
+        guard let pieceStore, let target = streamTarget, let metadata else { return false }
+        let first = target.firstPieceIndex
+        let last = min(target.lastPieceIndex, metadata.pieceCount - 1)
+        guard first <= last else { return false }
+        for index in first...last {
+            if await !pieceStore.hasPiece(index) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func minimumHeadBytes(for target: TorrentStreamTarget) -> Int64 {
+        let ext = (target.file.relativePath as NSString).pathExtension.lowercased()
+        if ext == "mkv" || ext == "webm" || target.contentType.contains("matroska") {
+            return StreamPlaybackThreshold.minimumHeadBytesForMKV
+        }
+        return StreamPlaybackThreshold.minimumHeadBytes
+    }
+
+    private func readVerifiedTailWindow(
+        pieceStore: PieceStore,
+        target: TorrentStreamTarget,
+        metadata: TorrentMetadata
+    ) async -> (data: Data, fileOffset: Int64)? {
+        let tailSpan = StreamTailPlanner.tailByteSpan(
+            byteLength: target.byteLength,
+            pieceLength: metadata.pieceLength
+        )
+        let fileEnd = target.byteOffset + target.byteLength
+        let tailStart = max(target.byteOffset, fileEnd - tailSpan)
+
+        let lastPiece = min(target.lastPieceIndex, metadata.pieceCount - 1)
+        guard await pieceStore.hasPiece(lastPiece) else { return nil }
+
+        // Find the contiguous verified pieces starting from lastPiece going backwards
+        var firstContiguousPiece = lastPiece
+        while firstContiguousPiece > target.firstPieceIndex {
+            let prevPiece = firstContiguousPiece - 1
+            let prevPieceStart = Int64(prevPiece) * metadata.pieceLength
+            if prevPieceStart < tailStart {
+                break
+            }
+            if await pieceStore.hasPiece(prevPiece) {
+                firstContiguousPiece = prevPiece
+            } else {
+                break
+            }
+        }
+
+        let startOffset = max(target.byteOffset, Int64(firstContiguousPiece) * metadata.pieceLength)
+        let length = Int(fileEnd - startOffset)
+        guard length >= 16 else { return nil }
+
+        guard let data = try? await pieceStore.read(offset: startOffset, length: length) else { return nil }
+        return (data, startOffset)
+    }
+
+    // MARK: - Fast-start remux watcher
+
+    private func startFastStartWatcher(target: TorrentStreamTarget, metadata: TorrentMetadata) {
+        fastStartWatcherTask?.cancel()
+        // MKV / WebM and fast-start MP4 don't benefit from moov-remux — leave them alone.
+        guard target.needsMP4MoovTailProbe else { return }
+        guard let store = pieceStore else { return }
+
+        fastStartWatcherTask = Task { [weak self] in
+            // Poll for moov readiness from contiguous verified tail pieces.
+            // The PiecePrioritizer already prefers tail pieces first, so this
+            // typically resolves within a handful of pieces — not the entire
+            // 8–32 MB tail span.
+            while !Task.isCancelled {
+                guard let self else { return }
+                if await self.rangeServerHasRemux() { return }
+                if let layout = await self.attemptFastStartRemux(
+                    pieceStore: store,
+                    target: target,
+                    metadata: metadata
+                ) {
+                    await self.installRemuxLayout(layout)
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+        }
+    }
+
+    private func rangeServerHasRemux() async -> Bool {
+        rangeServer.remuxedLayout != nil
+    }
+
+    private func installRemuxLayout(_ layout: MP4FastStartRemuxer.RemuxedLayout) async {
+        rangeServer.setRemuxedLayout(layout)
+        TorrentLog.info(
+            "[Streaming] Fast-start remux ready — virtual header \(layout.syntheticHeader.count)B virtualLength=\(layout.virtualFileLength)"
+        )
+    }
+
+    private func attemptFastStartRemux(
+        pieceStore: PieceStore,
+        target: TorrentStreamTarget,
+        metadata: TorrentMetadata
+    ) async -> MP4FastStartRemuxer.RemuxedLayout? {
+        // Need the last piece (which contains the moov's end in non-faststart MP4s).
+        let lastPiece = min(target.lastPieceIndex, metadata.pieceCount - 1)
+        guard await pieceStore.hasPiece(lastPiece) else { return nil }
+
+        guard let (tailData, _) = await readVerifiedTailWindow(
+            pieceStore: pieceStore,
+            target: target,
+            metadata: metadata
+        ) else { return nil }
+
+        // Probe gives us a complete moov only if the full box fits in the verified tail.
+        guard StreamTailPlanner.moovTailProbe(in: tailData, endsAtFileEOF: true) == .complete else {
+            return nil
+        }
+
+        guard let moovRange = findMoovRange(in: tailData) else { return nil }
+        let moovData = Data(tailData[moovRange])
+
+        // Read ftyp from the file head (first 64 bytes is plenty; ftyp is usually 24–32 bytes).
+        var ftyp: Data?
+        if let headData = try? await pieceStore.read(offset: target.byteOffset, length: 64) {
+            ftyp = extractFtypBox(from: headData)
+        }
+
+        // The tail data ends at file EOF and starts at some torrent offset; compute
+        // where the moov box sits *within the original media file* (not torrent).
+        let tailEndInMediaFile = target.byteLength
+        let moovOffsetInMediaFile = tailEndInMediaFile - Int64(tailData.count) + Int64(moovRange.lowerBound - tailData.startIndex)
+
+        // In a non-fast-start MP4, layout is: [ftyp][mdat-box][...][moov].
+        // mdat box header begins right after ftyp.
+        let ftypLen = Int64(ftyp?.count ?? 0)
+        let mdatBoxOffsetInMediaFile = ftypLen
+
+        // The mdat box header is 8 (or 16) bytes; we need mdat content length.
+        // Read the mdat box header to determine its actual size.
+        var mdatContentLength: Int64 = 0
+        if let mdatHeader = try? await pieceStore.read(offset: target.byteOffset + mdatBoxOffsetInMediaFile, length: 16) {
+            mdatContentLength = parseMdatContentLength(from: mdatHeader, mdatBoxOffsetInMediaFile: mdatBoxOffsetInMediaFile, moovOffsetInMediaFile: moovOffsetInMediaFile)
+        }
+        if mdatContentLength <= 0 {
+            // Fall back: assume one contiguous mdat from after ftyp up to the moov box.
+            mdatContentLength = moovOffsetInMediaFile - (mdatBoxOffsetInMediaFile + 8)
+        }
+        guard mdatContentLength > 0 else { return nil }
+
+        return MP4FastStartRemuxer.buildLayout(
+            moovData: moovData,
+            ftypData: ftyp,
+            originalFileLength: target.byteLength,
+            originalMoovOffset: moovOffsetInMediaFile,
+            mdatOffset: mdatBoxOffsetInMediaFile,
+            mdatLength: mdatContentLength
+        )
+    }
+
+    private func parseMdatContentLength(
+        from headerBytes: Data,
+        mdatBoxOffsetInMediaFile: Int64,
+        moovOffsetInMediaFile: Int64
+    ) -> Int64 {
+        guard headerBytes.count >= 8 else { return 0 }
+        let typeBytes = headerBytes[(headerBytes.startIndex + 4)..<(headerBytes.startIndex + 8)]
+        let type = String(data: Data(typeBytes), encoding: .ascii) ?? ""
+        guard type == "mdat" else { return 0 }
+
+        let size32 = headerBytes.withUnsafeBytes { ptr -> UInt32 in
+            UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: 0, as: UInt32.self))
+        }
+        if size32 == 0 {
+            // Box extends to EOF (rare in non-fast-start MP4). Assume mdat ends right before moov.
+            return moovOffsetInMediaFile - (mdatBoxOffsetInMediaFile + 8)
+        }
+        if size32 == 1, headerBytes.count >= 16 {
+            let large = headerBytes.withUnsafeBytes { ptr -> UInt64 in
+                UInt64(bigEndian: ptr.loadUnaligned(fromByteOffset: 8, as: UInt64.self))
+            }
+            return Int64(large) - 16
+        }
+        return Int64(size32) - 8
+    }
+
+    /// Locate the moov box (size+type header) within a tail buffer.
+    private func findMoovRange(in data: Data) -> Range<Data.Index>? {
+        guard data.count >= 8 else { return nil }
+        var i = data.startIndex
+        let end = data.endIndex
+        while i + 8 <= end {
+            let typeStart = i + 4
+            if data[typeStart] == 0x6D /* m */,
+               data[typeStart + 1] == 0x6F /* o */,
+               data[typeStart + 2] == 0x6F /* o */,
+               data[typeStart + 3] == 0x76 /* v */ {
+                let size32 = data.withUnsafeBytes { ptr -> UInt32 in
+                    UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: i - data.startIndex, as: UInt32.self))
+                }
+                var size = Int(size32)
+                var headerLen = 8
+                if size32 == 1, i + 16 <= end {
+                    let large = data.withUnsafeBytes { ptr -> UInt64 in
+                        UInt64(bigEndian: ptr.loadUnaligned(fromByteOffset: i + 8 - data.startIndex, as: UInt64.self))
+                    }
+                    size = Int(large)
+                    headerLen = 16
+                }
+                if size >= headerLen, i + size <= end {
+                    return i..<(i + size)
+                }
+            }
+            i += 1
+        }
+        return nil
+    }
+
+    /// Pull the ftyp box out of the file head (typically the first 8–32 bytes).
+    private func extractFtypBox(from data: Data) -> Data? {
+        guard data.count >= 8 else { return nil }
+        let typeBytes = data[(data.startIndex + 4)..<(data.startIndex + 8)]
+        let type = String(data: Data(typeBytes), encoding: .ascii) ?? ""
+        guard type == "ftyp" else { return nil }
+        let size = data.withUnsafeBytes { ptr -> UInt32 in
+            UInt32(bigEndian: ptr.loadUnaligned(fromByteOffset: 0, as: UInt32.self))
+        }
+        let sizeInt = Int(size)
+        guard sizeInt >= 8, sizeInt <= data.count else { return nil }
+        return Data(data[data.startIndex..<(data.startIndex + sizeInt)])
     }
 
     public func streamTailPieceCount() async -> Int {
@@ -213,16 +616,41 @@ public final class StreamingOrchestrator: @unchecked Sendable {
             count += 1
         }
         return count
-    }
+     }
 
-    public func streamTargetNeedsTailProbe() async -> Bool {
+     public func streamTailPiecesProgress() async -> Double {
+         guard let pieceManager, let target = streamTarget, let metadata else { return 0 }
+         let span = StreamTailPlanner.tailByteSpan(
+             byteLength: target.byteLength,
+             pieceLength: metadata.pieceLength
+         )
+         let indices = StreamTailPlanner.tailPieceIndices(
+             target: target,
+             pieceLength: metadata.pieceLength,
+             pieceCount: metadata.pieceCount,
+             tailByteSpan: span
+         )
+         guard !indices.isEmpty else { return 1.0 }
+         
+         var totalProgress: Double = 0.0
+         for index in indices {
+             let p = await pieceManager.pieceProgress(pieceIndex: UInt32(index))
+             totalProgress += p
+         }
+         return totalProgress / Double(indices.count)
+     }
+
+     public func streamTargetNeedsTailProbe() async -> Bool {
         streamTarget?.needsTailProbeForPlayback ?? false
     }
 
     public func streamIndexProbeLabel() async -> String {
         guard let target = streamTarget else { return "file index" }
         if target.needsMP4MoovTailProbe { return "MP4 index (moov)" }
-        if target.contentType.contains("matroska") { return "MKV index (cues)" }
+        let ext = (target.file.relativePath as NSString).pathExtension.lowercased()
+        if ext == "mkv" || ext == "webm" || target.contentType.contains("matroska") {
+            return "MKV index (cues)"
+        }
         return "file index"
     }
 
@@ -475,11 +903,13 @@ public final class TorrentEngine {
     private var udpTrackerClient = UDPTrackerClient()
     private var dht: KademliaDHT?
     private var peerConnections: [PeerConnection] = []
+    private var peerConnectionTasks: [ObjectIdentifier: Task<Void, Never>] = [:]
     private var connectedPeerKeys = Set<String>()
     private var isRunning = false
     private var announceTimer: Task<Void, Never>?
     private var statsTimer: Task<Void, Never>?
     private var maintenanceTimer: Task<Void, Never>?
+    private var bootstrapTask: Task<Void, Never>?
 
     private var bytesDownloaded: Int64 = 0
     private var recentBytesSamples: [(date: Date, bytes: Int64)] = []
@@ -512,24 +942,36 @@ public final class TorrentEngine {
         startAnnounceTimer()
         startMaintenanceTimer()
 
-        statsTimer = Task {
-            while !Task.isCancelled && isRunning {
+        statsTimer = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                guard isRunning else { return }
                 await updateStats()
-                try? await Task.sleep(for: .seconds(1))
+                do {
+                    try await Task.sleep(for: .seconds(1))
+                } catch {
+                    break
+                }
             }
         }
 
-        Task { await bootstrapPeers() }
+        bootstrapTask = Task { [weak self] in
+            await self?.bootstrapPeers()
+        }
         await updateStats()
     }
 
     private func bootstrapPeers() async {
         await ensureDHTRunning()
+        guard !Task.isCancelled else { return }
         let trackerPeers = await fetchPeersFromTrackers(event: .started)
+        guard !Task.isCancelled else { return }
         await connectToPeers(trackerPeers)
+        guard !Task.isCancelled else { return }
 
         if livePeerCount() < 5 {
             let dhtPeers = await dht?.findPeers(infoHash: metadata.infoHash) ?? []
+            guard !Task.isCancelled else { return }
             await connectToPeers(dhtPeers)
         }
     }
@@ -571,9 +1013,15 @@ public final class TorrentEngine {
         announceTimer?.cancel()
         statsTimer?.cancel()
         maintenanceTimer?.cancel()
+        bootstrapTask?.cancel()
+        bootstrapTask = nil
         dht?.stop()
         dht = nil
 
+        for (_, task) in peerConnectionTasks {
+            task.cancel()
+        }
+        peerConnectionTasks.removeAll()
         for peer in peerConnections {
             peer.disconnect()
         }
@@ -701,26 +1149,38 @@ public final class TorrentEngine {
     }
 
     private func startAnnounceTimer() {
-        announceTimer = Task {
-            while !Task.isCancelled && isRunning {
-                try? await Task.sleep(for: .seconds(60))
+        announceTimer = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(60))
+                } catch {
+                    break
+                }
+                guard let self else { return }
                 guard isRunning else { return }
                 let peers = await fetchPeersFromTrackers(event: .empty)
+                guard !Task.isCancelled else { return }
                 await connectToPeers(peers)
             }
         }
     }
 
     private func startMaintenanceTimer() {
-        maintenanceTimer = Task {
-            while !Task.isCancelled && isRunning {
-                try? await Task.sleep(for: .seconds(10))
+        maintenanceTimer = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(10))
+                } catch {
+                    break
+                }
+                guard let self else { return }
                 guard isRunning else { return }
                 pruneDeadPeers()
                 await expireStalledRequests()
 
                 if livePeerCount() < 8 {
                     let peers = await fetchPeersFromTrackers(event: .empty)
+                    guard !Task.isCancelled else { return }
                     await connectToPeers(peers)
                 }
             }
@@ -742,7 +1202,7 @@ public final class TorrentEngine {
             peerConnections.append(connection)
             connected += 1
 
-            Task {
+            let task = Task {
                 await connection.connect(
                     infoHash: metadata.infoHash,
                     pieceManager: pieceManager,
@@ -754,6 +1214,7 @@ public final class TorrentEngine {
                     }
                 )
             }
+            peerConnectionTasks[ObjectIdentifier(connection)] = task
         }
 
         if connected > 0 {
@@ -771,27 +1232,35 @@ public final class TorrentEngine {
         let before = peerConnections.count
         let currentCount = before
         peerConnections.removeAll { peer in
+            let shouldRemove: Bool
             switch peer.state {
             case .disconnected, .error:
                 connectedPeerKeys.remove(peerKey(peer.peerInfo))
-                return true
+                shouldRemove = true
             case .connecting, .handshaking:
                 if peer.handshakeAge > 25 {
                     connectedPeerKeys.remove(peerKey(peer.peerInfo))
                     peer.disconnect()
-                    return true
+                    shouldRemove = true
+                } else {
+                    shouldRemove = false
                 }
-                return false
             case .connected, .choked:
                 if currentCount >= maxPeerConnections - 8, peer.handshakeAge > 60, peer.piecesReceived == 0 {
                     connectedPeerKeys.remove(peerKey(peer.peerInfo))
                     peer.disconnect()
-                    return true
+                    shouldRemove = true
+                } else {
+                    shouldRemove = false
                 }
-                return false
             default:
-                return false
+                shouldRemove = false
             }
+            if shouldRemove {
+                peerConnectionTasks[ObjectIdentifier(peer)]?.cancel()
+                peerConnectionTasks.removeValue(forKey: ObjectIdentifier(peer))
+            }
+            return shouldRemove
         }
         if peerConnections.count != before {
             TorrentLog.debug("[TorrentEngine] Pruned \(before - peerConnections.count) dead peers")
@@ -814,8 +1283,6 @@ public final class TorrentEngine {
         )
 
         bytesDownloaded += Int64(block.count)
-        recordBytesSample()
-        await publishProgress()
     }
 
     private func updateStats() async {
@@ -882,5 +1349,28 @@ public final class TorrentEngine {
         }
 
         return rows
+    }
+
+    deinit {
+        let aTimer = announceTimer
+        let sTimer = statsTimer
+        let mTimer = maintenanceTimer
+        let bTask = bootstrapTask
+        let dhtInstance = dht
+        let conns = peerConnections
+        let tasks = peerConnectionTasks
+        Task { @MainActor in
+            aTimer?.cancel()
+            sTimer?.cancel()
+            mTimer?.cancel()
+            bTask?.cancel()
+            dhtInstance?.stop()
+            for (_, task) in tasks {
+                task.cancel()
+            }
+            for peer in conns {
+                peer.disconnect()
+            }
+        }
     }
 }

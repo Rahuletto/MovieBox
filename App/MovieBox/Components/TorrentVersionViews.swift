@@ -41,7 +41,8 @@ struct TorrentCardModel: Identifiable, Hashable {
 
 enum TorrentVersionListMode: Equatable {
     case detail(
-        busyTorrentID: UUID?,
+        streamBusyTorrentID: UUID?,
+        downloadBusyTorrentID: UUID?,
         bufferingByID: [UUID: TorrentRowBufferingSnapshot],
         cardErrors: [UUID: String],
         onStream: (UUID) -> Void,
@@ -56,8 +57,8 @@ enum TorrentVersionListMode: Equatable {
 
     static func == (lhs: TorrentVersionListMode, rhs: TorrentVersionListMode) -> Bool {
         switch (lhs, rhs) {
-        case let (.detail(lBusy, lBuf, lErr, _, _, _), .detail(rBusy, rBuf, rErr, _, _, _)):
-            lBusy == rBusy && lBuf == rBuf && lErr == rErr
+        case let (.detail(lStream, lDown, lBuf, lErr, _, _, _), .detail(rStream, rDown, rBuf, rErr, _, _, _)):
+            lStream == rStream && lDown == rDown && lBuf == rBuf && lErr == rErr
         case let (.player(lSel, lSw, _), .player(rSel, rSw, _)):
             lSel == rSel && lSw == rSw
         default:
@@ -144,9 +145,9 @@ struct TorrentVersionRow: View, Equatable {
 
     private var modeKey: String {
         switch mode {
-        case .detail(let busy, let buffering, let errors, _, _, _):
+        case .detail(let streamBusy, let downloadBusy, let buffering, let errors, _, _, _):
             let buf = buffering[model.id].map { "\($0.progress)-\($0.phase)" } ?? ""
-            return "detail-\(busy?.uuidString ?? "")-\(buf)-\(errors[model.id] ?? "")"
+            return "detail-\(streamBusy?.uuidString ?? "")-\(downloadBusy?.uuidString ?? "")-\(buf)-\(errors[model.id] ?? "")"
         case .player(let selected, let switching, _):
             return "player-\(selected?.uuidString ?? "")-\(switching)"
         }
@@ -157,9 +158,10 @@ struct TorrentVersionRow: View, Equatable {
             switch mode {
             case .player(let selectedID, let isSwitching, let onSelect):
                 playerRow(selectedID: selectedID, isSwitching: isSwitching, onSelect: onSelect)
-            case .detail(let busyID, let buffering, let errors, let onStream, let onDownload, let onCopyError):
+            case .detail(let streamBusyID, let downloadBusyID, let buffering, let errors, let onStream, let onDownload, let onCopyError):
                 detailRow(
-                    busyID: busyID,
+                    streamBusyID: streamBusyID,
+                    downloadBusyID: downloadBusyID,
                     buffering: buffering[model.id],
                     errorMessage: errors[model.id],
                     onStream: { onStream(model.id) },
@@ -195,16 +197,19 @@ struct TorrentVersionRow: View, Equatable {
     }
 
     private func detailRow(
-        busyID: UUID?,
+        streamBusyID: UUID?,
+        downloadBusyID: UUID?,
         buffering: TorrentRowBufferingSnapshot?,
         errorMessage: String?,
         onStream: @escaping () -> Void,
         onDownload: @escaping () -> Void,
         onCopyError: @escaping () -> Void
     ) -> some View {
-        let isBusy = busyID == model.id
+        let isStreamBusy = streamBusyID == model.id
+        let isDownloadBusy = downloadBusyID == model.id
+        let isBusy = isStreamBusy || isDownloadBusy
         return rowContent(
-            buffering: isBusy ? buffering : nil,
+            buffering: isStreamBusy ? buffering : nil,
             trailing: {
                 HStack(spacing: 4) {
                     Button(action: onStream) {

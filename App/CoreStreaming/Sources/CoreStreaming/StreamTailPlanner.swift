@@ -58,41 +58,235 @@ public enum StreamTailPlanner {
 
     /// Whether a verified tail buffer contains a full `moov` box (not a truncated index).
     public static func moovTailProbe(in tailData: Data, endsAtFileEOF: Bool) -> MoovTailProbeResult {
-        guard tailData.count >= 16 else { return .notFound }
+        guard tailData.count >= 8 else { return .notFound }
 
         var sawIncomplete = false
         var i = 0
         while i + 8 <= tailData.count {
-            guard let box = readBox(at: i, in: tailData) else {
+            guard let header = mp4BoxHeader(at: i, in: tailData, endsAtFileEOF: endsAtFileEOF) else {
                 i += 1
                 continue
             }
-            if box.type == "moov" {
-                if box.end <= tailData.count {
-                    if endsAtFileEOF, box.end == tailData.count {
-                        return .complete
-                    }
+            let type = header.type
+            let boxEnd = header.endOffset
+
+            if type == "moov" {
+                if boxEnd <= tailData.count {
                     return .complete
                 }
                 sawIncomplete = true
             }
-            i = box.end
+
+            if let next = header.nextOffset(in: tailData.count) {
+                i = next
+            } else {
+                i += 1
+            }
         }
 
-        for offset in 0..<(tailData.count - 8) {
-            guard tailData[offset + 4..<offset + 8] == Data("moov".utf8) else { continue }
-            guard let box = readBox(at: offset, in: tailData) else { continue }
-            guard box.type == "moov" else { continue }
-            if box.end <= tailData.count {
-                if endsAtFileEOF, box.end == tailData.count {
-                    return .complete
+        if !sawIncomplete {
+            for offset in 0..<(tailData.count - 8) {
+                guard tailData[offset + 4..<offset + 8] == Data("moov".utf8) else { continue }
+                guard let header = mp4BoxHeader(at: offset, in: tailData, endsAtFileEOF: endsAtFileEOF) else {
+                    sawIncomplete = true
+                    continue
                 }
-                return .complete
+                if header.type == "moov" {
+                    if header.endOffset <= tailData.count {
+                        return .complete
+                    }
+                    sawIncomplete = true
+                }
             }
-            sawIncomplete = true
         }
 
         return sawIncomplete ? .incomplete : .notFound
+    }
+
+    /// Parsed ISO-BMFF box header. Sizes stay in `UInt64` so 64-bit `size==1` boxes never trap.
+    private struct MP4BoxHeader {
+        let type: String
+        let size: UInt64
+        let headerSize: Int
+        let startOffset: Int
+
+        var endOffset: Int {
+            guard size <= UInt64(Int.max - startOffset) else { return Int.max }
+            return startOffset + Int(size)
+        }
+
+        func nextOffset(in bufferCount: Int) -> Int? {
+            guard size >= UInt64(headerSize), endOffset <= bufferCount, endOffset > startOffset else { return nil }
+            return endOffset
+        }
+    }
+
+    private static func mp4BoxHeader(at offset: Int, in data: Data, endsAtFileEOF: Bool) -> MP4BoxHeader? {
+        guard offset + 8 <= data.count else { return nil }
+        let size32 = data.readUInt32BE(at: offset)
+        let type = String(data: data[(offset + 4)..<(offset + 8)], encoding: .ascii) ?? ""
+
+        let size: UInt64
+        let headerSize: Int
+        if size32 == 1 {
+            guard offset + 16 <= data.count else { return nil }
+            size = data.readUInt64BE(at: offset + 8)
+            guard size >= 16 else { return nil }
+            headerSize = 16
+        } else if size32 == 0 {
+            guard endsAtFileEOF else { return nil }
+            size = UInt64(data.count - offset)
+            headerSize = 8
+        } else {
+            size = UInt64(size32)
+            headerSize = 8
+            guard size >= 8 else { return nil }
+        }
+
+        return MP4BoxHeader(type: type, size: size, headerSize: headerSize, startOffset: offset)
+    }
+
+    // MARK: - MKV / WebM seek-index probe
+
+    public enum MKVSeekTableProbeResult: Equatable {
+        /// Cues element found and fully contained in buffer.
+        case complete
+        /// Cues element found but extends past buffer boundary.
+        case incomplete
+        /// No Cues element in buffer at all.
+        case notFound
+    }
+
+    /// Detects whether the MKV `Cues` element (EBML id 0x1C53BB6B) is fully present
+    /// in the supplied buffer. Without `Cues`, AVFoundation cannot open an MKV stream.
+    public static func mkvSeekTableProbe(in data: Data) -> MKVSeekTableProbeResult {
+        // Cues element ID: 0x1C53BB6B (4 bytes, EBML class A)
+        let cuesID: [UInt8] = [0x1C, 0x53, 0xBB, 0x6B]
+        guard let cuesRange = data.range(of: Data(cuesID)) else {
+            return .notFound
+        }
+
+        let sizeFieldStart = cuesRange.upperBound
+        guard sizeFieldStart < data.endIndex else { return .incomplete }
+
+        guard let (cuesSize, sizeBytes) = parseEBMLSize(data: data, offset: sizeFieldStart) else {
+            return .incomplete
+        }
+
+        // Cues element with unknown-size encoding is treated as extending to EOF — incomplete.
+        guard cuesSize != UInt64.max else { return .incomplete }
+
+        let payloadStart = sizeFieldStart + sizeBytes
+        guard cuesSize <= UInt64(Int.max - payloadStart) else { return .incomplete }
+        let cuesEnd = payloadStart + Int(cuesSize)
+        return cuesEnd <= data.endIndex ? .complete : .incomplete
+    }
+
+    public struct MKVCuesAnalysis: Equatable {
+        /// Cluster positions relative to the Segment element body (CueClusterPosition values).
+        public let firstClusterOffsets: [Int64]
+        /// Absolute byte offset of the Segment element body in the torrent file.
+        public let segmentBodyOffset: Int64
+    }
+
+    /// Absolute offset in the torrent file where the Segment element body begins.
+    public static func segmentBodyOffset(in headData: Data, fileOffset: Int64) -> Int64? {
+        let segmentID: [UInt8] = [0x18, 0x53, 0x80, 0x67]
+        guard let segRange = headData.range(of: Data(segmentID)) else { return nil }
+        let sizeFieldStart = segRange.upperBound
+        guard let (_, sizeBytes) = parseEBMLSize(data: headData, offset: sizeFieldStart) else { return nil }
+        return fileOffset + Int64(sizeFieldStart + sizeBytes)
+    }
+
+    /// Parses CueClusterPosition entries from a verified Cues block in the tail buffer.
+    public static func analyzeMKVCues(in tailData: Data, segmentBodyOffset: Int64) -> MKVCuesAnalysis? {
+        let cuesID: [UInt8] = [0x1C, 0x53, 0xBB, 0x6B]
+        guard let cuesRange = tailData.range(of: Data(cuesID)) else { return nil }
+        let cuesSizeStart = cuesRange.upperBound
+        guard let (cuesSize, cuesSizeLen) = parseEBMLSize(data: tailData, offset: cuesSizeStart) else { return nil }
+        guard cuesSize != UInt64.max else { return nil }
+
+        let cuesBodyStart = cuesSizeStart + cuesSizeLen
+        guard cuesSize <= UInt64(tailData.count - cuesBodyStart) else { return nil }
+        let cuesBodyEnd = cuesBodyStart + Int(cuesSize)
+        guard cuesBodyEnd <= tailData.count else { return nil }
+
+        var offsets: [Int64] = []
+        var pos = cuesBodyStart
+        while pos < cuesBodyEnd, offsets.count < 8 {
+            guard pos < tailData.count, tailData[pos] == 0xBB else {
+                pos += 1
+                continue
+            }
+            pos += 1
+            guard let (cpSize, cpSizeLen) = parseEBMLSize(data: tailData, offset: pos) else { break }
+            let cpBodyStart = pos + cpSizeLen
+            guard cpSize <= UInt64(cuesBodyEnd - cpBodyStart) else { break }
+            let cpBodyEnd = cpBodyStart + Int(cpSize)
+            guard cpBodyEnd <= cuesBodyEnd else { break }
+            pos = cpBodyEnd
+
+            var inner = cpBodyStart
+            while inner < cpBodyEnd {
+                guard inner < tailData.count else { break }
+                if tailData[inner] == 0xF1 {
+                    inner += 1
+                    guard let (valSize, valSizeLen) = parseEBMLSize(data: tailData, offset: inner) else { break }
+                    let valStart = inner + valSizeLen
+                    guard valSize <= UInt64(cpBodyEnd - valStart) else { break }
+                    let valEnd = valStart + Int(valSize)
+                    guard valEnd <= cpBodyEnd else { break }
+                    var clusterOffset: Int64 = 0
+                    for byteIndex in valStart..<valEnd {
+                        clusterOffset = (clusterOffset << 8) | Int64(tailData[byteIndex])
+                    }
+                    offsets.append(clusterOffset)
+                    break
+                }
+                inner += 1
+            }
+        }
+
+        guard !offsets.isEmpty else { return nil }
+        return MKVCuesAnalysis(firstClusterOffsets: offsets, segmentBodyOffset: segmentBodyOffset)
+    }
+
+    /// Parses an EBML variable-length unsigned integer.
+    /// Returns the decoded value and the number of bytes consumed.
+    /// `UInt64.max` indicates the special "unknown size" sentinel (all value bits set to 1).
+    public static func parseEBMLSize(data: Data, offset: Int) -> (size: UInt64, headerBytes: Int)? {
+        guard offset < data.endIndex else { return nil }
+        let firstByte = data[offset]
+        guard firstByte != 0 else { return nil }
+
+        var width = 1
+        var marker: UInt8 = 0x80
+        while width <= 8, firstByte & marker == 0 {
+            marker >>= 1
+            width += 1
+        }
+        guard width <= 8, firstByte & marker != 0 else { return nil }
+        guard offset + width <= data.endIndex else { return nil }
+
+        // First-byte value bits: for 8-octet VINT the marker is bit 0, so shift right;
+        // for shorter VINTs strip the single length marker bit via (marker - 1).
+        var size: UInt64
+        if width == 8 {
+            size = UInt64(firstByte >> 1)
+        } else {
+            size = UInt64(firstByte & (marker &- 1))
+        }
+        for i in 1..<width {
+            size = (size << 8) | UInt64(data[offset + i])
+        }
+
+        // Unknown-size sentinel: all value bits are 1 (2^(7*width) - 1).
+        let unknownSizeValue = (UInt64(1) << UInt64(7 * width)) - 1
+        if size == unknownSizeValue {
+            return (UInt64.max, width)
+        }
+
+        return (size, width)
     }
 
     /// True only for progressive/fast-start MP4 where `moov` appears before the first `mdat`.
@@ -122,22 +316,9 @@ public enum StreamTailPlanner {
     }
 
     private static func readBox(at offset: Int, in data: Data) -> BoxHeader? {
-        guard offset + 8 <= data.count else { return nil }
-        let size32 = Int(data.readUInt32BE(at: offset))
-        let type = String(data: data[(offset + 4)..<(offset + 8)], encoding: .ascii) ?? ""
-        guard size32 >= 8 else { return nil }
-
-        var size = size32
-        var header = 8
-        if size32 == 1, offset + 16 <= data.count {
-            let large = data.readUInt64BE(at: offset + 8)
-            guard large >= 16, large <= Int64(data.count - offset) else { return nil }
-            size = Int(large)
-            header = 16
-        }
-
-        guard size >= header, offset + size <= data.count else { return nil }
-        return BoxHeader(size: size, type: type, end: offset + size)
+        guard let header = mp4BoxHeader(at: offset, in: data, endsAtFileEOF: false) else { return nil }
+        guard let next = header.nextOffset(in: data.count) else { return nil }
+        return BoxHeader(size: next - offset, type: header.type, end: next)
     }
 }
 
@@ -148,12 +329,12 @@ private extension Data {
             | UInt32(self[offset + 2]) << 8 | UInt32(self[offset + 3])
     }
 
-    func readUInt64BE(at offset: Int) -> Int64 {
+    func readUInt64BE(at offset: Int) -> UInt64 {
         guard offset + 8 <= count else { return 0 }
         var value: UInt64 = 0
         for i in 0..<8 {
             value = (value << 8) | UInt64(self[offset + i])
         }
-        return Int64(value)
+        return value
     }
 }

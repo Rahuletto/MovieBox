@@ -65,6 +65,10 @@ public actor PieceManager {
         }
     }
 
+    public func setInitialDownloadedPieces(_ pieces: Set<UInt32>) {
+        downloadedPieces = pieces
+    }
+
     public func getNextRequest(peerBitfield: Data = Data()) -> BlockRequest? {
         guard let pieceIndex = earliestIncompletePiece(peerBitfield: peerBitfield) else { return nil }
 
@@ -137,6 +141,21 @@ public actor PieceManager {
         downloadedPieces.contains(pieceIndex)
     }
 
+    public func pieceProgress(pieceIndex: UInt32) -> Double {
+        if downloadedPieces.contains(pieceIndex) {
+            return 1.0
+        }
+        guard let offsets = receivedBlockOffsets[pieceIndex] else { return 0.0 }
+        let size = Double(pieceSize(for: pieceIndex))
+        guard size > 0 else { return 0.0 }
+        
+        let received = offsets.reduce(0.0) { sum, offset in
+            let blockLen = min(Double(blockSize), size - Double(offset))
+            return sum + max(0.0, blockLen)
+        }
+        return min(1.0, received / size)
+    }
+
     public func progress() -> Double {
         guard pieceCount > 0 else { return 0 }
         return Double(downloadedPieces.count) / Double(pieceCount)
@@ -185,9 +204,6 @@ public actor PieceManager {
     /// Until head + tail index pieces are verified, never fall back to middle-of-file pieces
     /// (peers without end-of-file in bitfield would otherwise pull piece 1, 2, … forever).
     private func earliestIncompletePiece(peerBitfield: Data) -> UInt32? {
-        // If the peer has not sent any bitfield or have messages, do not request anything from them.
-        guard !peerBitfield.isEmpty else { return nil }
-
         let bootstrap = buildBootstrapPriorityOrder()
         if needsIndexBootstrap() {
             return firstIncompletePiece(in: bootstrap, peerBitfield: peerBitfield)
