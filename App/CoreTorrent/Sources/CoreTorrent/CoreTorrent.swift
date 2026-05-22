@@ -127,6 +127,24 @@ public struct TorrentResult: Identifiable, Sendable, Codable, Hashable {
 }
 
 extension TorrentResult {
+    public var resolvedInfoHash: String? {
+        if let infoHash = infoHash, !infoHash.isEmpty {
+            return infoHash.lowercased()
+        }
+        guard magnetURI.lowercased().hasPrefix("magnet:?") else { return nil }
+        let query = String(magnetURI.dropFirst(8))
+        for pair in query.components(separatedBy: "&") {
+            let parts = pair.components(separatedBy: "=")
+            guard parts.count == 2 else { continue }
+            let key = parts[0]
+            let value = parts[1].removingPercentEncoding ?? parts[1]
+            if key == "xt", value.lowercased().hasPrefix("urn:btih:") {
+                return String(value.dropFirst(9)).lowercased()
+            }
+        }
+        return nil
+    }
+
     /// Builds a torrent row from a magnet link using filename/metadata parsing.
     public static func fromMagnetURI(_ magnetURI: String, fallbackTitle: String) -> TorrentResult? {
         guard magnetURI.lowercased().hasPrefix("magnet:?") else { return nil }

@@ -4,7 +4,7 @@ import Foundation
 /// BitTorrent / P2P logging to `moviebox.log`. Peer chatter is gated; playback path is always logged.
 enum TorrentLog {
     /// Verbose peer connect / tracker spam (off by default).
-    static let isVerbose = false
+    static let isVerbose = true
 
     static func debug(_ message: String) {
         guard isVerbose else { return }

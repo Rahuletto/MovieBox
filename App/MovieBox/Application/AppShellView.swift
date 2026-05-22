@@ -101,7 +101,7 @@ struct AppShellView: View {
             AppBootstrap.runInitialSetup(
                 modelContext: modelContext,
                 errorCenter: errorCenter,
-                downloadManager: appServices.downloadManager,
+                appServices: appServices,
                 didAttachPersistence: &didAttachPersistence
             )
             #if DEBUG

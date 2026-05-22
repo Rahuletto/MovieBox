@@ -18,6 +18,20 @@ public final class DownloadPersistenceService: DownloadPersistenceDelegate {
         hydrate(into: downloadManager)
     }
 
+    public func completedFilePath(for infoHash: String) -> String? {
+        let cleanHash = infoHash.lowercased()
+        let descriptor = FetchDescriptor<DownloadRecord>(
+            predicate: #Predicate<DownloadRecord> { $0.infoHash == cleanHash }
+        )
+        guard let record = try? modelContext.fetch(descriptor).first else { return nil }
+        guard record.state == DownloadState.completed.rawValue else { return nil }
+        guard let path = record.localFilePath, !path.isEmpty else { return nil }
+        if FileManager.default.fileExists(atPath: path) {
+            return path
+        }
+        return nil
+    }
+
     private func hydrate(into downloadManager: DownloadManager) {
         let descriptor = FetchDescriptor<DownloadRecord>(
             sortBy: [SortDescriptor(\.createdAt, order: .reverse)]

@@ -9,6 +9,7 @@ public final class TorrentPlaybackCoordinator {
     private let orchestrator: StreamingOrchestrator
     private(set) var session: TorrentStreamSession?
     public private(set) var torrents: [TorrentResult] = []
+    public var downloadPersistence: DownloadPersistenceService?
 
     public init(orchestrator: StreamingOrchestrator) {
         self.orchestrator = orchestrator
@@ -100,6 +101,56 @@ public final class TorrentPlaybackCoordinator {
         }
     }
 
+    public func playLocalFile(
+        localFilePath: String,
+        torrent: TorrentResult,
+        allTorrents: [TorrentResult],
+        playerState: PlayerState,
+        movieId: Int,
+        subtitleURL: URL?,
+        subtitleAppearance: SubtitleAppearance = .cinematic,
+        subtitleFontSize: CGFloat = 20,
+        episodeTitle: String? = nil,
+        displayTitle: String? = nil,
+        resumePosition: Double? = nil,
+        knownDurationSeconds: Double? = nil
+    ) {
+        configureSources(on: playerState, torrents: allTorrents, selected: torrent)
+
+        let localURL = URL(fileURLWithPath: localFilePath)
+        PlaybackLog.log("playLocalFile → loading player localURL=\(MovieBoxFileLogger.redactURL(localURL)) movieId=\(movieId) hdr=\(torrent.hdrType?.rawValue ?? "none")")
+        let hudTitle = displayTitle.map { PlaybackDisplayTitle.clean($0) }
+        let loadPayload = (
+            url: localURL,
+            title: torrent.title,
+            movieId: movieId,
+            subtitleURL: subtitleURL,
+            hdr: playerHDRType(from: torrent.hdrType),
+            appearance: subtitleAppearance,
+            fontSize: subtitleFontSize,
+            episodeTitle: episodeTitle,
+            hudTitle: hudTitle,
+            resume: resumePosition,
+            knownDuration: knownDurationSeconds
+        )
+        Task { @MainActor in
+            await Task.yield()
+            playerState.load(
+                url: loadPayload.url,
+                title: loadPayload.title,
+                movieId: loadPayload.movieId,
+                subtitleURL: loadPayload.subtitleURL,
+                hdrType: loadPayload.hdr,
+                subtitleAppearance: loadPayload.appearance,
+                subtitleFontSize: loadPayload.fontSize,
+                episodeTitle: loadPayload.episodeTitle,
+                displayTitle: loadPayload.hudTitle,
+                resumePosition: loadPayload.resume,
+                knownDurationSeconds: loadPayload.knownDuration
+            )
+        }
+    }
+
     func switchToSource(id: String, playerState: PlayerState, subtitleAppearance: SubtitleAppearance = .cinematic) async {
         guard let torrent = torrents.first(where: { $0.id.uuidString == id }) else { return }
         guard torrent.id.uuidString != playerState.selectedPlaybackSourceID else { return }
@@ -110,6 +161,25 @@ public final class TorrentPlaybackCoordinator {
 
         playerState.isSwitchingSource = true
         await session?.cancel()
+
+        if let infoHash = torrent.resolvedInfoHash,
+           let localPath = downloadPersistence?.completedFilePath(for: infoHash) {
+            let localURL = URL(fileURLWithPath: localPath)
+            playerState.selectedPlaybackSourceID = id
+            playerState.load(
+                url: localURL,
+                title: torrent.title,
+                movieId: movieId,
+                subtitleURL: subtitleURL,
+                hdrType: playerHDRType(from: torrent.hdrType),
+                subtitleAppearance: subtitleAppearance,
+                subtitleFontSize: playerState.subtitleFontSize,
+                displayTitle: playerState.seriesName,
+                resumePosition: savedTime > 20 ? savedTime : nil
+            )
+            playerState.isSwitchingSource = false
+            return
+        }
 
         let streamSession = TorrentStreamSession(orchestrator: orchestrator)
         session = streamSession

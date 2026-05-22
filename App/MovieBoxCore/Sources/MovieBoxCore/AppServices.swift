@@ -10,6 +10,7 @@ public final class AppServices {
     public private(set) var playbackCoordinator: TorrentPlaybackCoordinator
     public private(set) var activeSession: TorrentStreamSession?
     public let persistentPlayback = PersistentPlaybackController()
+    public var downloadPersistence: DownloadPersistenceService?
 
     public let streamingOrchestrator: StreamingOrchestrator
 
@@ -33,6 +34,7 @@ public final class AppServices {
     @discardableResult
     public func beginPlaybackCoordinator() -> TorrentPlaybackCoordinator {
         playbackCoordinator = TorrentPlaybackCoordinator(orchestrator: streamingOrchestrator)
+        playbackCoordinator.downloadPersistence = downloadPersistence
         return playbackCoordinator
     }
 

@@ -15,6 +15,7 @@ struct TorrentSection: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var settings: [AppSettings]
     @Query private var storedMovies: [MovieRecord]
+    @Query private var downloads: [DownloadRecord]
 
     let movie: Movie
     let torrents: [TorrentResult]
@@ -45,7 +46,23 @@ struct TorrentSection: View {
     /// Always sorted by seeders descending so the healthiest releases come first.
     private var displayedTorrents: [TorrentResult] {
         let pool = seededTorrents.isEmpty ? torrents : seededTorrents
-        return pool.sorted { $0.seeders > $1.seeders }
+        return pool.sorted {
+            let aDownloaded = isDownloaded($0)
+            let bDownloaded = isDownloaded($1)
+            if aDownloaded != bDownloaded { return aDownloaded }
+            return $0.seeders > $1.seeders
+        }
+    }
+
+    /// Returns true when the torrent has a completed local download on disk.
+    private func isDownloaded(_ torrent: TorrentResult) -> Bool {
+        guard let hash = torrent.resolvedInfoHash else { return false }
+        let lowerHash = hash.lowercased()
+        return downloads.contains {
+            $0.infoHash == lowerHash
+                && $0.state == DownloadState.completed.rawValue
+                && ($0.localFilePath.map { FileManager.default.fileExists(atPath: $0) } ?? false)
+        }
     }
 
     private var pageCount: Int {
@@ -136,6 +153,7 @@ struct TorrentSection: View {
             rebuildVisibleCardModels()
         }
         .onChange(of: clampedPage) { _, _ in rebuildVisibleCardModels() }
+        .onChange(of: downloads.count) { _, _ in rebuildVisibleCardModels() }
         .onChange(of: settings.first?.proxyBaseURL) { _, _ in
             TorrentBackendSync.apply(from: settings.first)
         }
@@ -156,16 +174,23 @@ struct TorrentSection: View {
 
     private func syncStreamRowState(from tick: PersistentPlaybackUITick) {
         guard tick.isActive, tick.movieId == movie.id, let torrentID = tick.torrentId else {
+            guard streamBusyTorrentID != nil || !rowBufferingByID.isEmpty else { return }
             streamBusyTorrentID = nil
             rowBufferingByID = [:]
             return
         }
+        let snapshot = tick.rowSnapshot
+        if streamBusyTorrentID == torrentID, rowBufferingByID[torrentID] == snapshot {
+            return
+        }
         streamBusyTorrentID = torrentID
-        rowBufferingByID[torrentID] = tick.rowSnapshot
+        rowBufferingByID = [torrentID: snapshot]
     }
 
     private func rebuildVisibleCardModels() {
-        visibleCardModels = visibleTorrents.map(TorrentCardModel.init(torrent:))
+        visibleCardModels = visibleTorrents.map { torrent in
+            TorrentCardModel(torrent: torrent, isDownloaded: isDownloaded(torrent))
+        }
     }
 
     private func startStream(for id: UUID) {

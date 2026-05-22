@@ -7,7 +7,7 @@ public enum StreamTailPlanner {
     /// Upper bound when growing the tail window for large moov atoms.
     public static let maxTailByteSpan: Int64 = 64 * 1024 * 1024
 
-    public enum MoovTailProbeResult: Equatable {
+    public enum MoovTailProbeResult: Equatable, Sendable {
         case complete
         case incomplete
         case notFound
@@ -60,47 +60,26 @@ public enum StreamTailPlanner {
     public static func moovTailProbe(in tailData: Data, endsAtFileEOF: Bool) -> MoovTailProbeResult {
         guard tailData.count >= 8 else { return .notFound }
 
-        var sawIncomplete = false
-        var i = 0
-        while i + 8 <= tailData.count {
-            guard let header = mp4BoxHeader(at: i, in: tailData, endsAtFileEOF: endsAtFileEOF) else {
-                i += 1
-                continue
-            }
-            let type = header.type
-            let boxEnd = header.endOffset
-
-            if type == "moov" {
-                if boxEnd <= tailData.count {
-                    return .complete
-                }
-                sawIncomplete = true
-            }
-
-            if let next = header.nextOffset(in: tailData.count) {
-                i = next
-            } else {
-                i += 1
-            }
-        }
-
-        if !sawIncomplete {
-            for offset in 0..<(tailData.count - 8) {
-                guard tailData[offset + 4..<offset + 8] == Data("moov".utf8) else { continue }
+        // Scan backwards to find the last (real) moov box
+        var offset = tailData.count - 8
+        while offset >= 0 {
+            if tailData[offset + 4] == 0x6D /* m */,
+               tailData[offset + 5] == 0x6F /* o */,
+               tailData[offset + 6] == 0x6F /* o */,
+               tailData[offset + 7] == 0x76 /* v */ {
                 guard let header = mp4BoxHeader(at: offset, in: tailData, endsAtFileEOF: endsAtFileEOF) else {
-                    sawIncomplete = true
-                    continue
+                    return .incomplete
                 }
-                if header.type == "moov" {
-                    if header.endOffset <= tailData.count {
-                        return .complete
-                    }
-                    sawIncomplete = true
+                if header.endOffset <= tailData.count {
+                    return .complete
+                } else {
+                    return .incomplete
                 }
             }
+            offset -= 1
         }
 
-        return sawIncomplete ? .incomplete : .notFound
+        return .notFound
     }
 
     /// Parsed ISO-BMFF box header. Sizes stay in `UInt64` so 64-bit `size==1` boxes never trap.
@@ -148,7 +127,7 @@ public enum StreamTailPlanner {
 
     // MARK: - MKV / WebM seek-index probe
 
-    public enum MKVSeekTableProbeResult: Equatable {
+    public enum MKVSeekTableProbeResult: Equatable, Sendable {
         /// Cues element found and fully contained in buffer.
         case complete
         /// Cues element found but extends past buffer boundary.
@@ -182,7 +161,7 @@ public enum StreamTailPlanner {
         return cuesEnd <= data.endIndex ? .complete : .incomplete
     }
 
-    public struct MKVCuesAnalysis: Equatable {
+    public struct MKVCuesAnalysis: Equatable, Sendable {
         /// Cluster positions relative to the Segment element body (CueClusterPosition values).
         public let firstClusterOffsets: [Int64]
         /// Absolute byte offset of the Segment element body in the torrent file.

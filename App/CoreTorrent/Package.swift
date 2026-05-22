@@ -9,7 +9,6 @@ let package = Package(
     ],
     targets: [
         .target(name: "CoreTorrent"),
-        .testTarget(name: "CoreTorrentTests", dependencies: ["CoreTorrent"])
     ],
     swiftLanguageModes: [.v6]
 )
