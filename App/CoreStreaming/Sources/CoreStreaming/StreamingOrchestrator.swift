@@ -15,6 +15,18 @@ public final class StreamingOrchestrator: @unchecked Sendable {
     private var peerId: String = ""
     private var dht: KademliaDHT?
     private var fastStartWatcherTask: Task<Void, Never>?
+    private var tailReadyCached: Bool?
+    private var tailReadyCachedAt: ContinuousClock.Instant?
+    private static let tailReadyCacheTTL: Duration = .seconds(2)
+
+    private enum FileContainerType: Sendable {
+        case unknown
+        case mkv
+        case mp4
+        case other
+    }
+
+    private var detectedContainer: FileContainerType = .unknown
 
     public init() {}
 
@@ -35,6 +47,7 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         torrent: TorrentResult,
         progressHandler: @escaping @Sendable (Double, Double, Int) -> Void
     ) async throws -> URL {
+        detectedContainer = .unknown
         peerId = BitTorrentPeerID.make()
 
         let magnet = MagnetURI(from: torrent.magnetURI)
@@ -217,8 +230,49 @@ public final class StreamingOrchestrator: @unchecked Sendable {
     }
 
     public func isStreamTailPieceReady() async -> Bool {
+        let now = ContinuousClock.now
+        if let tailReadyCached, let tailReadyCachedAt,
+           now - tailReadyCachedAt < Self.tailReadyCacheTTL {
+            if tailReadyCached {
+                await pieceManager?.setIndexBootstrapCompleted()
+            }
+            return tailReadyCached
+        }
+        let ready = await evaluateStreamTailPieceReady()
+        if ready {
+            await pieceManager?.setIndexBootstrapCompleted()
+        }
+        tailReadyCached = ready
+        tailReadyCachedAt = now
+        return ready
+    }
+
+    private func evaluateStreamTailPieceReady() async -> Bool {
         guard let pieceStore, let target = streamTarget, let metadata else { return false }
         guard target.needsTailProbeForPlayback else { return true }
+
+        let verifiedHead = await pieceStore.verifiedMediaBytesFromStart()
+
+        // Dynamic magic bytes container detection
+        if detectedContainer == .unknown && verifiedHead >= 16 {
+            if let firstBytes = try? await pieceStore.read(offset: target.byteOffset, length: 16) {
+                if firstBytes.count >= 4 && firstBytes[0] == 0x1A && firstBytes[1] == 0x45 && firstBytes[2] == 0xDF && firstBytes[3] == 0xA3 {
+                    detectedContainer = .mkv
+                    TorrentLog.info("[Streaming] Magic byte detection: MKV container identified")
+                } else if firstBytes.count >= 8 &&
+                          firstBytes[4] == 0x66 && // 'f'
+                          firstBytes[5] == 0x74 && // 't'
+                          firstBytes[6] == 0x79 && // 'y'
+                          firstBytes[7] == 0x70    // 'p'
+                {
+                    detectedContainer = .mp4
+                    TorrentLog.info("[Streaming] Magic byte detection: MP4/MOV container identified")
+                } else {
+                    detectedContainer = .other
+                    TorrentLog.info("[Streaming] Magic byte detection: Other container identified")
+                }
+            }
+        }
 
         // If the fast-start watcher has already patched the HTTP server with a
         // synthesized moov layout, playback is ready — AVPlayer reads moov from
@@ -226,13 +280,11 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         let headThreshold = minimumHeadBytes(for: target)
 
         if rangeServer.remuxedLayout != nil {
-            let verifiedHead = await pieceStore.verifiedMediaBytesFromStart()
             if verifiedHead >= headThreshold {
                 return true
             }
         }
 
-        let verifiedHead = await pieceStore.verifiedMediaBytesFromStart()
         guard verifiedHead >= headThreshold else { return false }
 
         // Fast-start MP4 (moov before mdat) — verified head is enough.
@@ -248,25 +300,75 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         }
 
         let lastPiece = min(target.lastPieceIndex, metadata.pieceCount - 1)
-        guard await pieceStore.hasPiece(lastPiece) else { return false }
+        guard await pieceStore.hasPiece(lastPiece) else {
+            TorrentLog.debug("[Streaming] Last piece \(lastPiece) not verified yet")
+            return false
+        }
 
-        // MP4/MOV with trailing moov: require a complete moov in the verified tail window.
-        if target.needsMP4MoovTailProbe {
-            if let (tailData, _) = await readVerifiedTailWindow(
+        // MP4/MOV with trailing moov: require a complete moov in the verified tail window
+        // AND a synthesized fast-start layout installed in the HTTP server.
+        let isMP4 = (detectedContainer == .mp4) || (detectedContainer == .unknown && target.needsMP4MoovTailProbe)
+        if isMP4 {
+            let tailVerifiedCount = await streamTailPiecesVerified()
+            let tailTotalCount = await streamTailPieceCount()
+            TorrentLog.debug("[Streaming] MP4 tail status: \(tailVerifiedCount)/\(tailTotalCount) verified. lastPiece \(lastPiece) verified.")
+            if let (tailData, tailOffset) = await readVerifiedTailWindow(
                 pieceStore: pieceStore,
                 target: target,
                 metadata: metadata
             ) {
-                switch StreamTailPlanner.moovTailProbe(in: tailData, endsAtFileEOF: true) {
+                let moovProbe = await probeMoovTailOffMainActor(tailData: tailData)
+                // Log last 16 bytes to verify we're reading real data
+                let tailEnd = tailData.suffix(16)
+                let tailEndHex = tailEnd.map { String(format: "%02x", $0) }.joined()
+                TorrentLog.debug("[Streaming] MP4 moovProbe=\(moovProbe) tailData=\(tailData.count)B tailOffset=\(tailOffset) last16bytes=\(tailEndHex)")
+                switch moovProbe {
                 case .complete:
-                    TorrentLog.info("[Streaming] MP4 moov index verified in tail (\(tailData.count) bytes)")
-                    return true
+                    if rangeServer.remuxedLayout != nil {
+                        return true
+                    }
+                    // Synchronously synthesize + install the fast-start layout.
+                    // Falling back to the watcher loop here is what produced the
+                    // "ready but AVPlayer says unplayable" race.
+                    if let layout = await attemptFastStartRemux(
+                        pieceStore: pieceStore,
+                        target: target,
+                        metadata: metadata
+                    ) {
+                        await installRemuxLayout(layout)
+                        TorrentLog.info(
+                            "[Streaming] MP4 moov index verified in tail (\(tailData.count) bytes) — fast-start layout installed inline"
+                        )
+                        return true
+                    }
+                    TorrentLog.debug("[Streaming] MP4 moov probe complete but layout synthesis failed — keep buffering")
+                    return false
                 case .incomplete:
                     TorrentLog.debug("[Streaming] MP4 moov in tail is still incomplete")
                     return false
                 case .notFound:
-                    break
+                    // If the moov box start is not visible in the verified tail window it means
+                    // either: (a) more tail pieces are still downloading and will push the window
+                    // further back, or (b) this is an unusual file with a moov box that starts
+                    // before the 64 MB download-priority span.
+                    //
+                    // For case (b), once ALL scheduled tail download pieces are verified, the
+                    // moov start must be in the body of the file (handled by the head‐first
+                    // sequential stream or via AVPlayer's own HTTP range seeking). In that
+                    // scenario allow playback so AVPlayer can issue range requests to the
+                    // verified tail data and locate the moov on its own.
+                    if tailTotalCount > 0 && tailVerifiedCount >= tailTotalCount {
+                        TorrentLog.info(
+                            "[Streaming] MP4 moov not in \(tailData.count / 1024)KB tail window but all \(tailTotalCount) tail pieces verified — " +
+                            "allowing AVPlayer to range-seek to moov"
+                        )
+                        return true
+                    }
+                    TorrentLog.debug("[Streaming] MP4 moov box not yet visible in verified tail — keep buffering")
+                    return false
+
                 }
+
             } else {
                 return false
             }
@@ -276,7 +378,7 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         // of the tail span. Cues live at the very end of the file and a 33%-of-tail
         // heuristic frequently misses them, causing AVPlayer to open the URL and die.
         let ext = (target.file.relativePath as NSString).pathExtension.lowercased()
-        let isMKVLike = ext == "mkv" || ext == "webm" || target.contentType.contains("matroska")
+        let isMKVLike = (detectedContainer == .mkv) || (detectedContainer == .unknown && (ext == "mkv" || ext == "webm" || target.contentType.contains("matroska")))
         if isMKVLike {
             let headRead = min(Int(verifiedHead), 256 * 1024)
             guard headRead >= 4096,
@@ -297,7 +399,8 @@ public final class StreamingOrchestrator: @unchecked Sendable {
                 return false
             }
 
-            switch StreamTailPlanner.mkvSeekTableProbe(in: tailData) {
+            let mkvProbe = await probeMKVSeekTableOffMainActor(tailData: tailData)
+            switch mkvProbe {
             case .notFound, .incomplete:
                 TorrentLog.debug("[Streaming] MKV Cues not complete in tail window (\(tailData.count) bytes)")
                 return false
@@ -307,8 +410,8 @@ public final class StreamingOrchestrator: @unchecked Sendable {
                 )
             }
 
-            guard let analysis = StreamTailPlanner.analyzeMKVCues(
-                in: tailData,
+            guard let analysis = await analyzeMKVCuesOffMainActor(
+                tailData: tailData,
                 segmentBodyOffset: segmentBodyOffset
             ) else {
                 TorrentLog.debug("[Streaming] MKV Cues present but cluster entries not parseable yet")
@@ -377,6 +480,11 @@ public final class StreamingOrchestrator: @unchecked Sendable {
     }
 
     private func minimumHeadBytes(for target: TorrentStreamTarget) -> Int64 {
+        if detectedContainer == .mkv {
+            return StreamPlaybackThreshold.minimumHeadBytesForMKV
+        } else if detectedContainer == .mp4 {
+            return StreamPlaybackThreshold.minimumHeadBytes
+        }
         let ext = (target.file.relativePath as NSString).pathExtension.lowercased()
         if ext == "mkv" || ext == "webm" || target.contentType.contains("matroska") {
             return StreamPlaybackThreshold.minimumHeadBytesForMKV
@@ -389,10 +497,10 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         target: TorrentStreamTarget,
         metadata: TorrentMetadata
     ) async -> (data: Data, fileOffset: Int64)? {
-        let tailSpan = StreamTailPlanner.tailByteSpan(
-            byteLength: target.byteLength,
-            pieceLength: metadata.pieceLength
-        )
+        // Use the maximum tail span (64 MB) so the walk covers the full download-prioritised
+        // range. Using the smaller probe-only span (8–16 MB) meant moov atoms located
+        // further back were never scanned even though those pieces were already downloaded.
+        let tailSpan = StreamTailPlanner.maxTailByteSpan
         let fileEnd = target.byteOffset + target.byteLength
         let tailStart = max(target.byteOffset, fileEnd - tailSpan)
 
@@ -418,9 +526,11 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         let length = Int(fileEnd - startOffset)
         guard length >= 16 else { return nil }
 
+        TorrentLog.debug("[Streaming] readVerifiedTailWindow: reading \(length / 1024)KB from offset \(startOffset) (pieces \(firstContiguousPiece)–\(lastPiece))")
         guard let data = try? await pieceStore.read(offset: startOffset, length: length) else { return nil }
         return (data, startOffset)
     }
+
 
     // MARK: - Fast-start remux watcher
 
@@ -446,9 +556,30 @@ public final class StreamingOrchestrator: @unchecked Sendable {
                     await self.installRemuxLayout(layout)
                     return
                 }
-                try? await Task.sleep(for: .milliseconds(200))
+                try? await Task.sleep(for: .milliseconds(1500))
             }
         }
+    }
+
+    private func probeMoovTailOffMainActor(tailData: Data) async -> StreamTailPlanner.MoovTailProbeResult {
+        await Task.detached(priority: .utility) {
+            StreamTailPlanner.moovTailProbe(in: tailData, endsAtFileEOF: true)
+        }.value
+    }
+
+    private func probeMKVSeekTableOffMainActor(tailData: Data) async -> StreamTailPlanner.MKVSeekTableProbeResult {
+        await Task.detached(priority: .utility) {
+            StreamTailPlanner.mkvSeekTableProbe(in: tailData)
+        }.value
+    }
+
+    private func analyzeMKVCuesOffMainActor(
+        tailData: Data,
+        segmentBodyOffset: Int64
+    ) async -> StreamTailPlanner.MKVCuesAnalysis? {
+        await Task.detached(priority: .utility) {
+            StreamTailPlanner.analyzeMKVCues(in: tailData, segmentBodyOffset: segmentBodyOffset)
+        }.value
     }
 
     private func rangeServerHasRemux() async -> Bool {
@@ -457,6 +588,8 @@ public final class StreamingOrchestrator: @unchecked Sendable {
 
     private func installRemuxLayout(_ layout: MP4FastStartRemuxer.RemuxedLayout) async {
         rangeServer.setRemuxedLayout(layout)
+        tailReadyCached = true
+        tailReadyCachedAt = ContinuousClock.now
         TorrentLog.info(
             "[Streaming] Fast-start remux ready — virtual header \(layout.syntheticHeader.count)B virtualLength=\(layout.virtualFileLength)"
         )
@@ -478,7 +611,7 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         ) else { return nil }
 
         // Probe gives us a complete moov only if the full box fits in the verified tail.
-        guard StreamTailPlanner.moovTailProbe(in: tailData, endsAtFileEOF: true) == .complete else {
+        guard await probeMoovTailOffMainActor(tailData: tailData) == .complete else {
             return nil
         }
 
@@ -552,9 +685,8 @@ public final class StreamingOrchestrator: @unchecked Sendable {
     /// Locate the moov box (size+type header) within a tail buffer.
     private func findMoovRange(in data: Data) -> Range<Data.Index>? {
         guard data.count >= 8 else { return nil }
-        var i = data.startIndex
-        let end = data.endIndex
-        while i + 8 <= end {
+        var i = data.endIndex - 8
+        while i >= data.startIndex {
             let typeStart = i + 4
             if data[typeStart] == 0x6D /* m */,
                data[typeStart + 1] == 0x6F /* o */,
@@ -565,18 +697,18 @@ public final class StreamingOrchestrator: @unchecked Sendable {
                 }
                 var size = Int(size32)
                 var headerLen = 8
-                if size32 == 1, i + 16 <= end {
+                if size32 == 1, i + 16 <= data.endIndex {
                     let large = data.withUnsafeBytes { ptr -> UInt64 in
                         UInt64(bigEndian: ptr.loadUnaligned(fromByteOffset: i + 8 - data.startIndex, as: UInt64.self))
                     }
                     size = Int(large)
                     headerLen = 16
                 }
-                if size >= headerLen, i + size <= end {
+                if size >= headerLen, i + size <= data.endIndex {
                     return i..<(i + size)
                 }
             }
-            i += 1
+            i -= 1
         }
         return nil
     }

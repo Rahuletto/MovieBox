@@ -7,14 +7,16 @@ public enum AppBootstrap {
     public static func runInitialSetup(
         modelContext: ModelContext,
         errorCenter: AppErrorCenter,
-        downloadManager: DownloadManager,
+        appServices: AppServices,
         didAttachPersistence: inout Bool
     ) {
         LogStore.shared.log("AppBootstrap: Application launched.")
 
         if !didAttachPersistence {
             let persistence = DownloadPersistenceService(modelContext: modelContext, errorCenter: errorCenter)
-            persistence.attach(to: downloadManager)
+            persistence.attach(to: appServices.downloadManager)
+            appServices.downloadPersistence = persistence
+            appServices.playbackCoordinator.downloadPersistence = persistence
             didAttachPersistence = true
         }
 

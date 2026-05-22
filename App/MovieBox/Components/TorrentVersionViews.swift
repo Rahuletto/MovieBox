@@ -14,13 +14,15 @@ struct TorrentCardModel: Identifiable, Hashable {
     let detailLine: String
     let seeders: Int
     let leechers: Int
+    let isDownloaded: Bool
 
-    init(torrent: TorrentResult) {
+    init(torrent: TorrentResult, isDownloaded: Bool = false) {
         id = torrent.id
         source = torrent.trackerSource.label
         quality = torrent.quality.rawValue
         techKinds = torrentTechKinds(for: torrent)
         title = torrent.title
+        self.isDownloaded = isDownloaded
 
         var parts: [String] = []
         if torrent.sizeBytes > 0 {
@@ -213,7 +215,7 @@ struct TorrentVersionRow: View, Equatable {
             trailing: {
                 HStack(spacing: 4) {
                     Button(action: onStream) {
-                        Image(systemName: "play.circle.fill")
+                        Image(systemName: model.isDownloaded ? "play.fill" : "play.circle.fill")
                             .font(.system(size: 22))
                             .symbolRenderingMode(.palette)
                             .foregroundStyle(.white, Color.accentColor)
@@ -221,14 +223,16 @@ struct TorrentVersionRow: View, Equatable {
                     .buttonStyle(.plain)
                     .help("Play")
 
-                    Button(action: onDownload) {
-                        Image(systemName: "arrow.down.circle")
-                            .font(.system(size: 22))
-                            .symbolRenderingMode(.hierarchical)
-                            .foregroundStyle(.secondary)
+                    if !model.isDownloaded {
+                        Button(action: onDownload) {
+                            Image(systemName: "arrow.down.circle")
+                                .font(.system(size: 22))
+                                .symbolRenderingMode(.hierarchical)
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Download")
                     }
-                    .buttonStyle(.plain)
-                    .help("Download")
                 }
                 .frame(width: 64, alignment: .trailing)
                 .opacity(isBusy ? 0.35 : 1)
@@ -254,6 +258,14 @@ struct TorrentVersionRow: View, Equatable {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 5) {
+                    if model.isDownloaded {
+                        Text("Downloaded")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(Color.green, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                    }
                     resolutionBadge
                     if !model.techKinds.isEmpty {
                         MediaTechBadgeRow(kinds: model.techKinds, context: .hero, size: .list)
@@ -320,6 +332,9 @@ struct TorrentVersionRow: View, Equatable {
                         .clipShape(progressLeadingShape(in: proxy.size))
                 }
                 .animation(.easeInOut(duration: 0.25), value: buffering.progress)
+                .transaction { transaction in
+                    transaction.animation = nil
+                }
             }
         }
         .contentShape(Rectangle())

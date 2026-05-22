@@ -27,6 +27,7 @@ public actor PieceManager {
     private var receivedBlockOffsets: [UInt32: Set<UInt32>] = [:]
     /// Pieces AVPlayer recently requested via HTTP ranges (newest first).
     private var playerHotPieces: [UInt32] = []
+    private var indexBootstrapCompleted = false
 
     private static let maxHotPieces = 32
     private static let readAheadPieceCount = 3
@@ -67,6 +68,10 @@ public actor PieceManager {
 
     public func setInitialDownloadedPieces(_ pieces: Set<UInt32>) {
         downloadedPieces = pieces
+    }
+
+    public func setIndexBootstrapCompleted() {
+        indexBootstrapCompleted = true
     }
 
     public func getNextRequest(peerBitfield: Data = Data()) -> BlockRequest? {
@@ -214,6 +219,9 @@ public actor PieceManager {
     }
 
     private func needsIndexBootstrap() -> Bool {
+        if indexBootstrapCompleted {
+            return false
+        }
         guard downloadedPieces.contains(UInt32(streamFirstPiece)) else { return true }
         return streamTailPieces.contains { !downloadedPieces.contains(UInt32($0)) }
     }

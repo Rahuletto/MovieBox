@@ -287,9 +287,8 @@ struct MovieDetailView: View {
     }
 
     private var heroPlayButtonDisabled: Bool {
-        if appServices.persistentPlayback.isBuffering(movieId: movieId) {
-            return false
-        }
+        // PlayNowButton observes persistent playback internally; avoid tying
+        // the whole detail scroll view to uiTick updates here.
         if kind == .tv {
             guard let episode = selectedTVEpisode else { return true }
             if isUpcomingEpisode(episode) { return true }

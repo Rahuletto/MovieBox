@@ -12,7 +12,7 @@ struct PlaybackSourcesSidebar: View {
             TorrentVersionSectionGroup(
                 id: section.id,
                 title: section.title,
-                models: section.variants.map(TorrentCardModel.init(torrent:))
+                models: section.variants.map { TorrentCardModel(torrent: $0) }
             )
         }
     }

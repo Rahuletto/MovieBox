@@ -211,6 +211,9 @@ public final class PersistentPlaybackController {
     private var pipelineTask: Task<Void, Never>?
     private var monitorTask: Task<Void, Never>?
     private var lastPublishedTick: PersistentPlaybackUITick = .inactive
+    private var lastPublishedDetailLine: String = ""
+    private var lastDetailPublishTime: ContinuousClock.Instant?
+    private static let detailPublishMinInterval: Duration = .milliseconds(1500)
     public private(set) var activeTorrentID: UUID?
     /// True briefly after start so the list row can morph into the shell pill.
     public var isActive: Bool {
@@ -365,6 +368,29 @@ public final class PersistentPlaybackController {
     ) async {
         guard !Task.isCancelled else { return }
 
+        if let infoHash = torrent.resolvedInfoHash,
+           let localPath = appServices.downloadPersistence?.completedFilePath(for: infoHash) {
+            PlaybackLog.log("runSingleAttempt -> playing local downloaded file: \(localPath)")
+            phase = .openingPlayer
+            coordinator.playLocalFile(
+                localFilePath: localPath,
+                torrent: torrent,
+                allTorrents: request.allTorrents,
+                playerState: playerState,
+                movieId: request.movieId,
+                subtitleURL: request.subtitleURL,
+                subtitleAppearance: request.playback.appearance,
+                subtitleFontSize: request.playback.fontSize,
+                episodeTitle: request.episodeTitle,
+                displayTitle: request.displayTitle,
+                resumePosition: request.resumePosition,
+                knownDurationSeconds: request.knownDurationSeconds
+            )
+            playerState.isStreamingTorrent = true
+            resetToIdleAfterPlayerOpen()
+            return
+        }
+
         let session = await coordinator.startSession(for: torrent)
         appServices.registerActiveSession(session)
         request.onSessionStarted?(session)
@@ -417,6 +443,29 @@ public final class PersistentPlaybackController {
             item = PersistentPlaybackItem.make(request: request, torrent: torrent)
             activeTorrentID = torrent.id
             phase = .preparing
+
+            if let infoHash = torrent.resolvedInfoHash,
+               let localPath = appServices.downloadPersistence?.completedFilePath(for: infoHash) {
+                PlaybackLog.log("runBestAvailableAttempts -> playing local downloaded file: \(localPath)")
+                phase = .openingPlayer
+                coordinator.playLocalFile(
+                    localFilePath: localPath,
+                    torrent: torrent,
+                    allTorrents: request.allTorrents,
+                    playerState: playerState,
+                    movieId: request.movieId,
+                    subtitleURL: request.subtitleURL,
+                    subtitleAppearance: request.playback.appearance,
+                    subtitleFontSize: request.playback.fontSize,
+                    episodeTitle: request.episodeTitle,
+                    displayTitle: request.displayTitle,
+                    resumePosition: request.resumePosition,
+                    knownDurationSeconds: request.knownDurationSeconds
+                )
+                playerState.isStreamingTorrent = true
+                resetToIdleAfterPlayerOpen()
+                return
+            }
 
             PlaybackLog.log(
                 "persistent attempt \(attempt)/\(min(maxAttempts, ordered.count)) — \"\(torrent.title)\" \(torrent.quality.rawValue)"
@@ -537,7 +586,7 @@ public final class PersistentPlaybackController {
                     publishUI(from: snapshot, session: session)
                 }
 
-                try? await Task.sleep(for: .milliseconds(500))
+                try? await Task.sleep(for: .milliseconds(1000))
             }
         }
     }
@@ -558,18 +607,41 @@ public final class PersistentPlaybackController {
         let rawPercent = Int(min(100, max(0, snapshot.progress * 100)).rounded())
         let progressPercent = (rawPercent / 4) * 4
         let phaseText = failedMessage == nil ? snapshot.phase : "Failed"
+        let detailLine = throttledRowDetail(
+            fresh: failedMessage ?? snapshot.detail,
+            phase: phaseText
+        )
         let tick = PersistentPlaybackUITick(
             movieId: item?.movieId,
             torrentId: activeTorrentID,
             progressPercent: progressPercent,
             phaseLabel: phaseText,
-            phaseDetail: failedMessage ?? snapshot.detail,
+            phaseDetail: detailLine,
             statusLine: phaseText,
             rowPhase: phaseText,
-            rowDetail: snapshot.detail,
+            rowDetail: detailLine,
             isActive: isActive
         )
         publishUITick(tick)
+    }
+
+    private func throttledRowDetail(fresh: String, phase: String) -> String {
+        let now = ContinuousClock.now
+        if phase != lastPublishedTick.rowPhase || failedPhase(phase) {
+            lastPublishedDetailLine = fresh
+            lastDetailPublishTime = now
+            return fresh
+        }
+        if let last = lastDetailPublishTime, now - last < Self.detailPublishMinInterval {
+            return lastPublishedDetailLine
+        }
+        lastPublishedDetailLine = fresh
+        lastDetailPublishTime = now
+        return fresh
+    }
+
+    private func failedPhase(_ phase: String) -> Bool {
+        phase == "Failed"
     }
 
     private func statusLineForPublish(
