@@ -273,16 +273,18 @@ public enum StreamTailPlanner {
     public static func isFastStartMP4(in data: Data) -> Bool {
         var offset = 0
         while offset + 8 <= data.count {
-            guard let box = readBox(at: offset, in: data) else { break }
-            switch box.type {
+            guard let header = mp4BoxHeader(at: offset, in: data, endsAtFileEOF: false) else { break }
+            switch header.type {
             case "moov":
                 return true
             case "mdat":
                 return false
             case "ftyp", "styp", "free", "skip", "wide", "uuid":
-                offset = box.end
+                guard header.endOffset <= data.count else { return false }
+                offset = header.endOffset
             default:
-                offset = box.end
+                guard header.endOffset <= data.count else { return false }
+                offset = header.endOffset
             }
         }
         return false
@@ -301,7 +303,7 @@ public enum StreamTailPlanner {
     }
 }
 
-private extension Data {
+extension Data {
     func readUInt32BE(at offset: Int) -> UInt32 {
         guard offset + 4 <= count else { return 0 }
         return UInt32(self[offset]) << 24 | UInt32(self[offset + 1]) << 16

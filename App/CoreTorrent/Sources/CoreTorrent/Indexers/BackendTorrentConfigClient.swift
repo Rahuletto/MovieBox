@@ -48,6 +48,44 @@ public enum TorrentIndexerPreferences {
         }
         return ids.sorted().joined(separator: ",")
     }
+
+    /// Keeps rows whose indexer is enabled in Settings (backend returns all indexers).
+    public static func filter(_ results: [TorrentResult], enabledIDs: Set<String>) -> [TorrentResult] {
+        guard !enabledIDs.isEmpty else { return [] }
+        return results.filter { torrent in
+            guard let id = torrent.indexerId ?? indexerId(for: torrent.trackerSource) else { return true }
+            return enabledIDs.contains(id)
+        }
+    }
+
+    /// Maps API `trackerSource` labels to catalog indexer ids.
+    public static func indexerId(for source: TrackerSource) -> String? {
+        switch source {
+        case .yts: "yts"
+        case .torrentio: "torrentio"
+        case .native(let site):
+            switch site.lowercased() {
+            case "pirate bay": "piratebay"
+            case "1337x": "1337x"
+            case "eztv": "eztv"
+            case "nyaa": "nyaa"
+            case "limetorrents": "limetorrents"
+            case "torrentgalaxy": "torrentgalaxy"
+            case "magnetdl": "magnetdl"
+            case "solid torrents": "solidtorrents"
+            case "rutracker": "rutracker"
+            case "kickasstorrents": "kickasstorrents"
+            case "rarbg": "rarbg"
+            case "zooqle": "zooqle"
+            case "torrentfunk": "torrentfunk"
+            case "isohunt": "isohunt"
+            case "torrent download": "torrentdownload"
+            case "bitsearch": "bitsearch"
+            default: nil
+            }
+        case .torrentAPI: nil
+        }
+    }
 }
 
 public actor BackendTorrentConfigClient {

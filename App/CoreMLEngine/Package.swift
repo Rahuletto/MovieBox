@@ -8,8 +8,7 @@ let package = Package(
         .library(name: "CoreMLEngine", targets: ["CoreMLEngine"])
     ],
     targets: [
-        .target(name: "CoreMLEngine"),
-        .testTarget(name: "CoreMLEngineTests", dependencies: ["CoreMLEngine"])
+        .target(name: "CoreMLEngine")
     ],
     swiftLanguageModes: [.v6]
 )

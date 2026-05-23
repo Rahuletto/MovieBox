@@ -1,12 +1,13 @@
 #if DEBUG
 import CoreStorage
 import Foundation
+import MovieBoxCore
 import SwiftData
 
 /// Applies Rahul's deployed Worker + app token when Settings are still empty (local dev only).
 enum DevelopmentSettings {
-    /// Base URL only — health check is `{proxyBaseURL}/health`, API is `{proxyBaseURL}/api/...`
-    static let proxyBaseURL = "https://moviebox-backend.rahulmarban.workers.dev"
+    /// Remote Worker — used when `useLocalBackend` is off.
+    static let proxyBaseURL = BackendProxyURL.production
 
     @MainActor
     static func applyIfNeeded(modelContext: ModelContext) {
@@ -24,6 +25,7 @@ enum DevelopmentSettings {
         var changed = false
         if settings.proxyBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             settings.proxyBaseURL = proxyBaseURL
+            settings.useLocalBackend = true
             changed = true
         }
         let trimmedToken = settings.appToken.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -34,7 +36,8 @@ enum DevelopmentSettings {
 
         guard changed else { return }
         try? modelContext.save()
-        NSLog("MovieBox: Applied development backend settings (\(proxyBaseURL))")
+        let endpoint = settings.useLocalBackend ? BackendProxyURL.local : settings.proxyBaseURL
+        NSLog("MovieBox: Applied development backend settings (\(endpoint))")
     }
 }
 #endif

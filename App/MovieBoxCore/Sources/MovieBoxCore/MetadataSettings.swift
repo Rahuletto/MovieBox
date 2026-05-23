@@ -7,7 +7,7 @@ public enum MetadataSettings {
     public static func resolveMode(from settings: [AppSettings]) async -> MetadataEndpointMode? {
         guard let s = settings.first else { return nil }
 
-        let base = s.proxyBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = s.resolvedProxyBaseURL
         let token = s.appToken.trimmingCharacters(in: .whitespacesAndNewlines)
         let tmdb = s.tmdbBearerToken.trimmingCharacters(in: .whitespacesAndNewlines)
 

@@ -11,6 +11,8 @@ export interface TorrentSearchHit {
   seeders: number
   leechers: number
   trackerSource: string
+  /** Canonical indexer id (e.g. `piratebay`) — set when merging indexer batches. */
+  indexerId?: string
 }
 
 export interface SearchContext {

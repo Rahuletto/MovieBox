@@ -13,7 +13,10 @@ export const pirateBayIndexer: TorrentIndexer = {
   async search(ctx) {
     const url = `https://apibay.org/q.php?q=${encodeURIComponent(ctx.query)}&cat=200`
     const rows = await fetchJSON<Array<Record<string, string>>>(url)
-    if (!rows?.length) return []
+    if (rows === null) {
+      throw new Error('Pirate Bay API (apibay.org) unreachable from backend')
+    }
+    if (!rows.length) return []
 
     return rows
       .filter((row) => row.id !== '0' && row.name)

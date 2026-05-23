@@ -86,13 +86,15 @@ final class RealTorrentStreamingTests: XCTestCase {
             query: query,
             year: year,
             imdbId: imdbId,
-            kind: kind,
-            enabledIndexerIDs: TorrentIndexerPreferences.defaultIDs
+            kind: kind
         )
         XCTAssertFalse(response.results.isEmpty, "backend returned 0 torrents for \(query)")
 
-        let candidates = response.results
-            .filter { ($0.infoHash?.count ?? 0) == 40 && $0.seeders > 0 }
+        let results = response.results
+        let candidates = results
+            .filter { result in
+                (result.infoHash?.count ?? 0) == 40 && result.seeders > 0
+            }
             .sorted { $0.seeders > $1.seeders }
         guard let top = candidates.first else {
             XCTFail("no seeded torrent with valid infoHash for \(query) in \(response.results.count) results")

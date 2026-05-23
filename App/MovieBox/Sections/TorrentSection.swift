@@ -157,6 +157,9 @@ struct TorrentSection: View {
         .onChange(of: settings.first?.proxyBaseURL) { _, _ in
             TorrentBackendSync.apply(from: settings.first)
         }
+        .onChange(of: settings.first?.useLocalBackend) { _, _ in
+            TorrentBackendSync.apply(from: settings.first)
+        }
         .onChange(of: settings.first?.appToken) { _, _ in
             TorrentBackendSync.apply(from: settings.first)
         }

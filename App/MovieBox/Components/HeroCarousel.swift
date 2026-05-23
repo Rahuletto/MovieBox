@@ -12,17 +12,20 @@ struct HeroCarousel: View {
 
     let movies: [Movie]
     let kind: MediaKind
+    let isActive: Bool
     let kindForMovie: ((Movie) -> MediaKind)?
     let action: (Movie) -> Void
 
     init(
         movies: [Movie],
         kind: MediaKind = .movie,
+        isActive: Bool = true,
         kindForMovie: ((Movie) -> MediaKind)? = nil,
         action: @escaping (Movie) -> Void
     ) {
         self.movies = movies
         self.kind = kind
+        self.isActive = isActive
         self.kindForMovie = kindForMovie
         self.action = action
     }
@@ -216,6 +219,7 @@ struct HeroCarousel: View {
                     }
             )
             .onReceive(timer) { _ in
+                guard isActive else { return }
                 if progress < 1.0 {
                     progress += 0.05 / 5.0
                 } else {
@@ -225,7 +229,8 @@ struct HeroCarousel: View {
                     }
                 }
             }
-            .task(id: currentMovie.id) {
+            .task(id: "\(currentMovie.id)-\(isActive)") {
+                guard isActive else { return }
                 await loadEnrichment(for: currentMovie, kind: currentKind)
             }
         )

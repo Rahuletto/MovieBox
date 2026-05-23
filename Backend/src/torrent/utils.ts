@@ -52,11 +52,17 @@ export function normalizeImdb(raw?: string | null): string | null {
   return value
 }
 
+/** Indexer APIs are dynamic — never cache subrequests (empty/error responses were getting stuck). */
+const INDEXER_FETCH_INIT: RequestInit = {
+  cache: 'no-store',
+  redirect: 'follow',
+}
+
 export async function fetchJSON<T>(url: string, referer?: string): Promise<T | null> {
   const headers: Record<string, string> = { 'User-Agent': USER_AGENT, Accept: 'application/json' }
   if (referer) headers.Referer = referer
   try {
-    const res = await fetch(url, { headers, cf: { cacheTtl: 300, cacheEverything: true } })
+    const res = await fetch(url, { ...INDEXER_FETCH_INIT, headers })
     if (!res.ok) return null
     return (await res.json()) as T
   } catch {
@@ -67,9 +73,13 @@ export async function fetchJSON<T>(url: string, referer?: string): Promise<T | n
 export async function fetchHTML(url: string, referer?: string): Promise<string | null> {
   const headers: Record<string, string> = { 'User-Agent': USER_AGENT, Accept: 'text/html' }
   if (referer) headers.Referer = referer
-  const res = await fetch(url, { headers, redirect: 'follow' })
-  if (!res.ok) return null
-  return await res.text()
+  try {
+    const res = await fetch(url, { ...INDEXER_FETCH_INIT, headers })
+    if (!res.ok) return null
+    return await res.text()
+  } catch {
+    return null
+  }
 }
 
 export function decodeHtml(text: string): string {

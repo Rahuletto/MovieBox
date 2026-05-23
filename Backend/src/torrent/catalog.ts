@@ -142,24 +142,20 @@ export const DEFAULT_ENABLED_INDEXER_IDS = INDEXER_CATALOG.filter((e) => e.defau
   (e) => e.id
 )
 
-/** Indexers that are ALWAYS included regardless of client toggles. */
-const FORCE_ENABLED_INDEXER_IDS = ['piratebay'] as const
+/** Every catalog indexer — used when the client omits `enabled` (Settings filter is app-side). */
+export const ALL_INDEXER_IDS = INDEXER_CATALOG.map((e) => e.id)
 
 export function parseEnabledIndexerIDs(raw: string | null | undefined): Set<string> {
   const known = new Set(INDEXER_CATALOG.map((e) => e.id))
-  if (raw === null || raw === undefined) return new Set(DEFAULT_ENABLED_INDEXER_IDS)
-  // An explicit empty string means "all disabled" — respect it instead of
-  // silently substituting the defaults (otherwise the Settings toggles look
-  // like they don't do anything).
+  // macOS app no longer sends `enabled`; run the full catalog and let the client filter.
+  if (raw === null || raw === undefined || raw.trim() === '') {
+    return new Set(ALL_INDEXER_IDS)
+  }
   const ids = new Set(
     raw
       .split(',')
       .map((s) => s.trim().toLowerCase())
       .filter((id) => known.has(id))
   )
-  // Always force-include critical indexers (piratebay has massive coverage).
-  for (const id of FORCE_ENABLED_INDEXER_IDS) {
-    ids.add(id)
-  }
   return ids
 }

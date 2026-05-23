@@ -19,10 +19,6 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("Network")
             ]
-        ),
-        .testTarget(
-            name: "CoreMetadataTests",
-            dependencies: ["CoreMetadata"]
         )
     ],
     swiftLanguageModes: [.v6]

@@ -6,9 +6,6 @@
 	"compatibility_flags": [
 		"nodejs_compat"
 	],
-	"observability": {
-		"enabled": true
-	},
 	"vars": {
 		"APP_ENV": "production",
 		"CORS_ORIGIN": "*",
