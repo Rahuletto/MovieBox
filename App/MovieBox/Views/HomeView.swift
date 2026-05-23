@@ -1,5 +1,6 @@
 import CoreMLEngine
 import CoreMetadata
+import CorePlayer
 import CoreStorage
 import DesignSystem
 import MovieBoxCore
@@ -8,6 +9,7 @@ import SwiftUI
 
 struct HomeView: View {
     @Environment(AppRouter.self) private var router
+    @Environment(PlayerState.self) private var playerState
     @Query private var settings: [AppSettings]
     @Query private var ratings: [RatingRecord]
     @Query private var storedMovies: [MovieRecord]
@@ -40,6 +42,7 @@ struct HomeView: View {
                                       HeroCarousel(
                                           movies: Array(trending.prefix(8)),
                                           kind: .movie,
+                                          isActive: allowsMetadataFetch,
                                           kindForMovie: { movie in
                                               kindByID[movie.id] ?? .movie
                                           }
@@ -160,14 +163,27 @@ struct HomeView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .task(id: settingsKey) {
-            guard metadataMode != nil else { return }
-            guard let mode = await MetadataSettings.resolveMode(from: settings) else { return }
+        .task(id: catalogTaskKey) {
+            guard allowsMetadataFetch, metadataMode != nil else { return }
+            guard let mode = metadataMode else { return }
             await load(mode: mode)
         }
         .task(id: personalizationKey) {
+            guard allowsMetadataFetch else { return }
             await refreshRecommendations()
         }
+    }
+
+    private var allowsMetadataFetch: Bool {
+        BackgroundFetchGate.allowsMetadataNetworking(
+            router: router,
+            playerState: playerState,
+            tab: .home
+        )
+    }
+
+    private var catalogTaskKey: String {
+        "\(settingsKey)|fetch:\(allowsMetadataFetch)"
     }
 
     private var metadataMode: MetadataEndpointMode? {
@@ -176,7 +192,7 @@ struct HomeView: View {
 
     private var settingsKey: String {
         guard let setting = settings.first else { return "missing" }
-        return "\(setting.proxyBaseURL)|\(setting.tmdbBearerToken)|\(setting.posterSize)|\(setting.backdropSize)|\(setting.requestTimeout)"
+        return "\(setting.useLocalBackend)|\(setting.resolvedProxyBaseURL)|\(setting.tmdbBearerToken)|\(setting.posterSize)|\(setting.backdropSize)|\(setting.requestTimeout)"
     }
 
     private var personalizationKey: String {
@@ -184,14 +200,17 @@ struct HomeView: View {
             .sorted { $0.tmdbId < $1.tmdbId }
             .map { "\($0.tmdbId):\($0.rating):\($0.ratedAt.timeIntervalSince1970)" }
             .joined(separator: "|")
-        let watchPart = storedMovies
+        let watchlistPart = storedMovies
+            .filter { $0.watchlistAddedAt != nil }
             .sorted { $0.tmdbId < $1.tmdbId }
-            .map {
-                "\($0.tmdbId):\($0.watchedFraction):\($0.playbackPositionSeconds):\(($0.lastWatchedAt ?? .distantPast).timeIntervalSince1970):\(($0.watchlistAddedAt ?? .distantPast).timeIntervalSince1970)"
-            }
-            .joined(separator: "|")
-        let rowPart = rows.values.flatMap { $0 }.map(\.id).sorted().map(String.init).joined(separator: ",")
-        return "\(ratingPart)#\(watchPart)#\(rowPart)"
+            .map { String($0.tmdbId) }
+            .joined(separator: ",")
+        let completedPart = storedMovies
+            .filter { $0.watchedFraction >= 0.8 }
+            .sorted { $0.tmdbId < $1.tmdbId }
+            .map { String($0.tmdbId) }
+            .joined(separator: ",")
+        return "\(ratingPart)#wl:\(watchlistPart)#done:\(completedPart)"
     }
 
     private func load(mode: MetadataEndpointMode) async {
@@ -226,7 +245,7 @@ struct HomeView: View {
             MetadataErrorLogger.record(error, context: "Home catalog load")
             errorMessage = MetadataErrorLogger.userMessage(
                 for: error,
-                backendURL: settings.first?.proxyBaseURL
+                backendURL: settings.first?.resolvedProxyBaseURL
             )
         }
     }

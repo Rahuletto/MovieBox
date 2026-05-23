@@ -2,6 +2,7 @@ import AppKit
 import CorePlayer
 import CoreStorage
 import CoreTorrent
+import MovieBoxCore
 import SwiftData
 import SwiftUI
 
@@ -115,9 +116,20 @@ private struct MetadataSettingsSection: View {
     var body: some View {
         Form {
             Section("Backend Proxy") {
-                TextField("Proxy Base URL", text: $draft.proxyBaseURL, prompt: Text("https://your-backend.workers.dev"))
+                Toggle("Use local backend (wrangler dev)", isOn: $draft.useLocalBackend)
+                if draft.useLocalBackend {
+                    LabeledContent("Proxy URL", value: BackendProxyURL.local)
+                    Text("Start the worker: `cd Backend && bun run dev`")
+                        .foregroundStyle(.secondary)
+                } else {
+                    TextField(
+                        "Proxy Base URL",
+                        text: $draft.proxyBaseURL,
+                        prompt: Text(BackendProxyURL.production)
+                    )
+                }
                 SecureField("App Token", text: $draft.appToken, prompt: Text("Enter token"))
-                Text("When configured, all metadata requests route through your Hono backend.")
+                Text("When configured, metadata and torrent search route through your Hono backend.")
                     .foregroundStyle(.secondary)
             }
 
@@ -207,6 +219,7 @@ private struct TorrentSettingsSection: View {
         .formStyle(.grouped)
         .task { await loadCatalog() }
         .onChange(of: draft.proxyBaseURL) { _, _ in Task { await loadCatalog() } }
+        .onChange(of: draft.useLocalBackend) { _, _ in Task { await loadCatalog() } }
         .onChange(of: draft.appToken) { _, _ in Task { await loadCatalog() } }
     }
 
@@ -227,7 +240,8 @@ private struct TorrentSettingsSection: View {
     }
 
     private func loadCatalog() async {
-        guard let url = URL(string: draft.proxyBaseURL), !draft.proxyBaseURL.isEmpty, !draft.appToken.isEmpty else {
+        let base = BackendProxyURL.resolved(proxyBaseURL: draft.proxyBaseURL, useLocalBackend: draft.useLocalBackend)
+        guard let url = URL(string: base), !base.isEmpty, !draft.appToken.isEmpty else {
             catalog = fallbackCatalog
             catalogError = nil
             return
@@ -402,6 +416,7 @@ private struct AdvancedSettingsSection: View {
 
 private struct SettingsDraft: Equatable {
     var proxyBaseURL = ""
+    var useLocalBackend = false
     var appToken = ""
     var tmdbBearerToken = ""
     var omdbAPIKey = ""
@@ -442,6 +457,7 @@ private struct SettingsDraft: Equatable {
     init(settings: AppSettings? = nil) {
         guard let settings else { return }
         proxyBaseURL = settings.proxyBaseURL
+        useLocalBackend = settings.useLocalBackend
         appToken = settings.appToken
         tmdbBearerToken = settings.tmdbBearerToken
         omdbAPIKey = settings.omdbAPIKey
@@ -482,6 +498,7 @@ private struct SettingsDraft: Equatable {
 
     func apply(to settings: AppSettings) {
         settings.proxyBaseURL = proxyBaseURL
+        settings.useLocalBackend = useLocalBackend
         settings.appToken = appToken
         settings.tmdbBearerToken = tmdbBearerToken
         settings.omdbAPIKey = omdbAPIKey

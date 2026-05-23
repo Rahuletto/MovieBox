@@ -37,14 +37,12 @@ public struct BackendTorrentSearcher: Sendable {
         query: String,
         year: Int?,
         imdbId: String?,
-        kind: TorrentioClient.MediaKind,
-        enabledIndexerIDs: Set<String>
+        kind: TorrentioClient.MediaKind
     ) async throws -> SearchResponse {
         var components = URLComponents(url: baseURL.appending(path: "api/torrent/search"), resolvingAgainstBaseURL: false)
         var items = [
             URLQueryItem(name: "q", value: query),
             URLQueryItem(name: "kind", value: kind.rawValue),
-            URLQueryItem(name: "enabled", value: TorrentIndexerPreferences.serialize(enabledIndexerIDs)),
         ]
         if let year { items.append(URLQueryItem(name: "year", value: String(year))) }
         if let imdbId, !imdbId.isEmpty { items.append(URLQueryItem(name: "imdbId", value: imdbId)) }
@@ -91,7 +89,7 @@ public struct BackendTorrentSearcher: Sendable {
         diagnostics.nativeCounts = payload.counts ?? [:]
         diagnostics.nativeErrors = payload.errors ?? [:]
         diagnostics.ytsCount = payload.counts?["yts"] ?? 0
-        diagnostics.ytsAttempted = enabledIndexerIDs.contains("yts") && kind == .movie
+        diagnostics.ytsAttempted = kind == .movie
 
         let results = payload.results.map { $0.torrentResult }
         return SearchResponse(
@@ -111,8 +109,7 @@ public struct BackendTorrentSearcher: Sendable {
         query: String,
         year: Int?,
         imdbId: String?,
-        kind: TorrentioClient.MediaKind,
-        enabledIndexerIDs: Set<String>
+        kind: TorrentioClient.MediaKind
     ) -> AsyncThrowingStream<StreamEvent, Error> {
         let baseURL = baseURL
         let appToken = appToken
@@ -127,7 +124,6 @@ public struct BackendTorrentSearcher: Sendable {
                     var items = [
                         URLQueryItem(name: "q", value: query),
                         URLQueryItem(name: "kind", value: kind.rawValue),
-                        URLQueryItem(name: "enabled", value: TorrentIndexerPreferences.serialize(enabledIndexerIDs)),
                     ]
                     if let year { items.append(URLQueryItem(name: "year", value: String(year))) }
                     if let imdbId, !imdbId.isEmpty { items.append(URLQueryItem(name: "imdbId", value: imdbId)) }
@@ -191,7 +187,7 @@ public struct BackendTorrentSearcher: Sendable {
                             diagnostics.torrentioError = payload.torrentio?.error
                             diagnostics.nativeCounts = payload.counts ?? [:]
                             diagnostics.nativeErrors = payload.errors ?? [:]
-                            diagnostics.ytsAttempted = enabledIndexerIDs.contains("yts") && kind == .movie
+                            diagnostics.ytsAttempted = kind == .movie
                             diagnostics.ytsCount = payload.counts?["yts"] ?? 0
                             continuation.yield(.done(
                                 diagnostics: diagnostics,
@@ -371,6 +367,7 @@ struct BackendTorrentHit: Decodable, Sendable {
     let seeders: Int?
     let leechers: Int?
     let trackerSource: String
+    let indexerId: String?
 
     var torrentResult: TorrentResult {
         let source: TrackerSource
@@ -392,7 +389,8 @@ struct BackendTorrentHit: Decodable, Sendable {
             seeders: seeders ?? 0,
             leechers: leechers ?? 0,
             trackerSource: source,
-            infoHash: infoHash
+            infoHash: infoHash,
+            indexerId: indexerId
         )
     }
 }

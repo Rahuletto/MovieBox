@@ -1,5 +1,6 @@
 import CoreMLEngine
 import CoreMetadata
+import CorePlayer
 import CoreStorage
 import DesignSystem
 import MovieBoxCore
@@ -8,6 +9,7 @@ import SwiftUI
 
 struct CatalogView: View {
     @Environment(AppRouter.self) private var router
+    @Environment(PlayerState.self) private var playerState
     @Query private var settings: [AppSettings]
     @Query private var ratings: [RatingRecord]
     @Query private var storedMovies: [MovieRecord]
@@ -49,7 +51,11 @@ struct CatalogView: View {
                         .frame(maxWidth: .infinity, minHeight: 260)
                     } else {
                         if let trending = rows[.trending], !trending.isEmpty {
-                            HeroCarousel(movies: Array(trending.prefix(5)), kind: kind) { movie in
+                            HeroCarousel(
+                                movies: Array(trending.prefix(5)),
+                                kind: kind,
+                                isActive: allowsMetadataFetch
+                            ) { movie in
                                 router.showDetail(id: movie.id, kind: kind)
                             }
                             .frame(maxWidth: .infinity)
@@ -118,12 +124,30 @@ struct CatalogView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .task(id: "\(settings.first?.cacheKey ?? "missing")|\(kind.rawValue)") {
+        .task(id: catalogTaskKey) {
+            guard allowsMetadataFetch else { return }
             await load()
         }
         .task(id: personalizationKey) {
+            guard allowsMetadataFetch else { return }
             await refreshPersonalizedSections()
         }
+    }
+
+    private var catalogTab: AppRouter.Route {
+        kind == .movie ? .movies : .tvShows
+    }
+
+    private var allowsMetadataFetch: Bool {
+        BackgroundFetchGate.allowsMetadataNetworking(
+            router: router,
+            playerState: playerState,
+            tab: catalogTab
+        )
+    }
+
+    private var catalogTaskKey: String {
+        "\(settings.first?.cacheKey ?? "missing")|\(kind.rawValue)|fetch:\(allowsMetadataFetch)"
     }
 
     private var personalizationKey: String {
@@ -131,16 +155,18 @@ struct CatalogView: View {
             .sorted { $0.tmdbId < $1.tmdbId }
             .map { "\($0.tmdbId):\($0.rating):\($0.ratedAt.timeIntervalSince1970)" }
             .joined(separator: "|")
-        let watchPart = storedMovies
-            .filter { $0.mediaKindEnum == kind }
+        let watchlistPart = storedMovies
+            .filter { $0.mediaKindEnum == kind && $0.watchlistAddedAt != nil }
             .sorted { $0.tmdbId < $1.tmdbId }
-            .map {
-                "\($0.tmdbId):\($0.watchedFraction):\($0.playbackPositionSeconds):\(($0.lastWatchedAt ?? .distantPast).timeIntervalSince1970):\(($0.watchlistAddedAt ?? .distantPast).timeIntervalSince1970)"
-            }
-            .joined(separator: "|")
-        let rowPart = rows.values.flatMap { $0 }.map(\.id).sorted().map(String.init).joined(separator: ",")
+            .map { String($0.tmdbId) }
+            .joined(separator: ",")
+        let completedPart = storedMovies
+            .filter { $0.mediaKindEnum == kind && $0.watchedFraction >= 0.8 }
+            .sorted { $0.tmdbId < $1.tmdbId }
+            .map { String($0.tmdbId) }
+            .joined(separator: ",")
         let basePart = baseExtraSections.flatMap(\.items).map(\.id).sorted().map(String.init).joined(separator: ",")
-        return "\(ratingPart)#\(watchPart)#\(rowPart)#\(basePart)"
+        return "\(ratingPart)#wl:\(watchlistPart)#done:\(completedPart)#base:\(basePart)"
     }
 
     private func load() async {
@@ -167,7 +193,7 @@ struct CatalogView: View {
             MetadataErrorLogger.record(error, context: "CatalogView load")
             errorMessage = MetadataErrorLogger.userMessage(
                 for: error,
-                backendURL: settings.first?.proxyBaseURL
+                backendURL: settings.first?.resolvedProxyBaseURL
             )
         }
     }

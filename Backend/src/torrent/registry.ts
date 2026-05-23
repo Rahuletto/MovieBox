@@ -47,6 +47,10 @@ export { INDEXER_CATALOG, DEFAULT_ENABLED_INDEXER_IDS, parseEnabledIndexerIDs } 
 
 const INDEXER_TIMEOUT_MS = 8_000
 
+function tagIndexerRows(rows: TorrentSearchHit[], indexerId: string): TorrentSearchHit[] {
+  return rows.map((row) => ({ ...row, indexerId }))
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return Promise.race([
     promise,
@@ -75,8 +79,8 @@ export async function runIndexersStreaming(
   const byHash = new Map<string, TorrentSearchHit>()
   const unhashed: TorrentSearchHit[] = []
 
-  const mergeRows = (rows: TorrentSearchHit[]) => {
-    for (const row of rows) {
+  const mergeRows = (rows: TorrentSearchHit[], indexerId: string) => {
+    for (const row of tagIndexerRows(rows, indexerId)) {
       const key = row.infoHash?.toLowerCase()
       if (!key) {
         unhashed.push(row)
@@ -93,9 +97,10 @@ export async function runIndexersStreaming(
     active.map(async (indexer) => {
       try {
         const rows = await withTimeout(indexer.search(ctx), INDEXER_TIMEOUT_MS)
-        counts[indexer.id] = rows.length
-        mergeRows(rows)
-        await onBatch({ id: indexer.id, rows })
+        const tagged = tagIndexerRows(rows, indexer.id)
+        counts[indexer.id] = tagged.length
+        mergeRows(rows, indexer.id)
+        await onBatch({ id: indexer.id, rows: tagged })
       } catch (reason) {
         const message = reason instanceof Error ? reason.message : String(reason)
         errors[indexer.id] = message
@@ -144,8 +149,9 @@ export async function runIndexers(
     const indexer = active[i]
     if (outcome.status === 'fulfilled') {
       const { id, rows } = outcome.value
-      counts[id] = rows.length
-      for (const row of rows) {
+      const tagged = tagIndexerRows(rows, id)
+      counts[id] = tagged.length
+      for (const row of tagged) {
         const key = row.infoHash?.toLowerCase()
         if (!key) {
           unhashed.push(row)

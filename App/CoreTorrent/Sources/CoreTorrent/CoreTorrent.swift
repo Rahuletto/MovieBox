@@ -88,6 +88,8 @@ public struct TorrentResult: Identifiable, Sendable, Codable, Hashable {
     public let trackerSource: TrackerSource
     public let infoHash: String?
     public let language: String
+    /// Backend indexer id (`piratebay`, `yts`, …) when known — used for Settings provider filter.
+    public let indexerId: String?
 
     public init(
         id: UUID = UUID(),
@@ -105,7 +107,8 @@ public struct TorrentResult: Identifiable, Sendable, Codable, Hashable {
         uploadDate: Date = Date(),
         trackerSource: TrackerSource,
         infoHash: String? = nil,
-        language: String? = nil
+        language: String? = nil,
+        indexerId: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -123,6 +126,7 @@ public struct TorrentResult: Identifiable, Sendable, Codable, Hashable {
         self.trackerSource = trackerSource
         self.infoHash = infoHash
         self.language = language ?? ReleaseParser.parseLanguage(from: title)
+        self.indexerId = indexerId
     }
 }
 
@@ -376,12 +380,15 @@ public actor TorrentSearchAggregator {
                                 query: query,
                                 year: year,
                                 imdbId: imdbId,
-                                kind: kind,
-                                enabledIndexerIDs: enabledIndexerIDs
+                                kind: kind
                             )
                             lastDiagnostics = response.diagnostics
+                            let filtered = Self.filterByEnabledIndexers(
+                                Self.sorted(response.results),
+                                enabledIDs: enabledIndexerIDs
+                            )
                             continuation.yield(TorrentSearchProgress(
-                                torrents: Self.sorted(response.results),
+                                torrents: filtered,
                                 diagnostics: response.diagnostics,
                                 isComplete: true
                             ))
@@ -444,13 +451,13 @@ public actor TorrentSearchAggregator {
                 query: query,
                 year: year,
                 imdbId: imdbId,
-                kind: kind,
-                enabledIndexerIDs: enabledIndexerIDs
+                kind: kind
             ) {
                 switch event {
                 case .batch(_, let results):
-                    guard !results.isEmpty else { continue }
-                    batches.append(results)
+                    let kept = Self.filterByEnabledIndexers(results, enabledIDs: enabledIndexerIDs)
+                    guard !kept.isEmpty else { continue }
+                    batches.append(kept)
                     let merged = Self.sorted(Self.merged(batches))
                     continuation.yield(TorrentSearchProgress(
                         torrents: merged,
@@ -471,8 +478,9 @@ public actor TorrentSearchAggregator {
                     diagnostics.queryUsed = query
                     diagnostics.nativeErrors["backend"] = message
                     self.lastDiagnostics = diagnostics
+                    let merged = Self.sorted(Self.merged(batches))
                     continuation.yield(TorrentSearchProgress(
-                        torrents: Self.sorted(Self.merged(batches)),
+                        torrents: merged,
                         diagnostics: diagnostics,
                         isComplete: true
                     ))
@@ -505,6 +513,13 @@ public actor TorrentSearchAggregator {
             }
         }
         return Array(byHash.values) + unhashed
+    }
+
+    private static func filterByEnabledIndexers(
+        _ results: [TorrentResult],
+        enabledIDs: Set<String>
+    ) -> [TorrentResult] {
+        TorrentIndexerPreferences.filter(results, enabledIDs: enabledIDs)
     }
 
     private static func sorted(_ results: [TorrentResult]) -> [TorrentResult] {

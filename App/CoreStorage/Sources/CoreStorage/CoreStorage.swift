@@ -111,6 +111,8 @@ public final class DownloadRecord {
 @Model
 public final class AppSettings {
     public var proxyBaseURL: String
+    /// When true, API calls use `http://127.0.0.1:8787` (wrangler dev) instead of `proxyBaseURL`.
+    public var useLocalBackend: Bool
     public var appToken: String
     public var tmdbBearerToken: String
     public var omdbAPIKey: String
@@ -151,6 +153,7 @@ public final class AppSettings {
 
     public init(
         proxyBaseURL: String = "",
+        useLocalBackend: Bool = false,
         appToken: String = "",
         tmdbBearerToken: String = "",
         omdbAPIKey: String = "",
@@ -189,6 +192,7 @@ public final class AppSettings {
         logTorrentActivity: Bool = false
     ) {
         self.proxyBaseURL = proxyBaseURL
+        self.useLocalBackend = useLocalBackend
         self.appToken = appToken
         self.tmdbBearerToken = tmdbBearerToken
         self.omdbAPIKey = omdbAPIKey

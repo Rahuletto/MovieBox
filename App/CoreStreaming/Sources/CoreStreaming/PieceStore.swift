@@ -276,20 +276,27 @@ public actor PieceStore {
             return prefix > 0 ? (offset, prefix) : nil
         }
 
+        var suffixStart = rangeEnd
         let firstPiece = Int(offset / pieceSize)
         let lastPiece = Int((rangeEnd - 1) / pieceSize)
+
         for pieceIndex in stride(from: lastPiece, through: firstPiece, by: -1) {
             let pieceStart = Int64(pieceIndex) * pieceSize
             let spanStart = max(offset, pieceStart)
-            let spanEnd = min(rangeEnd, pieceStart + pieceSize(for: pieceIndex))
-            let spanLen = Int(spanEnd - spanStart)
-            guard spanLen > 0 else { continue }
+            let spanEnd = min(suffixStart, pieceStart + pieceSize(for: pieceIndex))
+            
+            guard spanEnd > spanStart else { break }
+            
             let available = readablePrefixLength(offset: spanStart, rangeEnd: spanEnd)
-            if available > 0 {
-                return (spanStart, available)
+            if available == Int(spanEnd - spanStart) {
+                suffixStart = spanStart
+            } else {
+                break
             }
         }
-        return nil
+
+        let suffixLen = Int(rangeEnd - suffixStart)
+        return suffixLen > 0 ? (suffixStart, suffixLen) : nil
     }
 
     private func readablePrefixLength(offset: Int64, rangeEnd: Int64) -> Int {

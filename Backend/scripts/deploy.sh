@@ -12,10 +12,10 @@ if [[ ! -f .dev.vars ]]; then
 fi
 
 echo "→ Syncing secrets from .dev.vars …"
-pnpm exec wrangler secret bulk .dev.vars
+bunx wrangler secret bulk .dev.vars
 
 echo "→ Deploying worker …"
-pnpm exec wrangler deploy --minify
+bunx wrangler deploy --minify
 
 echo "→ Waiting for edge propagation …"
 sleep 4
@@ -59,7 +59,7 @@ echo "✓ /api/config OK"
 echo "✓ /api/tmdb/movie/popular OK"
 echo ""
 echo "Deployed: ${WORKER_URL}"
-echo "Version: $(pnpm exec wrangler deployments list 2>/dev/null | head -5 || echo 'see Cloudflare dashboard')"
+echo "Version: $(bunx wrangler deployments list 2>/dev/null | head -5 || echo 'see Cloudflare dashboard')"
 echo ""
 echo "→ Full endpoint smoke (all /api routes the app uses) …"
 if MOVIEBOX_WORKER_URL="${WORKER_URL}" pnpm smoke; then

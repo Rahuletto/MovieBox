@@ -2,18 +2,16 @@
   "name": "moviebox-backend",
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev --port 8787 --var APP_ENV:development",
-    "dev:remote": "wrangler dev --remote --port 8787 --var APP_ENV:development",
+    "dev": "bunx wrangler dev --port 8787 --var APP_ENV:development",
+    "dev:remote": "bunx wrangler dev --remote --port 8787 --var APP_ENV:development",
     "deploy": "bash scripts/deploy.sh",
-    "deploy:quick": "wrangler deploy --minify",
-    "cf-typegen": "wrangler types --env-interface CloudflareBindings",
+    "deploy:quick": "bunx wrangler deploy --minify",
+    "cf-typegen": "bunx wrangler types --env-interface CloudflareBindings",
     "lint": "oxlint .",
     "lint:fix": "oxlint . --fix",
     "lint:strict": "oxlint . --deny-warnings",
     "fmt": "oxfmt .",
     "fmt:check": "oxfmt --check .",
-    "test": "vitest run --config vitest.unit.config.ts",
-    "test:watch": "vitest --config vitest.unit.config.ts",
     "smoke": "node scripts/smoke-worker.mjs",
     "smoke:dev": "MOVIEBOX_WORKER_URL=http://127.0.0.1:8787 node scripts/smoke-worker.mjs",
     "smoke:prod": "MOVIEBOX_WORKER_URL=https://moviebox-backend.rahulmarban.workers.dev node scripts/smoke-worker.mjs",
@@ -27,11 +25,9 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.16.6",
     "@types/node": "^25.8.0",
     "oxfmt": "^0.16.0",
     "oxlint": "^1.16.0",
-    "vitest": "^4.1.6",
     "wrangler": "^4.4.0"
   }
 }

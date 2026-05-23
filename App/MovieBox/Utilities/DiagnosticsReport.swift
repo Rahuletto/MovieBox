@@ -7,7 +7,8 @@ enum DiagnosticsReport {
     static func settingsSummary(from settings: AppSettings?) -> String {
         let downloadPath = (settings?.defaultDownloadPath as NSString?)?.expandingTildeInPath ?? ""
         return """
-        Proxy Base URL: \(settings?.proxyBaseURL ?? "Not Configured")
+        Use Local Backend: \(settings?.useLocalBackend == true ? "Yes" : "No")
+        Proxy Base URL: \(settings?.resolvedProxyBaseURL ?? "Not Configured")
         Default Download Path: \(settings?.defaultDownloadPath ?? "Not Configured")
         Preferred Quality: \(settings?.preferredQuality ?? "Not Configured")
         Metadata Mode: \(String(describing: settings?.metadataMode))

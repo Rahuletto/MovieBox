@@ -31,7 +31,7 @@ public final class HTTPRangeServer {
     /// Monotonic id for temporary AVPlayer range-request tracing.
     private var rangeRequestSequence = 0
 
-    private static let maxRangeBytes = 2 * 1024 * 1024
+    private static let maxRangeBytes = 32 * 1024 * 1024
     private static let readTimeoutSeconds: UInt64 = 300
     private static let bufferWaitSeconds: UInt64 = 300
 
@@ -359,7 +359,18 @@ public final class HTTPRangeServer {
                             preferSuffix: isSuffixRange
                         ) else {
                             TorrentLog.warn(
-                                "[HTTPRangeServer] No readable bytes for range \(mediaStart)-\(mediaEnd) (suffix=\(isSuffixRange)) after \(Self.bufferWaitSeconds)s"
+                                "[HTTPRangeServer] No readable bytes for range \(mediaStart)-\(mediaEnd) (suffix=\(isSuffixRange)) after \(Self.bufferWaitSeconds)s — " +
+                                "torrentOffset=\(torrentOffset) (AVPlayer may be probing for moov)"
+                            )
+                            DebugSessionLog.event(
+                                "range_unreadable",
+                                location: "HTTPRangeServer.handleRange",
+                                data: [
+                                    "mediaStart": mediaStart,
+                                    "mediaEnd": mediaEnd,
+                                    "suffix": isSuffixRange,
+                                    "torrentOffset": torrentOffset,
+                                ]
                             )
                             return logRangeServerAndReturn(
                                 id: rangeReqID,

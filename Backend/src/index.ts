@@ -26,6 +26,7 @@ import {
 } from './schemas'
 import { parseParams, parseQuery } from './validate'
 import { resolveTrailerStreamURL } from './trailer-resolve'
+import { fetchWithRetry, isLocalWorkerRequest } from './fetch-retry'
 import { buildTMDBUpstreamURL, tmdbPathFromRequest } from './tmdb-upstream'
 import { kvDelete, kvGet, kvGetBuffer, kvList, kvPut } from './kv-cache'
 import {
@@ -267,15 +268,14 @@ app.all('/api/tmdb/*', async (c) => {
       })
     }
 
-    const isLocal = c.req.url.includes('127.0.0.1') || c.req.url.includes('localhost')
-    const fetchOptions: any = { headers }
-    if (!isLocal) {
-      fetchOptions.cf = {
+    const fetchInit: RequestInit = { headers }
+    if (!isLocalWorkerRequest(c.req.url)) {
+      ;(fetchInit as RequestInit & { cf?: { cacheEverything: boolean; cacheTtl: number } }).cf = {
         cacheEverything: true,
         cacheTtl: cacheTTLForTMDBPath(upstreamPath),
       }
     }
-    const response = await fetch(upstreamURL, fetchOptions)
+    const response = await fetchWithRetry(upstreamURL, fetchInit)
 
     if (!response.ok) {
       const errorBody = await response.text()
@@ -363,7 +363,7 @@ async function fetchExternalIds(
   if (cached) return JSON.parse(cached) as ExternalIds
 
   const url = `https://api.themoviedb.org/3/${kind}/${id}/external_ids`
-  const response = await fetch(url, {
+  const response = await fetchWithRetry(url, {
     headers: { Authorization: `Bearer ${c.env.TMDB_TOKEN}` },
   })
 
@@ -570,7 +570,7 @@ app.get('/api/logo/:kind/:id', async (c) => {
     // the TMDB title/year via OMDB and use the recovered imdb_id for fanart.
     let imdbForFanart: string | null = extIds.imdb_id ?? null
     if (!imdbForFanart && !(kind === 'tv' && extIds.tvdb_id) && c.env.OMDB_API_KEY) {
-      const titleResp = await fetch(`https://api.themoviedb.org/3/${kind}/${id}?language=en-US`, {
+      const titleResp = await fetchWithRetry(`https://api.themoviedb.org/3/${kind}/${id}?language=en-US`, {
         headers: { Authorization: `Bearer ${c.env.TMDB_TOKEN}` },
       })
       if (titleResp.ok) {
@@ -827,7 +827,7 @@ app.get('/api/title/:kind/:id', async (c) => {
         ? 'credits,similar,external_ids,videos,release_dates'
         : 'credits,similar,external_ids,videos,content_ratings'
     const url = `https://api.themoviedb.org/3/${kind}/${id}?append_to_response=${append}`
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
       headers: { Authorization: `Bearer ${c.env.TMDB_TOKEN}` },
     })
 
@@ -984,7 +984,7 @@ app.get('/api/person/:id', async (c) => {
     }
 
     const url = `https://api.themoviedb.org/3/person/${id}?append_to_response=combined_credits,external_ids`
-    const response = await fetch(url, {
+    const response = await fetchWithRetry(url, {
       headers: { Authorization: `Bearer ${c.env.TMDB_TOKEN}` },
     })
 
