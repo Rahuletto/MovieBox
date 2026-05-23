@@ -1100,43 +1100,67 @@ app.get('/api/subtitles/search', async (c) => {
     const type = sub.type
     const imdbId = sub.imdb_id
 
-    const cacheKey = `subf2m:search:${title ?? ''}:${imdbId ?? ''}:${year ?? ''}:${language}:${type}`
+    const cacheKey = `subf2m:v2:search:${title ?? ''}:${imdbId ?? ''}:${year ?? ''}:${language}:${type}`
     const cached = await kvGet(c.env.MOVIEBOX_CACHE,cacheKey)
     if (cached) {
       return c.json(JSON.parse(cached), { headers: { 'X-Cache': 'HIT' } })
     }
 
-    const searchQuery = imdbId ? `tt${imdbId.replace(/^tt/i, '')}` : title || ''
-    const searchUrl = buildSubf2mURL(
-      `/subtitles/searchbytitle?query=${encodeURIComponent(searchQuery)}&l=`
-    ).toString()
-    const searchHtml = await fetchWithTimeout(searchUrl)
-
-    if (!searchHtml) {
-      return c.json({ subtitles: [] })
+    const langParam = normalizeLanguageCode(language)
+    const searchQueries: string[] = []
+    if (imdbId) {
+      searchQueries.push(`tt${imdbId.replace(/^tt/i, '')}`)
+    }
+    if (title?.trim()) {
+      searchQueries.push(title.trim())
     }
 
-    const results = parseSubf2mSearchResults(searchHtml, year)
+    let results: Subf2mSearchResult[] = []
+    for (const searchQuery of searchQueries) {
+      const searchUrl = buildSubf2mURL(
+        `/subtitles/searchbytitle?query=${encodeURIComponent(searchQuery)}&l=`
+      ).toString()
+      const searchHtml = await fetchWithTimeout(searchUrl, {
+        headers: SUBF2M_FETCH_HEADERS,
+        timeout: 20000,
+      })
+      if (!searchHtml) continue
+      results = parseSubf2mSearchResults(searchHtml, year)
+      if (results.length === 0 && year) {
+        results = parseSubf2mSearchResults(searchHtml, null)
+      }
+      if (results.length > 0) break
+    }
+
     if (results.length === 0) {
       return c.json({ subtitles: [] })
     }
 
     const subtitles: SubtitleResult[] = []
-    for (const result of results.slice(0, 3)) {
-      const detailUrl = buildSubf2mURL(
-        `${result.path}/${normalizeLanguageCode(language)}`
-      ).toString()
-      const detailHtml = await fetchWithTimeout(detailUrl)
-      if (detailHtml) {
-        const items = parseSubf2mDetailPage(detailHtml, result.path, language)
-        subtitles.push(...items)
+    const seenDownloadUrls = new Set<string>()
+    for (const result of results.slice(0, 5)) {
+      const detailPath =
+        langParam === 'all' ? result.path : `${result.path}/${langParam}`
+      const detailUrl = buildSubf2mURL(detailPath).toString()
+      const detailHtml = await fetchWithTimeout(detailUrl, {
+        headers: SUBF2M_FETCH_HEADERS,
+        timeout: 30000,
+      })
+      if (!detailHtml) continue
+      const items = parseSubf2mDetailPage(detailHtml, result.path, language)
+      for (const item of items) {
+        if (seenDownloadUrls.has(item.downloadUrl)) continue
+        seenDownloadUrls.add(item.downloadUrl)
+        subtitles.push(item)
       }
     }
 
     const response = { subtitles }
-    await kvPut(c.env.MOVIEBOX_CACHE,cacheKey, JSON.stringify(response), {
-      expirationTtl: 60 * 60 * 6,
-    })
+    if (subtitles.length > 0) {
+      await kvPut(c.env.MOVIEBOX_CACHE, cacheKey, JSON.stringify(response), {
+        expirationTtl: 60 * 60 * 6,
+      })
+    }
     return c.json(response, { headers: { 'X-Cache': 'MISS' } })
   } catch (error) {
     return c.json(
@@ -1172,7 +1196,7 @@ app.get('/api/subtitles/download', async (c) => {
     } catch {
       return c.json({ error: 'bad_request', message: 'Subtitle URL is not allowed.' }, 400)
     }
-    const html = await fetchWithTimeout(fullUrl)
+    const html = await fetchWithTimeout(fullUrl, { headers: SUBF2M_FETCH_HEADERS })
     if (!html) {
       return c.json({ error: 'not_found', message: 'Could not fetch subtitle page.' }, 404)
     }
@@ -1190,7 +1214,10 @@ app.get('/api/subtitles/download', async (c) => {
     } catch {
       return c.json({ error: 'bad_request', message: 'Subtitle download URL is not allowed.' }, 400)
     }
-    const zipResponse = await fetchWithTimeout(dlUrl, { returnType: 'arrayBuffer' })
+    const zipResponse = await fetchWithTimeout(dlUrl, {
+      returnType: 'arrayBuffer',
+      headers: SUBF2M_FETCH_HEADERS,
+    })
     if (!zipResponse) {
       return c.json({ error: 'download_failed', message: 'Failed to download subtitle ZIP.' }, 502)
     }
@@ -1257,7 +1284,16 @@ interface SubtitleResult {
   downloadUrl: string
 }
 
+const SUBF2M_FETCH_HEADERS: Record<string, string> = {
+  'User-Agent':
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  Accept: 'text/html,application/xhtml+xml',
+  'Accept-Language': 'en-US,en;q=0.9',
+}
+
 function normalizeLanguageCode(lang: string): string {
+  const normalized = lang.trim().toLowerCase()
+  if (normalized === 'all' || normalized === '*') return 'all'
   const map: Record<string, string> = {
     en: 'english',
     english: 'english',
@@ -1345,33 +1381,47 @@ function normalizeLanguageCode(lang: string): string {
 
 function parseSubf2mSearchResults(html: string, targetYear?: string | null): Subf2mSearchResult[] {
   const results: Subf2mSearchResult[] = []
+  const seenPaths = new Set<string>()
 
   const searchResultStart = html.indexOf('<div class="search-result">')
   if (searchResultStart === -1) return results
 
   const afterStart = html.substring(searchResultStart)
+  const sectionRegex =
+    /<h2[^>]*>(?:Exact|Close|Popular)[^<]*<\/h2>[\s\S]*?<ul>([\s\S]*?)<\/ul>/gi
+  let sectionMatch: RegExpExecArray | null
 
-  const ulMatch = afterStart.match(
-    /<h2 class="(exact|close|popular)">[\s\S]*?<ul>([\s\S]*?)<\/ul>/i
-  )
-  if (!ulMatch) return results
-
-  const listHtml = ulMatch[2]
-  const itemRegex = /<li>[\s\S]*?<a href="([^"]+)">([^<]+)<\/a>[\s\S]*?<\/li>/g
-  let match
-
-  while ((match = itemRegex.exec(listHtml)) !== null) {
-    const path = match[1]
-    const fullTitle = match[2].trim()
-
+  const addResult = (path: string, fullTitle: string) => {
+    if (!path.startsWith('/subtitles/') || seenPaths.has(path)) return
     const yearMatch = fullTitle.match(/\((\d{4})\)/)
     const year = yearMatch ? yearMatch[1] : null
-
-    const title = fullTitle.replace(/\s*\(.*$/, '').trim()
-
-    if (targetYear && year && year !== targetYear) continue
-
+    const title = fullTitle.replace(/\s*\(\d{4}\).*$/, '').replace(/\s+/g, ' ').trim()
+    if (targetYear && year && year !== targetYear) return
+    seenPaths.add(path)
     results.push({ title, year: year || '', path })
+  }
+
+  while ((sectionMatch = sectionRegex.exec(afterStart)) !== null) {
+    const listHtml = sectionMatch[1]
+    const itemRegex =
+      /<li>[\s\S]*?<a\s+href="(\/subtitles\/[^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<\/li>/gi
+    let match: RegExpExecArray | null
+    while ((match = itemRegex.exec(listHtml)) !== null) {
+      const path = match[1]
+      const fullTitle = match[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+      addResult(path, fullTitle)
+    }
+  }
+
+  if (results.length === 0) {
+    const fallbackRegex =
+      /<a\s+href="(\/subtitles\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi
+    let match: RegExpExecArray | null
+    while ((match = fallbackRegex.exec(afterStart)) !== null) {
+      const path = match[1]
+      const fullTitle = match[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+      addResult(path, fullTitle)
+    }
   }
 
   return results
@@ -1379,7 +1429,7 @@ function parseSubf2mSearchResults(html: string, targetYear?: string | null): Sub
 
 function parseSubf2mDetailPage(html: string, basePath: string, language: string): SubtitleResult[] {
   const subtitles: SubtitleResult[] = []
-  const lang = normalizeLanguageCode(language)
+  const fallbackLang = normalizeLanguageCode(language)
 
   const itemRegex = /<li class='item\s*'>([\s\S]*?)<\/li>\s*(?=<li class='item|$)/g
   let itemMatch
@@ -1387,24 +1437,33 @@ function parseSubf2mDetailPage(html: string, basePath: string, language: string)
   while ((itemMatch = itemRegex.exec(html)) !== null) {
     const itemHtml = itemMatch[1]
 
-    const downloadMatch = itemHtml.match(/<a\s+class='download\s+icon-download'\s+href='([^']+)'/i)
+    const downloadMatch = itemHtml.match(
+      /<a\s+class=['"]download\s+icon-download['"]\s+href=['"]([^'"]+)['"]/i
+    )
     if (!downloadMatch) continue
 
     const downloadUrl = downloadMatch[1]
 
-    const authorMatch = itemHtml.match(/<b>By\s*<a[^>]*>([^<]+)<\/a>/i)
-    const author = authorMatch ? authorMatch[1].trim() : 'Unknown'
+    const authorMatch = itemHtml.match(/<b>\s*By\s*<a[^>]*>([^<]+)<\/a>/i)
+    const author = authorMatch ? authorMatch[1].replace(/\s+/g, ' ').trim() : 'Unknown'
 
     const releaseMatch = itemHtml.match(/<ul class='scrolllist'>[\s\S]*?<li>([^<]+)<\/li>/i)
-    const release = releaseMatch ? releaseMatch[1].trim() : ''
+    const release = releaseMatch ? releaseMatch[1].replace(/\s+/g, ' ').trim() : ''
+
+    const langMatch = itemHtml.match(/<span class='language[^']*'>([^<]+)<\/span>/i)
+    const itemLang = langMatch
+      ? langMatch[1].replace(/\s+/g, ' ').trim().toLowerCase()
+      : fallbackLang === 'all'
+        ? 'unknown'
+        : fallbackLang
 
     const name = release || author
 
     subtitles.push({
-      id: btoa(`${downloadUrl}___${lang}`),
+      id: btoa(`${downloadUrl}___${itemLang}`),
       name,
       author,
-      language: lang,
+      language: itemLang,
       downloadUrl,
     })
   }
@@ -1456,15 +1515,19 @@ async function extractSrtFromZip(zipBuffer: ArrayBuffer): Promise<string | null>
 
 async function fetchWithTimeout(
   url: string,
-  options: { timeout?: number; returnType?: 'text' | 'arrayBuffer' } = {}
+  options: {
+    timeout?: number
+    returnType?: 'text' | 'arrayBuffer'
+    headers?: Record<string, string>
+  } = {}
 ): Promise<string | ArrayBuffer | null> {
-  const { timeout = 10000, returnType = 'text' } = options
+  const { timeout = 10000, returnType = 'text', headers } = options
 
   const controller = new AbortController()
   const id = setTimeout(() => controller.abort(), timeout)
 
   try {
-    const response = await fetch(url, { signal: controller.signal })
+    const response = await fetch(url, { signal: controller.signal, headers })
     clearTimeout(id)
 
     if (!response.ok) return null

@@ -40,7 +40,7 @@ public enum MovieDetailLoader {
         let client = MetadataClient(mode: mode)
         let loadedDetail = try await client.movieDetail(id: movieId, kind: kind)
 
-        let subtitles = await loadSubtitles(detail: loadedDetail, settings: settings)
+        let subtitles = await loadSubtitles(detail: loadedDetail, kind: kind, settings: settings)
 
         if kind == .tv {
             let seasons: [TVSeasonSummary]
@@ -84,23 +84,50 @@ public enum MovieDetailLoader {
 
     /// Subtitle search can be slow; call from a detached task after the main detail UI is on screen.
     @MainActor
-    public static func loadSubtitles(detail: MovieDetail, settings: AppSettings?) async -> [SubtitleInfo] {
-        guard let mode = settings?.metadataMode else { return [] }
-        let preferredLang = settings?.preferredSubtitleLang ?? "en"
+    public static func loadSubtitles(
+        detail: MovieDetail,
+        kind: MediaKind,
+        settings: AppSettings?
+    ) async -> [SubtitleInfo] {
+        guard let mode = Self.subtitleServiceMode(from: settings) else { return [] }
         let title = detail.movie.title
         let year = Int(detail.movie.releaseDate.prefix(4))
         let imdb = detail.imdbId
         let subtitleClient = SubtitleClient(mode: mode)
         do {
-            return try await subtitleClient.searchSubtitles(
+            let results = try await subtitleClient.searchSubtitles(
                 title: title,
                 year: year,
-                language: preferredLang,
+                language: "all",
+                type: kind == .tv ? "tv" : "movie",
                 imdbId: imdb
             )
+            if results.isEmpty {
+                NSLog("Subtitle search returned 0 for \"\(title)\" year=\(year.map(String.init) ?? "nil") imdb=\(imdb ?? "nil")")
+            }
+            return results
         } catch {
+            NSLog("Subtitle search failed for \"\(title)\": \(error.localizedDescription)")
             return []
         }
+    }
+
+    /// Subtitles are scraped via the MovieBox worker (never direct TMDB).
+    public static func subtitleServiceMode(from settings: AppSettings?) -> MetadataEndpointMode? {
+        guard let settings else { return nil }
+        let token = settings.appToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else { return nil }
+
+        // Dev misconfig: production URL saved but `useLocalBackend` still routes to 127.0.0.1:8787.
+        if settings.useLocalBackend,
+           settings.proxyBaseURL.trimmingCharacters(in: .whitespacesAndNewlines) == BackendProxyURL.production,
+           let prod = URL(string: BackendProxyURL.production) {
+            return .backend(baseURL: prod, appToken: token)
+        }
+
+        let base = settings.resolvedProxyBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: base), !base.isEmpty else { return nil }
+        return .backend(baseURL: url, appToken: token)
     }
 
     @MainActor

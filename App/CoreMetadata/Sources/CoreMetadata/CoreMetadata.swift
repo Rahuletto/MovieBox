@@ -1403,12 +1403,38 @@ public struct SubtitleInfo: Sendable, Codable, Identifiable, Hashable {
     public let language: String
     public let downloadUrl: String
 
+    enum CodingKeys: String, CodingKey {
+        case id, name, author, language
+        case downloadUrl
+        case downloadUrlSnake = "download_url"
+    }
+
     public init(id: String, name: String, author: String, language: String, downloadUrl: String) {
         self.id = id
         self.name = name
         self.author = author
         self.language = language
         self.downloadUrl = downloadUrl
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        author = try container.decode(String.self, forKey: .author)
+        language = try container.decode(String.self, forKey: .language)
+        downloadUrl =
+            try container.decodeIfPresent(String.self, forKey: .downloadUrl)
+            ?? container.decode(String.self, forKey: .downloadUrlSnake)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(author, forKey: .author)
+        try container.encode(language, forKey: .language)
+        try container.encode(downloadUrl, forKey: .downloadUrl)
     }
 }
 
@@ -1439,46 +1465,78 @@ public enum SubtitleError: Error, Sendable, LocalizedError {
 public actor SubtitleClient {
     private let mode: MetadataEndpointMode?
     private let session: URLSession
-    private let decoder: JSONDecoder
+    private let responseDecoder: JSONDecoder
 
     public init(mode: MetadataEndpointMode? = nil, session: URLSession = .shared) {
         self.mode = mode
         self.session = session
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        self.decoder = decoder
+        self.responseDecoder = JSONDecoder()
     }
 
-    public func searchSubtitles(title: String, year: Int? = nil, language: String = "en", type: String = "movie", imdbId: String? = nil) async throws -> [SubtitleInfo] {
+    public func searchSubtitles(title: String, year: Int? = nil, language: String = "all", type: String = "movie", imdbId: String? = nil) async throws -> [SubtitleInfo] {
         guard let mode else { throw SubtitleError.missingConfiguration }
 
+        switch mode {
+        case .direct:
+            throw SubtitleError.missingConfiguration
+        case .backend(let baseURL, let appToken):
+            let withYear = try await performSubtitleSearch(
+                baseURL: baseURL,
+                appToken: appToken,
+                title: title,
+                year: year,
+                language: language,
+                type: type,
+                imdbId: imdbId
+            )
+            if !withYear.isEmpty || year == nil {
+                return withYear
+            }
+            return try await performSubtitleSearch(
+                baseURL: baseURL,
+                appToken: appToken,
+                title: title,
+                year: nil,
+                language: language,
+                type: type,
+                imdbId: imdbId
+            )
+        }
+    }
+
+    private func performSubtitleSearch(
+        baseURL: URL,
+        appToken: String,
+        title: String,
+        year: Int?,
+        language: String,
+        type: String,
+        imdbId: String?
+    ) async throws -> [SubtitleInfo] {
         var queryItems: [URLQueryItem] = [
             URLQueryItem(name: "title", value: title),
             URLQueryItem(name: "language", value: language),
             URLQueryItem(name: "type", value: type),
         ]
         if let year { queryItems.append(URLQueryItem(name: "year", value: String(year))) }
-        if let imdbId { queryItems.append(URLQueryItem(name: "imdb_id", value: imdbId)) }
-
-        let url: URL
-        switch mode {
-        case .direct:
-            throw SubtitleError.missingConfiguration
-        case .backend(let baseURL, let appToken):
-            var components = URLComponents(url: baseURL.appending(path: "api/subtitles/search"), resolvingAgainstBaseURL: false)
-            components?.queryItems = queryItems
-            guard let builtURL = components?.url else { throw SubtitleError.invalidURL }
-            url = builtURL
-            var request = URLRequest(url: url)
-            request.setValue(appToken, forHTTPHeaderField: "X-MovieBox-Token")
-            request.timeoutInterval = 15
-            let (data, response) = try await session.data(for: request)
-            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-                throw SubtitleError.upstream(http.statusCode)
-            }
-            let decoded = try decoder.decode(SubtitleSearchResponse.self, from: data)
-            return decoded.subtitles
+        if let imdbId {
+            let normalized = imdbId.hasPrefix("tt") ? String(imdbId.dropFirst(2)) : imdbId
+            queryItems.append(URLQueryItem(name: "imdb_id", value: normalized))
         }
+
+        var components = URLComponents(url: baseURL.appending(path: "api/subtitles/search"), resolvingAgainstBaseURL: false)
+        components?.queryItems = queryItems
+        guard let builtURL = components?.url else { throw SubtitleError.invalidURL }
+
+        var request = URLRequest(url: builtURL)
+        request.setValue(appToken, forHTTPHeaderField: "X-MovieBox-Token")
+        request.timeoutInterval = 45
+        let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw SubtitleError.upstream(http.statusCode)
+        }
+        let decoded = try responseDecoder.decode(SubtitleSearchResponse.self, from: data)
+        return decoded.subtitles
     }
 
     public func downloadSubtitle(url: String) async throws -> Data {

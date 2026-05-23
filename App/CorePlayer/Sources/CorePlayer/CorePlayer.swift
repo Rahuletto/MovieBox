@@ -97,6 +97,12 @@ public final class PlayerState {
     public var currentEpisodeIndex: Int? = nil
     public var isEpisodesSidebarOpen: Bool = false
     public var isSourcesSidebarOpen: Bool = false
+    public var isSubtitlesSidebarOpen: Bool = false
+    public var availableSubtitles: [PlayerSubtitleOption] = []
+    public var selectedSubtitleID: String?
+    public var isLoadingSubtitleCatalog: Bool = false
+    public var onSelectSubtitle: (@MainActor (PlayerSubtitleOption) async -> Void)?
+    public var onRefreshSubtitles: (@MainActor () async -> Void)?
     /// Seek here once the item is `readyToPlay` (continue watching).
     public var pendingResumePosition: Double?
 
@@ -635,17 +641,28 @@ public final class PlayerState {
     }
 
     public func toggleSubtitle() {
-        if activeSubtitleTrack >= 0 {
+        setSubtitlesEnabled(activeSubtitleTrack < 0)
+    }
+
+    public func setSubtitlesEnabled(_ enabled: Bool) {
+        if enabled {
+            if subtitleURL != nil {
+                if subtitleStream == nil, let url = subtitleURL {
+                    loadSubtitleStream(from: url)
+                } else {
+                    activeSubtitleTrack = 0
+                    updateSubtitle(at: currentTime, force: true)
+                }
+            }
+        } else {
             activeSubtitleTrack = -1
             currentSubtitleText = ""
-        } else if subtitleURL != nil {
-            if subtitleStream == nil, let url = subtitleURL {
-                loadSubtitleStream(from: url)
-            } else {
-                activeSubtitleTrack = 0
-                updateSubtitle(at: currentTime)
-            }
+            currentSubtitleCueID = nil
         }
+    }
+
+    public var areSubtitlesEnabled: Bool {
+        activeSubtitleTrack >= 0
     }
 
     public func updateSubtitle(at time: TimeInterval, force: Bool = false) {
@@ -774,6 +791,12 @@ public final class PlayerState {
         currentEpisodeIndex = nil
         isEpisodesSidebarOpen = false
         isSourcesSidebarOpen = false
+        isSubtitlesSidebarOpen = false
+        availableSubtitles = []
+        selectedSubtitleID = nil
+        isLoadingSubtitleCatalog = false
+        onSelectSubtitle = nil
+        onRefreshSubtitles = nil
         pendingResumePosition = nil
         isBuffering = false
         bufferingDetail = nil
@@ -1319,10 +1342,15 @@ public final class PlayerContainerView: NSView {
     }
 }
 
-public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View {
+public struct PlayerView<
+    SourcesSidebar: View,
+    SubtitlesSidebar: View,
+    StreamStatsAccessory: View
+>: View {
     private let surfaceCornerRadius: CGFloat = 14
     @Bindable private var state: PlayerState
     @ViewBuilder private var sourcesSidebar: () -> SourcesSidebar
+    @ViewBuilder private var subtitlesSidebar: () -> SubtitlesSidebar
     @ViewBuilder private var streamStatsAccessory: () -> StreamStatsAccessory
     @State private var controlFadeTask: Task<Void, Never>?
     @State private var isHoveringHUD: Bool = false
@@ -1337,10 +1365,12 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
     public init(
         state: PlayerState,
         @ViewBuilder sourcesSidebar: @escaping () -> SourcesSidebar = { EmptyView() },
+        @ViewBuilder subtitlesSidebar: @escaping () -> SubtitlesSidebar = { EmptyView() },
         @ViewBuilder streamStatsAccessory: @escaping () -> StreamStatsAccessory = { EmptyView() }
     ) {
         self.state = state
         self.sourcesSidebar = sourcesSidebar
+        self.subtitlesSidebar = subtitlesSidebar
         self.streamStatsAccessory = streamStatsAccessory
     }
 
@@ -1695,6 +1725,7 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
                                 state.isEpisodesSidebarOpen.toggle()
                                 if state.isEpisodesSidebarOpen {
                                     state.isSourcesSidebarOpen = false
+                                    state.isSubtitlesSidebarOpen = false
                                 }
                             } label: {
                                 Image(systemName: "list.bullet")
@@ -1879,16 +1910,7 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
                     .menuIndicator(.hidden)
                     .fixedSize()
 
-                    Button {
-                        state.toggleSubtitle()
-                    } label: {
-                        Image(systemName: state.activeSubtitleTrack >= 0 ? "captions.bubble.fill" : "captions.bubble")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.white.opacity(state.activeSubtitleTrack >= 0 ? 1.0 : 0.85))
-                            .contentTransition(.symbolEffect(.replace))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(state.subtitleURL == nil && state.activeSubtitleTrack < 0)
+                    subtitlesSidebarButton
 
                     // Video Aspect / Zoom Gravity Button
                     Button {
@@ -1917,9 +1939,34 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
                 sourcesSidebar()
                     .transition(.move(edge: .trailing))
             }
+
+            if state.isSubtitlesSidebarOpen {
+                subtitlesSidebar()
+                    .transition(.move(edge: .trailing))
+            }
         }
         .frame(maxWidth: .infinity)
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: state.isSourcesSidebarOpen)
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: state.isSubtitlesSidebarOpen)
+    }
+
+    private var subtitlesSidebarButton: some View {
+        Button {
+            resetControlFade()
+            state.isSubtitlesSidebarOpen.toggle()
+            if state.isSubtitlesSidebarOpen {
+                state.isSourcesSidebarOpen = false
+                state.isEpisodesSidebarOpen = false
+            }
+        } label: {
+            Image(systemName: state.isSubtitlesSidebarOpen || state.areSubtitlesEnabled ? "captions.bubble.fill" : "captions.bubble")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white.opacity(state.isSubtitlesSidebarOpen || state.areSubtitlesEnabled ? 1.0 : 0.85))
+                .contentTransition(.symbolEffect(.replace))
+        }
+        .buttonStyle(.plain)
+        .help("Subtitles")
+        .disabled(state.onSelectSubtitle == nil && state.onRefreshSubtitles == nil)
     }
 
     private var sourcesSidebarButton: some View {
@@ -1928,6 +1975,7 @@ public struct PlayerView<SourcesSidebar: View, StreamStatsAccessory: View>: View
             state.isSourcesSidebarOpen.toggle()
             if state.isSourcesSidebarOpen {
                 state.isEpisodesSidebarOpen = false
+                state.isSubtitlesSidebarOpen = false
             }
         } label: {
             ZStack(alignment: .topTrailing) {

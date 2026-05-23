@@ -73,6 +73,7 @@ public final class StreamingOrchestrator: @unchecked Sendable {
 
         let target = TorrentStreamTarget.selectPrimary(from: metadata)
         streamTarget = target
+        mkvIndexBoostApplied = false
         let tailPieces = StreamTailPlanner.bootstrapPieceIndices(
             target: target,
             pieceLength: metadata.pieceLength,
@@ -243,30 +244,129 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         guard let pieceStore, let target = streamTarget else { return false }
         let ext = (target.file.relativePath as NSString).pathExtension.lowercased()
         let isMKV = ext == "mkv" || ext == "webm" || target.contentType.contains("matroska")
+
         if isMKV {
+            await boostMKVIndexRegionsIfNeeded()
+        }
+
+        let headReady: Bool
+        if isMKV {
+            let contiguousHead = await pieceStore.streamHeadContiguousBytes()
             let verifiedHead = await pieceStore.verifiedMediaBytesFromStart()
-            let ready = verifiedHead >= StreamPlaybackThreshold.minimumHeadBytesForMKV
-            if ready { await pieceManager?.setIndexBootstrapCompleted() }
-            return ready
+            headReady = contiguousHead >= StreamPlaybackThreshold.minimumContiguousHeadBytesForMKV
+                && verifiedHead >= StreamPlaybackThreshold.minimumHeadBytesForMKV
+        } else {
+            let contiguousHead = await pieceStore.streamHeadContiguousBytes()
+            let verifiedHead = await pieceStore.verifiedMediaBytesFromStart()
+            headReady = contiguousHead >= StreamPlaybackThreshold.minimumContiguousHeadBytesForMP4
+                || verifiedHead >= StreamPlaybackThreshold.minimumContiguousHeadBytesForMP4
         }
-        // MP4: piece 0 alone is not enough — AVPlayer times out (-1001) if moov probe bytes aren't readable yet.
-        let contiguousHead = await pieceStore.streamHeadContiguousBytes()
-        if contiguousHead >= StreamPlaybackThreshold.minimumContiguousHeadBytesForMP4 {
-            await pieceManager?.setIndexBootstrapCompleted()
-            return true
+
+        guard headReady else { return false }
+
+        if isMKV {
+            guard await hasReadableStreamTailIndex() else { return false }
+        } else if target.needsMP4MoovTailProbe, await !headLikelyContainsMP4Moov() {
+            guard await hasReadableStreamTailIndex() else { return false }
         }
-        let verifiedHead = await pieceStore.verifiedMediaBytesFromStart()
-        if verifiedHead >= StreamPlaybackThreshold.minimumContiguousHeadBytesForMP4 {
-            await pieceManager?.setIndexBootstrapCompleted()
-            return true
+
+        await pieceManager?.setIndexBootstrapCompleted()
+        return true
+    }
+
+    private func headLikelyContainsMP4Moov() async -> Bool {
+        guard let pieceStore, let target = streamTarget else { return false }
+        let scan = min(8 * 1024 * 1024, Int(target.byteLength))
+        guard let span = await pieceStore.readableSpan(
+            offset: target.byteOffset,
+            length: scan,
+            preferSuffix: false
+        ), span.length >= 256 else { return false }
+        guard let data = try? await pieceStore.read(offset: span.offset, length: min(span.length, scan)) else {
+            return false
         }
-        return false
+        return data.range(of: Data("moov".utf8)) != nil
+    }
+
+    /// Contiguous readable bytes at EOF (MKV Cues / MP4 moov tail) — required before AVPlayer load.
+    public func hasReadableStreamTailIndex() async -> Bool {
+        guard let pieceStore, let target = streamTarget else { return false }
+        guard target.needsTailProbeForPlayback else { return true }
+
+        let ext = (target.file.relativePath as NSString).pathExtension.lowercased()
+        let isMKV = ext == "mkv" || ext == "webm" || target.contentType.contains("matroska")
+        let tailBytes = min(
+            isMKV
+                ? StreamPlaybackThreshold.minimumMKVTailReadableBytes
+                : 4 * 1024 * 1024,
+            target.byteLength
+        )
+        let mediaOffset = target.byteLength - tailBytes
+        let torrentOffset = target.byteOffset + mediaOffset
+        guard let span = await pieceStore.readableSpan(
+            offset: torrentOffset,
+            length: Int(tailBytes),
+            preferSuffix: true
+        ) else { return false }
+
+        let eof = target.byteOffset + target.byteLength
+        let spanEnd = span.offset + Int64(span.length)
+        let minReadable = max(2 * 1024 * 1024, Int(tailBytes * 2 / 3))
+        return spanEnd >= eof && span.length >= minReadable
+    }
+
+    private var mkvIndexBoostApplied = false
+
+    private func boostMKVIndexRegionsIfNeeded() async {
+        guard !mkvIndexBoostApplied, let pieceStore, let target = streamTarget, let manager = pieceManager else {
+            return
+        }
+        let headLen = min(1024 * 1024, Int(target.byteLength))
+        guard let headSpan = await pieceStore.readableSpan(
+            offset: target.byteOffset,
+            length: headLen,
+            preferSuffix: false
+        ), headSpan.length >= 64 * 1024 else { return }
+
+        mkvIndexBoostApplied = true
+        do {
+            let headData = try await pieceStore.read(offset: headSpan.offset, length: headSpan.length)
+            let tailLen = min(4 * 1024 * 1024, Int(target.byteLength))
+            let tailMediaOffset = max(0, target.byteLength - Int64(tailLen))
+            let tailTorrentOffset = target.byteOffset + tailMediaOffset
+            let tailData: Data
+            if let tailSpan = await pieceStore.readableSpan(
+                offset: tailTorrentOffset,
+                length: tailLen,
+                preferSuffix: true
+            ), tailSpan.length > 0 {
+                tailData = try await pieceStore.read(offset: tailSpan.offset, length: tailSpan.length)
+            } else {
+                tailData = Data()
+            }
+
+            let offsets = MKVSeekBootstrap.mediaOffsetsToBoost(
+                head: headData,
+                tail: tailData,
+                tailMediaOffset: tailMediaOffset
+            )
+            for offset in offsets {
+                await manager.notePlayerRead(mediaOffset: offset, length: 512 * 1024)
+            }
+            if !offsets.isEmpty {
+                TorrentLog.info(
+                    "[Streaming] MKV index boost — \(offsets.count) region(s) from SeekHead/Cues scan"
+                )
+            }
+        } catch {
+            TorrentLog.debug("[Streaming] MKV index boost skipped: \(error.localizedDescription)")
+        }
     }
 
     private func minimumHeadBytes(for target: TorrentStreamTarget) -> Int64 {
         let ext = (target.file.relativePath as NSString).pathExtension.lowercased()
         if ext == "mkv" || ext == "webm" || target.contentType.contains("matroska") {
-            return StreamPlaybackThreshold.minimumContiguousHeadBytesForMP4ForMKV
+            return StreamPlaybackThreshold.minimumHeadBytesForMKV
         }
         return StreamPlaybackThreshold.minimumContiguousHeadBytesForMP4
     }
