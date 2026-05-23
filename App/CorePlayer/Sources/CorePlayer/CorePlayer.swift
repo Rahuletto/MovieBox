@@ -219,11 +219,15 @@ public final class PlayerState {
         currentEpisodeIndex: Int? = nil,
         displayTitle: String? = nil,
         resumePosition: Double? = nil,
-        knownDurationSeconds: Double? = nil
+        knownDurationSeconds: Double? = nil,
+        resourceLoaderDelegate: AVAssetResourceLoaderDelegate? = nil,
+        resourceLoaderQueue: DispatchQueue? = nil
     ) {
         stopPlaybackResources()
 
-        streamsFromLocalTorrentServer = url.host.map { $0 == "127.0.0.1" || $0 == "localhost" } ?? false
+        streamsFromLocalTorrentServer =
+            url.scheme == "mbtorrent"
+            || url.host.map { $0 == "127.0.0.1" || $0 == "localhost" } == true
 
         self.title = title
         self.movieId = movieId
@@ -299,6 +303,11 @@ public final class PlayerState {
                 AVURLAssetPreferPreciseDurationAndTimingKey: false,
             ] as [String: Any]
         )
+        if let resourceLoaderDelegate {
+            let queue = resourceLoaderQueue
+                ?? DispatchQueue(label: "com.marban.moviebox.torrent-resource-loader")
+            asset.resourceLoader.setDelegate(resourceLoaderDelegate, queue: queue)
+        }
         if let existing = thumbnailService {
             Task { await existing.clearCache() }
         }

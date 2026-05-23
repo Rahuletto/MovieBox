@@ -119,28 +119,39 @@ final class RealTorrentStreamingTests: XCTestCase {
         log(label, "stream URL — \(readyURL.absoluteString)")
         _ = await startTask
 
-        log(label, "step 4 — GET /stream Range: bytes=0-65535")
-        let headBytes = try await fetchRange(url: readyURL, range: "bytes=0-65535")
-        XCTAssertEqual(headBytes.statusCode, 206, "expected partial content")
-        XCTAssertGreaterThan(headBytes.body.count, 0, "empty body for head range")
-        XCTAssertLessThanOrEqual(headBytes.body.count, 65_536)
-        XCTAssertFalse(headBytes.body.allSatisfy { $0 == 0 }, "head range came back as all-zero bytes — pieces not verified")
+        log(label, "step 4 — read verified media head (65536 B)")
+        let headData = try await orchestrator.readStreamMedia(mediaOffset: 0, length: 65_536)
+        guard let headData else {
+            XCTFail("[\(label)] no readable head bytes after .ready")
+            return
+        }
+        XCTAssertGreaterThan(headData.count, 0, "empty body for head range")
+        XCTAssertLessThanOrEqual(headData.count, 65_536)
+        XCTAssertFalse(headData.allSatisfy { $0 == 0 }, "head range came back as all-zero bytes — pieces not verified")
 
-        let signature = headBytes.body.prefix(16).map { String(format: "%02x", $0) }.joined()
-        log(label, "head signature (16 bytes) — 0x\(signature) total=\(headBytes.body.count)")
+        let signature = headData.prefix(16).map { String(format: "%02x", $0) }.joined()
+        log(label, "head signature (16 bytes) — 0x\(signature) total=\(headData.count)")
         XCTAssertTrue(
-            ContainerSniffer.looksLikeMediaContainer(headBytes.body),
+            ContainerSniffer.looksLikeMediaContainer(headData),
             "head bytes (\(signature)) don't look like a known video container — playback will fail"
         )
 
-        log(label, "step 5 — AVURLAsset.load(.isPlayable)")
+        log(label, "step 5 — AVURLAsset.load(.isPlayable) via resource loader")
         let isMKVLabel = label.lowercased().contains("mkv") || top.title.lowercased().contains("mkv")
         let isMKVProbe = await orchestrator.streamIndexProbeLabel() == "MKV index (cues)"
         let isMKV = isMKVLabel || isMKVProbe
         if isMKV {
-            log(label, "Skipping AVURLAsset playability check for MKV container (AVFoundation lacks native demuxer, but torrent engine/HTTP server successfully verified cues/clusters and served HTTP 206)")
+            log(label, "Skipping AVURLAsset playability check for MKV container (AVFoundation lacks native demuxer)")
         } else {
+            guard let loader = TorrentStreamPlaybackRegistry.shared.resourceLoader(for: readyURL) else {
+                XCTFail("[\(label)] missing resource loader for \(readyURL.absoluteString)")
+                return
+            }
             let asset = AVURLAsset(url: readyURL)
+            asset.resourceLoader.setDelegate(
+                loader,
+                queue: DispatchQueue(label: "com.marban.moviebox.test-resource-loader")
+            )
             do {
                 let isPlayable = try await asset.load(.isPlayable)
                 XCTAssertTrue(isPlayable, "AVURLAsset reports stream is not playable")

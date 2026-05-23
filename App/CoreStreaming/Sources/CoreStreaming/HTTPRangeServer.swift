@@ -614,20 +614,7 @@ public final class HTTPRangeServer {
     }
 
     private func readBytes(pieceStore: PieceStore, offset: Int64, length: Int) async throws -> Data {
-        try await withThrowingTaskGroup(of: Data.self) { group in
-            group.addTask {
-                try await pieceStore.read(offset: offset, length: length)
-            }
-            group.addTask {
-                try await Task.sleep(for: .seconds(Self.readTimeoutSeconds))
-                throw HTTPRangeReadTimeout()
-            }
-            guard let data = try await group.next() else {
-                throw HTTPRangeReadTimeout()
-            }
-            group.cancelAll()
-            return data
-        }
+        try await pieceStore.read(offset: offset, length: length)
     }
 
     private func sendResponse(connection: NWConnection, response: HTTPResponse) {

@@ -25,10 +25,8 @@ public actor PieceManager {
     private var pendingRequests: Set<BlockRequest> = []
     private var pieceBuffers: [UInt32: Data] = [:]
     private var receivedBlockOffsets: [UInt32: Set<UInt32>] = [:]
-    /// Pieces AVPlayer recently requested via HTTP ranges (newest first).
+    /// Pieces AVPlayer recently requested via range reads (newest first).
     private var playerHotPieces: [UInt32] = []
-    /// Piece(s) containing all or part of the `moov` atom — fetched before generic tail fill.
-    private var moovAnchorPieces: [UInt32] = []
     private var indexBootstrapCompleted = false
 
     private static let maxHotPieces = 32
@@ -74,29 +72,6 @@ public actor PieceManager {
 
     public func setIndexBootstrapCompleted() {
         indexBootstrapCompleted = true
-    }
-
-    /// Boost download priority for the piece(s) that contain the `moov` atom.
-    public func setMoovAnchorPiece(_ index: UInt32?) {
-        guard let index else {
-            moovAnchorPieces = []
-            return
-        }
-        setMoovAnchorPieces([index])
-    }
-
-    public func setMoovAnchorPieces(_ indices: [UInt32]) {
-        guard !indices.isEmpty else {
-            moovAnchorPieces = []
-            return
-        }
-        var anchors: [UInt32] = []
-        for index in indices {
-            anchors.append(index)
-            if index > 0 { anchors.append(index - 1) }
-            if Int(index) < pieceCount - 1 { anchors.append(index + 1) }
-        }
-        moovAnchorPieces = anchors
     }
 
     public func getNextRequest(peerBitfield: Data = Data()) -> BlockRequest? {
@@ -258,11 +233,8 @@ public actor PieceManager {
     }
 
     private func needsIndexBootstrap() -> Bool {
-        if indexBootstrapCompleted {
-            return false
-        }
-        guard downloadedPieces.contains(UInt32(streamFirstPiece)) else { return true }
-        return streamTailPieces.contains { !downloadedPieces.contains(UInt32($0)) }
+        if indexBootstrapCompleted { return false }
+        return !downloadedPieces.contains(UInt32(streamFirstPiece))
     }
 
     private func firstIncompletePiece(in priority: [UInt32], peerBitfield: Data) -> UInt32? {
@@ -287,11 +259,6 @@ public actor PieceManager {
             append(index)
         }
         append(UInt32(streamFirstPiece))
-        for index in moovAnchorPieces {
-            append(index)
-        }
-        // Interior tail first (moov lives here on YTS-style MP4s). The final partial
-        // piece is often mdat padding — fetching it first leaves a gap before moov.
         for index in buildMissingTailPiecesNearestEOF() {
             append(index)
         }
@@ -314,14 +281,6 @@ public actor PieceManager {
         let last = UInt32(streamLastPiece)
         guard !downloadedPieces.contains(last) else { return nil }
         return last
-    }
-
-    /// Pieces covering the interior tail span (all tail pieces except the final partial piece).
-    public func interiorTailPieceIndices() -> [UInt32] {
-        streamTailPieces
-            .filter { $0 != streamLastPiece }
-            .sorted(by: >)
-            .map { UInt32($0) }
     }
 
     private func buildFullPriorityOrder() -> [UInt32] {

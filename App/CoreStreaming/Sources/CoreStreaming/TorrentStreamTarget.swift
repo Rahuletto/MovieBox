@@ -36,7 +36,7 @@ public struct TorrentStreamTarget: Sendable {
         return contentType.contains("matroska")
     }
 
-    /// Containers where readiness requires a complete MP4 `moov` atom in the tail window.
+    /// MP4/MKV — used for UI labels only (FINDINGS: no moov-on-disk playback gate).
     public var needsMP4MoovTailProbe: Bool {
         let ext = (file.relativePath as NSString).pathExtension.lowercased()
         if ext == "mp4" || ext == "m4v" || ext == "mov" { return true }

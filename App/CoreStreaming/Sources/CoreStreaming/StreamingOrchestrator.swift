@@ -14,7 +14,7 @@ public final class StreamingOrchestrator: @unchecked Sendable {
     private var streamTarget: TorrentStreamTarget?
     private var peerId: String = ""
     private var dht: KademliaDHT?
-
+    private var playbackRegistrationID: UUID?
 
     public init() {}
 
@@ -73,13 +73,13 @@ public final class StreamingOrchestrator: @unchecked Sendable {
 
         let target = TorrentStreamTarget.selectPrimary(from: metadata)
         streamTarget = target
-        let tailPieces = StreamTailPlanner.tailPieceIndicesForDownload(
+        let tailPieces = StreamTailPlanner.bootstrapPieceIndices(
             target: target,
             pieceLength: metadata.pieceLength,
             pieceCount: metadata.pieceCount
         )
         TorrentLog.info(
-            "[Streaming] Target file: \(target.file.relativePath) (\(target.byteLength) bytes, piece \(target.firstPieceIndex)+, tail pieces \(tailPieces.count))"
+            "[Streaming] Target file: \(target.file.relativePath) (\(target.byteLength) bytes, piece \(target.firstPieceIndex)+, bootstrap pieces \(tailPieces.count) first+last 1%)"
         )
         DebugSessionLog.purge(infoHash: String(metadata.infoHash.prefix(8)))
 
@@ -137,32 +137,55 @@ public final class StreamingOrchestrator: @unchecked Sendable {
 
         let manager = pieceManager!
         let engine = torrentEngine!
-        rangeServer.onPlayerRead = { _, _ in
-            await engine.refreshDownloadPriorities()
-        }
+        let store = pieceStore!
 
-        async let engineStart: Void = engine.start()
-        async let streamURL = rangeServer.start(
-            pieceStore: pieceStore!,
+        let registration = TorrentStreamPlaybackRegistry.shared.register(
+            pieceStore: store,
             streamTarget: target,
             pieceManager: manager
-        )
-        _ = await engineStart
-        let url = try await streamURL
+        ) { mediaOffset, length in
+            await manager.notePlayerRead(mediaOffset: mediaOffset, length: length)
+            await engine.refreshDownloadPriorities()
+        }
+        playbackRegistrationID = registration.id
+
+        await engine.start()
         TorrentLog.info(
-            "[Streaming] HTTP range server — \(MovieBoxFileLogger.redactURL(url)) type=\(target.contentType) mediaBytes=\(target.byteLength)"
+            "[Streaming] AVAsset resource loader — \(MovieBoxFileLogger.redactURL(registration.playbackURL)) type=\(target.contentType) mediaBytes=\(target.byteLength)"
         )
 
-        // Speculative pre-boost: immediately request the last 2 MB of the file
-        // to make sure the moov region is downloading as early as possible.
+        // FINDINGS Tier 1 #4: speculative 2 MB tail boost before AVPlayer asks.
         let tailOffset = max(0, target.byteLength - 2 * 1024 * 1024)
         await manager.notePlayerRead(mediaOffset: tailOffset, length: 2 * 1024 * 1024)
         await engine.refreshDownloadPriorities()
 
-        return url
+        return registration.playbackURL
+    }
+
+    /// Reads verified stream media bytes (for integration tests; replaces loopback HTTP GET).
+    public func readStreamMedia(mediaOffset: Int64, length: Int) async throws -> Data? {
+        guard let pieceStore, let target = streamTarget else { return nil }
+        let torrentOffset = target.byteOffset + mediaOffset
+        guard let span = await pieceStore.readableSpan(
+            offset: torrentOffset,
+            length: length,
+            preferSuffix: false
+        ) else { return nil }
+        return try await pieceStore.read(offset: span.offset, length: span.length)
+    }
+
+    public func resourceLoaderForCurrentPlayback() -> TorrentStreamResourceLoader? {
+        guard let playbackRegistrationID,
+              let url = TorrentStreamPlaybackRegistry.shared.playbackURL(for: playbackRegistrationID)
+        else { return nil }
+        return TorrentStreamPlaybackRegistry.shared.resourceLoader(for: url)
     }
 
     public func stop() async {
+        if let playbackRegistrationID {
+            TorrentStreamPlaybackRegistry.shared.unregister(id: playbackRegistrationID)
+            self.playbackRegistrationID = nil
+        }
         torrentEngine?.stop()
         torrentEngine = nil
         await rangeServer.stop()
@@ -210,13 +233,25 @@ public final class StreamingOrchestrator: @unchecked Sendable {
 
     public func hasMinimumPlaybackHead() async -> Bool {
         guard let pieceStore, let target = streamTarget else { return false }
-        let verifiedHead = await pieceStore.verifiedMediaBytesFromStart()
-        let threshold = minimumHeadBytes(for: target)
-        let ready = verifiedHead >= threshold
-        if ready {
-            await pieceManager?.setIndexBootstrapCompleted()
+        let ext = (target.file.relativePath as NSString).pathExtension.lowercased()
+        let isMKV = ext == "mkv" || ext == "webm" || target.contentType.contains("matroska")
+        if isMKV {
+            let verifiedHead = await pieceStore.verifiedMediaBytesFromStart()
+            let ready = verifiedHead >= StreamPlaybackThreshold.minimumHeadBytesForMKV
+            if ready { await pieceManager?.setIndexBootstrapCompleted() }
+            return ready
         }
-        return ready
+        // FINDINGS Tier 1 #3: open AVPlayer once the first stream piece is hash-verified.
+        if await pieceStore.hasPiece(target.firstPieceIndex) {
+            await pieceManager?.setIndexBootstrapCompleted()
+            return true
+        }
+        let verifiedHead = await pieceStore.verifiedMediaBytesFromStart()
+        if verifiedHead >= StreamPlaybackThreshold.minimumHeadBytes {
+            await pieceManager?.setIndexBootstrapCompleted()
+            return true
+        }
+        return false
     }
 
     private func minimumHeadBytes(for target: TorrentStreamTarget) -> Int64 {
