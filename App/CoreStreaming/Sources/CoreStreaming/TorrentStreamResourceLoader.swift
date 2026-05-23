@@ -7,6 +7,7 @@ public final class TorrentStreamResourceLoader: NSObject, AVAssetResourceLoaderD
     private let streamByteOffset: Int64
     private let streamByteLength: Int64
     private let contentType: String
+    private let avContentType: String
     private let pieceManager: PieceManager
     private let onPlayerRead: @Sendable (Int64, Int) async -> Void
     private let workQueue = DispatchQueue(label: "com.marban.moviebox.torrent-resource-loader")
@@ -22,6 +23,7 @@ public final class TorrentStreamResourceLoader: NSObject, AVAssetResourceLoaderD
         self.streamByteOffset = streamTarget.byteOffset
         self.streamByteLength = streamTarget.byteLength
         self.contentType = streamTarget.contentType
+        self.avContentType = Self.uniformTypeIdentifier(for: streamTarget.contentType)
         self.pieceManager = pieceManager
         self.onPlayerRead = onPlayerRead
     }
@@ -35,6 +37,23 @@ public final class TorrentStreamResourceLoader: NSObject, AVAssetResourceLoaderD
         shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest
     ) -> Bool {
         guard !isInvalidated else { return false }
+        // #region agent log
+        let hasInfo = loadingRequest.contentInformationRequest != nil
+        let dr = loadingRequest.dataRequest
+        TorrentLog.info(
+            "[TorrentResourceLoader] shouldWait contentInfo=\(hasInfo) offset=\(dr?.requestedOffset ?? -1) length=\(dr?.requestedLength ?? -1)"
+        )
+        AgentDebugLog.write(
+            hypothesisId: "H2",
+            location: "TorrentStreamResourceLoader.swift:shouldWait",
+            message: "resourceLoader shouldWait",
+            data: [
+                "hasContentInfo": hasInfo,
+                "dataOffset": dr?.requestedOffset ?? -1,
+                "dataLength": dr?.requestedLength ?? -1,
+            ]
+        )
+        // #endregion
         workQueue.async { [weak self] in
             self?.fill(loadingRequest)
         }
@@ -45,7 +64,9 @@ public final class TorrentStreamResourceLoader: NSObject, AVAssetResourceLoaderD
         _ resourceLoader: AVAssetResourceLoader,
         didCancel loadingRequest: AVAssetResourceLoadingRequest
     ) {
-        loadingRequest.finishLoading()
+        workQueue.async {
+            loadingRequest.finishLoading()
+        }
     }
 
     private func fill(_ loadingRequest: AVAssetResourceLoadingRequest) {
@@ -55,9 +76,26 @@ public final class TorrentStreamResourceLoader: NSObject, AVAssetResourceLoaderD
         }
 
         if let infoRequest = loadingRequest.contentInformationRequest {
-            infoRequest.contentType = contentType
+            infoRequest.contentType = avContentType
             infoRequest.contentLength = streamByteLength
             infoRequest.isByteRangeAccessSupported = true
+
+            // AVFoundation probes with a 2-byte data request; never respond with bytes (Jared Sinclair).
+            if let dataRequest = loadingRequest.dataRequest,
+               dataRequest.requestedOffset == 0,
+               dataRequest.requestedLength <= 2,
+               !dataRequest.requestsAllDataToEndOfResource {
+                // #region agent log
+                AgentDebugLog.write(
+                    hypothesisId: "H3",
+                    location: "TorrentStreamResourceLoader.swift:contentProbe",
+                    message: "content info probe finished without data",
+                    data: ["avContentType": avContentType, "mime": contentType]
+                )
+                // #endregion
+                loadingRequest.finishLoading()
+                return
+            }
         }
 
         guard let dataRequest = loadingRequest.dataRequest else {
@@ -84,7 +122,7 @@ public final class TorrentStreamResourceLoader: NSObject, AVAssetResourceLoaderD
                 length: clampedLength,
                 preferSuffix: preferSuffix
             ) else {
-                await MainActor.run {
+                workQueue.async {
                     loadingRequest.finishLoading(with: NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled))
                 }
                 return
@@ -92,19 +130,30 @@ public final class TorrentStreamResourceLoader: NSObject, AVAssetResourceLoaderD
 
             do {
                 let data = try await readFullSpan(offset: span.offset, length: span.length)
-                await MainActor.run {
-                    guard !self.isInvalidated else {
+                workQueue.async { [weak self] in
+                    guard let self, !self.isInvalidated else {
                         loadingRequest.finishLoading(with: NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled))
                         return
                     }
-                    let serveStart = span.offset - streamByteOffset
+                    let serveStart = span.offset - self.streamByteOffset
                     let skip = Int(max(0, mediaOffset - serveStart))
                     let slice = data.dropFirst(skip).prefix(clampedLength)
                     dataRequest.respond(with: Data(slice))
                     loadingRequest.finishLoading()
+                    // #region agent log
+                    AgentDebugLog.write(
+                        hypothesisId: "H4",
+                        location: "TorrentStreamResourceLoader.swift:respond",
+                        message: "responded to data request",
+                        data: [
+                            "mediaOffset": mediaOffset,
+                            "bytes": slice.count,
+                        ]
+                    )
+                    // #endregion
                 }
             } catch {
-                await MainActor.run {
+                workQueue.async {
                     loadingRequest.finishLoading(with: error as NSError)
                 }
             }
@@ -145,5 +194,13 @@ public final class TorrentStreamResourceLoader: NSObject, AVAssetResourceLoaderD
             try await Task.sleep(for: .milliseconds(100))
         }
         throw CancellationError()
+    }
+
+    private static func uniformTypeIdentifier(for mime: String) -> String {
+        let lower = mime.lowercased()
+        if lower.contains("matroska") { return "org.matroska.mkv" }
+        if lower.contains("webm") { return "org.webmproject.webm" }
+        if lower.contains("quicktime") { return "com.apple.quicktime-movie" }
+        return "public.mpeg-4"
     }
 }

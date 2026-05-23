@@ -70,13 +70,26 @@ public final class TorrentPlaybackCoordinator {
 
         PlaybackLog.log("finishPlayback → loading player url=\(MovieBoxFileLogger.redactURL(url)) movieId=\(movieId) hdr=\(torrent.hdrType?.rawValue ?? "none")")
         let hudTitle = displayTitle.map { PlaybackDisplayTitle.clean($0) }
-        let resourceLoader = TorrentStreamPlaybackRegistry.shared.resourceLoader(for: url)
+        // Loopback HTTP is opened by AVFoundation directly; resource loader only for custom schemes.
+        let resourceLoader = TorrentPlaybackURLScheme.isTorrentPlayback(url)
+            ? TorrentStreamPlaybackRegistry.shared.resourceLoader(for: url)
+            : nil
+        if TorrentPlaybackURLScheme.isTorrentPlayback(url), resourceLoader == nil {
+            PlaybackLog.log("finishPlayback — no resource loader in registry for \(MovieBoxFileLogger.redactURL(url))")
+            AgentDebugLog.write(
+                hypothesisId: "H1",
+                location: "TorrentPlaybackCoordinator.swift:finishPlayback",
+                message: "registry lookup returned nil",
+                data: ["urlHost": url.host ?? ""]
+            )
+        }
         let loadPayload = (
             url: url,
             title: torrent.title,
             movieId: movieId,
             subtitleURL: subtitleURL,
             hdr: playerHDRType(from: torrent.hdrType),
+            audio: playerAudioFormat(from: torrent.audioFormat),
             appearance: subtitleAppearance,
             fontSize: subtitleFontSize,
             episodeTitle: episodeTitle,
@@ -93,6 +106,7 @@ public final class TorrentPlaybackCoordinator {
                 movieId: loadPayload.movieId,
                 subtitleURL: loadPayload.subtitleURL,
                 hdrType: loadPayload.hdr,
+                audioFormat: loadPayload.audio,
                 subtitleAppearance: loadPayload.appearance,
                 subtitleFontSize: loadPayload.fontSize,
                 episodeTitle: loadPayload.episodeTitle,
@@ -130,6 +144,7 @@ public final class TorrentPlaybackCoordinator {
             movieId: movieId,
             subtitleURL: subtitleURL,
             hdr: playerHDRType(from: torrent.hdrType),
+            audio: playerAudioFormat(from: torrent.audioFormat),
             appearance: subtitleAppearance,
             fontSize: subtitleFontSize,
             episodeTitle: episodeTitle,
@@ -145,6 +160,7 @@ public final class TorrentPlaybackCoordinator {
                 movieId: loadPayload.movieId,
                 subtitleURL: loadPayload.subtitleURL,
                 hdrType: loadPayload.hdr,
+                audioFormat: loadPayload.audio,
                 subtitleAppearance: loadPayload.appearance,
                 subtitleFontSize: loadPayload.fontSize,
                 episodeTitle: loadPayload.episodeTitle,
@@ -176,6 +192,7 @@ public final class TorrentPlaybackCoordinator {
                 movieId: movieId,
                 subtitleURL: subtitleURL,
                 hdrType: playerHDRType(from: torrent.hdrType),
+                audioFormat: playerAudioFormat(from: torrent.audioFormat),
                 subtitleAppearance: subtitleAppearance,
                 subtitleFontSize: playerState.subtitleFontSize,
                 displayTitle: playerState.seriesName,
@@ -197,6 +214,7 @@ public final class TorrentPlaybackCoordinator {
                 movieId: movieId,
                 subtitleURL: subtitleURL,
                 hdrType: playerHDRType(from: torrent.hdrType),
+                audioFormat: playerAudioFormat(from: torrent.audioFormat),
                 subtitleAppearance: subtitleAppearance,
                 subtitleFontSize: playerState.subtitleFontSize,
                 displayTitle: playerState.seriesName,
@@ -219,6 +237,11 @@ public final class TorrentPlaybackCoordinator {
         case .dolbyVisionWithHDR10: return .dolbyVisionWithHDR10
         case .hlg: return .hdr
         }
+    }
+
+    private func playerAudioFormat(from format: CoreTorrent.AudioFormat?) -> PlayerAudioFormat? {
+        guard format == .dolbyAtmos else { return nil }
+        return .dolbyAtmos
     }
 
     private static func sourceOptions(from torrents: [TorrentResult]) -> [PlaybackSourceOption] {

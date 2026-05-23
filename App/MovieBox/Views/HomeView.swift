@@ -407,72 +407,78 @@ private struct ContinueWatchingRow: View {
                                 continueWatchingBanner(for: record)
 
                                 Text(record.title)
-                                    .font(.caption)
-                                    .fontWeight(.medium)
+                                    .font(.body.weight(.semibold))
                                     .lineLimit(1)
                                     .frame(width: 360, alignment: .leading)
 
                                 if let remaining = WatchProgressStore.timeRemainingLabel(for: record) {
                                     Text(remaining)
-                                        .font(.caption2.weight(.medium))
+                                        .font(.subheadline.weight(.medium))
                                         .foregroundStyle(.secondary)
                                         .frame(width: 360, alignment: .leading)
                                 }
                             }
                         }
                         .buttonStyle(.plain)
-                        .task {
-                            await fetchMovieDetail(for: record)
-                        }
                     }
                 }
                 .padding(.horizontal, 20)
             }
+        }
+        .task {
+            await prefetchMovieDetails()
         }
     }
 
     @ViewBuilder
     private func continueWatchingBanner(for record: MovieRecord) -> some View {
         let progress = WatchProgressStore.progressFraction(for: record)
-        let backdropPath = movieDetails[record.tmdbId]?.backdropPath ?? record.posterPath
+        let backdropPath = movieDetails[record.tmdbId]?.backdropPath
+        let imageURL = backdropPath.flatMap { MetadataClient().imageURL(path: $0, width: 780) }
 
         RoundedRectangle(cornerRadius: 12, style: .continuous)
             .fill(Color(nsColor: .controlBackgroundColor))
             .frame(width: 360, height: 200)
             .overlay {
-                CachedImageView(url: MetadataClient().imageURL(path: backdropPath)) {
+                if let imageURL {
+                    CachedImageView(url: imageURL) {
+                        ProgressView()
+                    } content: { image in
+                        image.resizable().scaledToFill()
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                } else {
                     Image(systemName: "film.stack")
                         .font(.system(size: 32))
                         .foregroundStyle(.secondary)
-                } content: { image in
-                    image.resizable().scaledToFill()
                 }
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             .overlay(alignment: .bottom) {
-                VStack(spacing: 0) {
-                    LinearGradient(
-                        colors: [.clear, .black.opacity(0.75)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                    .frame(height: 56)
-
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            Capsule()
-                                .fill(.white.opacity(0.25))
-                            Capsule()
-                                .fill(.white)
-                                .frame(width: max(4, geo.size.width * progress))
-                        }
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(.white.opacity(0.35))
+                        Capsule()
+                            .fill(.white)
+                            .frame(width: max(4, geo.size.width * progress))
                     }
-                    .frame(height: 4)
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 12)
                 }
+                .frame(height: 4)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 12)
             }
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func prefetchMovieDetails() async {
+        await withTaskGroup(of: Void.self) { group in
+            for record in records {
+                guard movieDetails[record.tmdbId] == nil else { continue }
+                group.addTask {
+                    await fetchMovieDetail(for: record)
+                }
+            }
+        }
     }
 
     private func fetchMovieDetail(for record: MovieRecord) async {
@@ -480,7 +486,9 @@ private struct ContinueWatchingRow: View {
         do {
             let client = MetadataClient()
             let detail = try await client.movieDetail(id: record.tmdbId, kind: record.mediaKindEnum)
-            movieDetails[record.tmdbId] = detail.movie
+            await MainActor.run {
+                movieDetails[record.tmdbId] = detail.movie
+            }
         } catch {
             print("Failed to fetch movie detail for \(record.tmdbId): \(error)")
         }

@@ -139,19 +139,27 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         let engine = torrentEngine!
         let store = pieceStore!
 
-        let registration = TorrentStreamPlaybackRegistry.shared.register(
-            pieceStore: store,
-            streamTarget: target,
-            pieceManager: manager
-        ) { mediaOffset, length in
+        // AVPlayer playback uses loopback HTTP (reserved scheme). AVFoundation opens
+        // http://127.0.0.1 natively; custom mbtorrent:// URLs never invoked
+        // shouldWaitForLoadingOfRequestedResource in production (see moviebox.log:
+        // delegate attached, zero [TorrentResourceLoader] lines, -11829/-12848).
+        // Apple documents AVAssetResourceLoaderDelegate for custom schemes / keys;
+        // Jared Sinclair: http/https bypass the delegate entirely.
+        rangeServer.onPlayerRead = { mediaOffset, length in
             await manager.notePlayerRead(mediaOffset: mediaOffset, length: length)
             await engine.refreshDownloadPriorities()
         }
-        playbackRegistrationID = registration.id
 
-        await engine.start()
+        async let engineStart: Void = engine.start()
+        async let streamURL = rangeServer.start(
+            pieceStore: store,
+            streamTarget: target,
+            pieceManager: manager
+        )
+        _ = await engineStart
+        let url = try await streamURL
         TorrentLog.info(
-            "[Streaming] AVAsset resource loader — \(MovieBoxFileLogger.redactURL(registration.playbackURL)) type=\(target.contentType) mediaBytes=\(target.byteLength)"
+            "[Streaming] HTTP range server — \(MovieBoxFileLogger.redactURL(url)) type=\(target.contentType) mediaBytes=\(target.byteLength)"
         )
 
         // FINDINGS Tier 1 #4: speculative 2 MB tail boost before AVPlayer asks.
@@ -159,7 +167,7 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         await manager.notePlayerRead(mediaOffset: tailOffset, length: 2 * 1024 * 1024)
         await engine.refreshDownloadPriorities()
 
-        return registration.playbackURL
+        return url
     }
 
     /// Reads verified stream media bytes (for integration tests; replaces loopback HTTP GET).
@@ -241,13 +249,14 @@ public final class StreamingOrchestrator: @unchecked Sendable {
             if ready { await pieceManager?.setIndexBootstrapCompleted() }
             return ready
         }
-        // FINDINGS Tier 1 #3: open AVPlayer once the first stream piece is hash-verified.
-        if await pieceStore.hasPiece(target.firstPieceIndex) {
+        // MP4: piece 0 alone is not enough — AVPlayer times out (-1001) if moov probe bytes aren't readable yet.
+        let contiguousHead = await pieceStore.streamHeadContiguousBytes()
+        if contiguousHead >= StreamPlaybackThreshold.minimumContiguousHeadBytesForMP4 {
             await pieceManager?.setIndexBootstrapCompleted()
             return true
         }
         let verifiedHead = await pieceStore.verifiedMediaBytesFromStart()
-        if verifiedHead >= StreamPlaybackThreshold.minimumHeadBytes {
+        if verifiedHead >= StreamPlaybackThreshold.minimumContiguousHeadBytesForMP4 {
             await pieceManager?.setIndexBootstrapCompleted()
             return true
         }
@@ -257,9 +266,9 @@ public final class StreamingOrchestrator: @unchecked Sendable {
     private func minimumHeadBytes(for target: TorrentStreamTarget) -> Int64 {
         let ext = (target.file.relativePath as NSString).pathExtension.lowercased()
         if ext == "mkv" || ext == "webm" || target.contentType.contains("matroska") {
-            return StreamPlaybackThreshold.minimumHeadBytesForMKV
+            return StreamPlaybackThreshold.minimumContiguousHeadBytesForMP4ForMKV
         }
-        return StreamPlaybackThreshold.minimumHeadBytes
+        return StreamPlaybackThreshold.minimumContiguousHeadBytesForMP4
     }
 
     public func streamTailPieceCount() async -> Int {

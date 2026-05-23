@@ -187,7 +187,7 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
                 let indexLabel = await orchestrator.streamIndexProbeLabel()
                 let minKB = (indexLabel.contains("MKV")
                     ? StreamPlaybackThreshold.minimumHeadBytesForMKV
-                    : StreamPlaybackThreshold.minimumHeadBytes) / 1024
+                    : StreamPlaybackThreshold.minimumContiguousHeadBytesForMP4) / 1024
                 await orchestrator.stop()
                 let message: String
                 if verifiedKB == 0, inFlightKB == 0 {
@@ -298,7 +298,7 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
         let isMKV = indexLabel.contains("MKV")
         let headThreshold = isMKV
             ? StreamPlaybackThreshold.minimumHeadBytesForMKV
-            : StreamPlaybackThreshold.minimumHeadBytes
+            : StreamPlaybackThreshold.minimumContiguousHeadBytesForMP4
 
         let verifiedHeadBytes = await orchestrator.verifiedMediaBytesFromStart()
         let inFlightHeadBytes = await orchestrator.streamHeadContiguousBytes()

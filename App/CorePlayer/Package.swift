@@ -9,7 +9,11 @@ let package = Package(
     ],
     dependencies: [],
     targets: [
-        .target(name: "CorePlayer", dependencies: [])
+        .target(
+            name: "CorePlayer",
+            dependencies: [],
+            resources: [.process("Resources")]
+        )
     ],
     swiftLanguageModes: [.v6]
 )

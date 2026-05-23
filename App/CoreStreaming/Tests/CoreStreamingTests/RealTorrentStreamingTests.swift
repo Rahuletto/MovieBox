@@ -136,22 +136,15 @@ final class RealTorrentStreamingTests: XCTestCase {
             "head bytes (\(signature)) don't look like a known video container — playback will fail"
         )
 
-        log(label, "step 5 — AVURLAsset.load(.isPlayable) via resource loader")
+        log(label, "step 5 — AVURLAsset.load(.isPlayable) on loopback HTTP URL")
         let isMKVLabel = label.lowercased().contains("mkv") || top.title.lowercased().contains("mkv")
         let isMKVProbe = await orchestrator.streamIndexProbeLabel() == "MKV index (cues)"
         let isMKV = isMKVLabel || isMKVProbe
         if isMKV {
             log(label, "Skipping AVURLAsset playability check for MKV container (AVFoundation lacks native demuxer)")
         } else {
-            guard let loader = TorrentStreamPlaybackRegistry.shared.resourceLoader(for: readyURL) else {
-                XCTFail("[\(label)] missing resource loader for \(readyURL.absoluteString)")
-                return
-            }
+            XCTAssertEqual(readyURL.scheme, "http", "playback URL must be loopback HTTP for AVPlayer")
             let asset = AVURLAsset(url: readyURL)
-            asset.resourceLoader.setDelegate(
-                loader,
-                queue: DispatchQueue(label: "com.marban.moviebox.test-resource-loader")
-            )
             do {
                 let isPlayable = try await asset.load(.isPlayable)
                 XCTAssertTrue(isPlayable, "AVURLAsset reports stream is not playable")
