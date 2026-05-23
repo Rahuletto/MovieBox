@@ -162,7 +162,7 @@ public struct SubtitleOverlayView: View {
                 verticalPadding: 6,
                 cornerRadius: 8,
                 lineSpacing: 2,
-                background: .ultraThinMaterial
+                solidBackground: .black
             )
 
         case .system:
@@ -187,9 +187,27 @@ private struct FluidSubtitleLabel: View {
     let verticalPadding: CGFloat
     let cornerRadius: CGFloat
     let lineSpacing: CGFloat
-    let background: Material
+    var background: Material? = nil
+    var solidBackground: Color? = nil
 
     var body: some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        Group {
+            if let solidBackground {
+                captionText
+                    .background(solidBackground, in: shape)
+            } else if let background {
+                captionText
+                    .background(background, in: shape)
+            } else {
+                captionText
+            }
+        }
+        .compositingGroup()
+        .shadow(color: .black.opacity(solidBackground == nil ? 0.35 : 0), radius: 10, y: 3)
+    }
+
+    private var captionText: some View {
         Text(text)
             .font(font)
             .foregroundStyle(foreground)
@@ -199,11 +217,5 @@ private struct FluidSubtitleLabel: View {
             .fixedSize(horizontal: true, vertical: true)
             .padding(.horizontal, horizontalPadding)
             .padding(.vertical, verticalPadding)
-            .background(
-                background,
-                in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-            )
-            .compositingGroup()
-            .shadow(color: .black.opacity(0.35), radius: 10, y: 3)
     }
 }
