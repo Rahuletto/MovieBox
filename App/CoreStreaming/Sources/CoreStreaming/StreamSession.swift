@@ -131,12 +131,7 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
     }
 
     private func bufferingWatchdogSeconds() async -> UInt64 {
-        guard await orchestrator.streamTargetNeedsTailProbe() else { return 120 }
-        if let engine = orchestrator as? StreamingOrchestrator {
-            let tailTotal = await engine.streamTailPieceCount()
-            return UInt64(max(180, 90 + tailTotal * 18))
-        }
-        return 180
+        180
     }
 
     private func startBufferingWatchdog() {
@@ -189,13 +184,10 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
                 let transferringSnapshot = await orchestrator.transferringPeerCount()
                 let verifiedKB = await orchestrator.contiguousBytesFromStreamStart() / 1024
                 let inFlightKB = await orchestrator.streamHeadContiguousBytes() / 1024
-                let needsTail = await orchestrator.streamTargetNeedsTailProbe()
-                let hasTail = needsTail ? await orchestrator.isStreamTailPieceReady() : true
                 let indexLabel = await orchestrator.streamIndexProbeLabel()
                 let minKB = (indexLabel.contains("MKV")
                     ? StreamPlaybackThreshold.minimumHeadBytesForMKV
                     : StreamPlaybackThreshold.minimumHeadBytes) / 1024
-                let (tailVerified, tailTotal) = await tailBufferProgress()
                 await orchestrator.stop()
                 let message: String
                 if verifiedKB == 0, inFlightKB == 0 {
@@ -209,10 +201,6 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
                         message =
                             "Buffering timed out with no data received (\(transferringSnapshot) transferring / \(peersSnapshot) live peer(s)). Try another release."
                     }
-                } else if needsTail, !hasTail {
-                    let indexLabel = await orchestrator.streamIndexProbeLabel()
-                    message =
-                        "Buffering stalled — waiting for \(indexLabel) (\(tailVerified)/\(tailTotal) tail pieces, \(verifiedKB) KB verified head). Try another release."
                 } else if verifiedKB < minKB {
                     message =
                         "Buffering stalled at \(verifiedKB) KB verified head (need ~\(minKB) KB). \(inFlightKB) KB received but not hash-verified yet. \(transferringSnapshot) transferring / \(peersSnapshot) live peer(s)."
@@ -320,10 +308,11 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
         // actual verified-head threshold every time.
         let hasEnoughHead = verifiedHeadBytes >= headThreshold
             || inFlightHeadBytes >= headThreshold
-        let needsTail = await orchestrator.streamTargetNeedsTailProbe()
-        let hasTail = needsTail ? await orchestrator.isStreamTailPieceReady() : true
 
-        if hasEnoughHead, hasTail {
+        if hasEnoughHead {
+            if verifiedHeadBytes >= headThreshold {
+                _ = await orchestrator.hasMinimumPlaybackHead()
+            }
             // Live peer gate: a resumed session with cached pieces but 0 peers will
             // fail the moment AVPlayer requests a byte we don't have. Only bypass
             // the gate if literally every piece in this file is already on disk.

@@ -234,13 +234,27 @@ public actor PieceManager {
     /// Until head + tail index pieces are verified, never fall back to middle-of-file pieces
     /// (peers without end-of-file in bitfield would otherwise pull piece 1, 2, … forever).
     private func earliestIncompletePiece(peerBitfield: Data) -> UInt32? {
-        let bootstrap = buildBootstrapPriorityOrder()
+        // 1. Try bootstrap priority list constrained to this peer's bitfield
         if needsIndexBootstrap() {
-            return firstIncompletePiece(in: bootstrap, peerBitfield: peerBitfield)
+            if let p = firstIncompletePiece(in: buildBootstrapPriorityOrder(), peerBitfield: peerBitfield) {
+                return p
+            }
+            // 2. Fall through: pick the lowest-index missing piece this peer has
+            return firstSequentialMissing(peerBitfield: peerBitfield)
         }
 
-        let priority = buildFullPriorityOrder()
-        return firstIncompletePiece(in: priority, peerBitfield: peerBitfield)
+        return firstIncompletePiece(in: buildFullPriorityOrder(), peerBitfield: peerBitfield)
+            ?? firstSequentialMissing(peerBitfield: peerBitfield)
+    }
+
+    private func firstSequentialMissing(peerBitfield: Data) -> UInt32? {
+        for i in streamFirstPiece..<pieceCount {
+            let idx = UInt32(i)
+            if downloadedPieces.contains(idx) { continue }
+            if !peerBitfield.isEmpty, !peerHasPiece(idx, in: peerBitfield) { continue }
+            return idx
+        }
+        return nil
     }
 
     private func needsIndexBootstrap() -> Bool {

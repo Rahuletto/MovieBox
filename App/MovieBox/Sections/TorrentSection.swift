@@ -301,7 +301,14 @@ struct TorrentSection: View {
             subtitleURL: subtitleURL,
             playback: playback,
             resumePosition: WatchProgressStore.resumePosition(for: movie.id, in: storedMovies),
-            knownDurationSeconds: movie.runtime.map { Double($0) * 60 }
+            knownDurationSeconds: movie.runtime.map { Double($0) * 60 },
+            onPlaybackOpened: { opened in
+                guard let record = storedMovies.first(where: { $0.tmdbId == movie.id }) else { return }
+                if let hash = opened.resolvedInfoHash {
+                    record.lastStreamInfoHash = hash.lowercased()
+                    try? modelContext.save()
+                }
+            }
         )
 
         _ = appServices.persistentPlayback.start(

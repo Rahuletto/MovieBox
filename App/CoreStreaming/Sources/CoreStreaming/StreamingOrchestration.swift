@@ -20,6 +20,7 @@ public protocol StreamingOrchestration: AnyObject, Sendable {
     func streamTailPiecesVerified() async -> Int
     func streamTailPiecesProgress() async -> Double
     func isStreamTailPieceReady() async -> Bool
+    func hasMinimumPlaybackHead() async -> Bool
     func allStreamPiecesVerified() async -> Bool
     func downloadSpeed() async -> Double
     func peerCount() async -> Int

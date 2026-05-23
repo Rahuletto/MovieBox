@@ -14,6 +14,8 @@ public final class MovieRecord {
     public var watchedFraction: Double
     /// Total runtime in seconds (from player when available).
     public var durationSeconds: Double
+    /// Info hash of the last torrent streamed for this title (stable across indexer refreshes).
+    public var lastStreamInfoHash: String?
 
     public init(
         tmdbId: Int,
@@ -25,7 +27,8 @@ public final class MovieRecord {
         lastWatchedAt: Date? = nil,
         playbackPositionSeconds: Double = 0,
         watchedFraction: Double = 0,
-        durationSeconds: Double = 0
+        durationSeconds: Double = 0,
+        lastStreamInfoHash: String? = nil
     ) {
         self.tmdbId = tmdbId
         self.mediaKind = mediaKind
@@ -37,6 +40,7 @@ public final class MovieRecord {
         self.playbackPositionSeconds = playbackPositionSeconds
         self.watchedFraction = watchedFraction
         self.durationSeconds = durationSeconds
+        self.lastStreamInfoHash = lastStreamInfoHash
     }
 }
 
