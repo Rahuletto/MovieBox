@@ -77,6 +77,7 @@ public struct SubtitleOverlayView: View {
                     Group {
                         if !text.isEmpty {
                             styledText(text)
+                                .fixedSize(horizontal: true, vertical: true)
                                 .id(subtitleIdentity)
                                 .transition(.opacity)
                         } else if let loadProgress {
@@ -194,7 +195,8 @@ private struct FluidSubtitleLabel: View {
             .foregroundStyle(foreground)
             .multilineTextAlignment(.center)
             .lineSpacing(lineSpacing)
-            .frame(maxWidth: 720)
+            .frame(maxWidth: 720, alignment: .center)
+            .fixedSize(horizontal: true, vertical: true)
             .padding(.horizontal, horizontalPadding)
             .padding(.vertical, verticalPadding)
             .background(

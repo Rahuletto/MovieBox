@@ -2004,10 +2004,10 @@ public struct PlayerView<
 
             subtitleOverlay
 
-            if state.isBuffering && !state.isPlaying {
-                bufferingOverlay
+            if showsBufferingIndicator {
+                playerBufferingIndicator
                     .transition(.opacity)
-                    .zIndex(4)
+                    .zIndex(5)
             }
 
             if let pill = state.hudStatusPill {
@@ -2088,16 +2088,23 @@ public struct PlayerView<
             .contentShape(Rectangle())
     }
 
-    private var bufferingOverlay: some View {
+    private var showsBufferingIndicator: Bool {
+        state.isSwitchingSource || state.isBuffering
+    }
+
+    private var playerBufferingIndicator: some View {
         VStack(spacing: 14) {
             ProgressView()
                 .controlSize(.large)
                 .tint(.white)
+                .shadow(color: .black.opacity(0.9), radius: 10, y: 2)
+                .shadow(color: .black.opacity(0.55), radius: 2, y: 0)
             if let detail = state.bufferingDetail?.trimmingCharacters(in: .whitespacesAndNewlines),
                !detail.isEmpty {
                 Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.88))
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.85), radius: 6, y: 2)
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .frame(maxWidth: 520)
@@ -2105,84 +2112,16 @@ public struct PlayerView<
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .allowsHitTesting(false)
+        .accessibilityLabel("Buffering")
     }
 
-    private func playbackErrorOverlay(message: String) -> some View {
+    private var centerPlaybackOverlay: some View {
         ZStack {
-            // No scrim - transparent overlay
-
-            // Error card - matches app's glass design language
-            VStack(spacing: 16) {
-                // Icon with app accent color
-                Image(systemName: "exclamationmark.circle.fill")
-                    .font(.system(size: 44))
-                    .symbolRenderingMode(.monochrome)
-                    .foregroundStyle(Color(red: 0.98, green: 0.36, blue: 0.18))
-
-                // Descriptive error message
-                VStack(spacing: 6) {
-                    Text("Playback failed")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.primary)
-                    
-                    Text(formatErrorMessage(message))
-                        .font(.system(size: 12, weight: .regular))
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .lineLimit(4)
-                }
-
-                VStack(spacing: 10) {
-                    HStack(spacing: 10) {
-                        Button(action: { state.retryPlayback() }) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "arrow.clockwise")
-                                    .font(.system(size: 11, weight: .semibold))
-                                Text("Retry")
-                                    .font(.system(size: 13, weight: .semibold))
-                            }
-                            .foregroundStyle(.white)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                            .background(Color(red: 0.98, green: 0.36, blue: 0.18))
-                            .clipShape(Capsule(style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                        .keyboardShortcut(.defaultAction)
-
-                        Button(action: { state.dismiss() }) {
-                            Text("Close")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(.primary)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 10)
-                                .background(Color.primary.opacity(0.12))
-                                .clipShape(Capsule(style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                        .keyboardShortcut(.cancelAction)
-                    }
-
-                    Button(action: { copyPlaybackDiagnostics() }) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "doc.on.doc")
-                                .font(.system(size: 11))
-                            Text("Copy Logs")
-                                .font(.system(size: 12, weight: .medium))
-                        }
-                        .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .keyboardShortcut("c", modifiers: [.command, .shift])
-                }
+            if !showsBufferingIndicator {
+                centerControls
             }
-            .padding(24)
-            .frame(maxWidth: 420)
-            .adaptiveGlass(cornerRadius: 24)
-            .padding(.horizontal, 28)
-            .transition(.opacity.combined(with: .scale(scale: 0.96)))
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .animation(.easeInOut(duration: 0.22), value: showsBufferingIndicator)
     }
 
 
@@ -2362,38 +2301,77 @@ public struct PlayerView<
         .frame(maxWidth: .infinity, alignment: .top)
     }
 
-    private var showsCenterBuffering: Bool {
-        state.isSwitchingSource || (state.isBuffering && state.isPlaying)
-    }
-
-    private var centerPlaybackOverlay: some View {
+    private func playbackErrorOverlay(message: String) -> some View {
         ZStack {
-            if showsCenterBuffering {
-                centerBufferingIndicator
-            } else {
-                centerControls
-            }
-        }
-        .animation(.easeInOut(duration: 0.22), value: showsCenterBuffering)
-    }
+            VStack(spacing: 16) {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .font(.system(size: 44))
+                    .symbolRenderingMode(.monochrome)
+                    .foregroundStyle(Color(red: 0.98, green: 0.36, blue: 0.18))
 
-    private var centerBufferingIndicator: some View {
-        VStack(spacing: 10) {
-            ProgressView()
-                .controlSize(.large)
-                .tint(.white)
-            if let detail = state.bufferingDetail?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !detail.isEmpty {
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.88))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: 520)
+                VStack(spacing: 6) {
+                    Text("Playback failed")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.primary)
+
+                    Text(formatErrorMessage(message))
+                        .font(.system(size: 12, weight: .regular))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(4)
+                }
+
+                VStack(spacing: 10) {
+                    HStack(spacing: 10) {
+                        Button(action: { state.retryPlayback() }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 11, weight: .semibold))
+                                Text("Retry")
+                                    .font(.system(size: 13, weight: .semibold))
+                            }
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Color(red: 0.98, green: 0.36, blue: 0.18))
+                            .clipShape(Capsule(style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .keyboardShortcut(.defaultAction)
+
+                        Button(action: { state.dismiss() }) {
+                            Text("Close")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(.primary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                                .background(Color.primary.opacity(0.12))
+                                .clipShape(Capsule(style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .keyboardShortcut(.cancelAction)
+                    }
+
+                    Button(action: { copyPlaybackDiagnostics() }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "doc.on.doc")
+                                .font(.system(size: 11))
+                            Text("Copy Logs")
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut("c", modifiers: [.command, .shift])
+                }
             }
+            .padding(24)
+            .frame(maxWidth: 420)
+            .adaptiveGlass(cornerRadius: 24)
+            .padding(.horizontal, 28)
+            .transition(.opacity.combined(with: .scale(scale: 0.96)))
         }
-        .allowsHitTesting(false)
-        .accessibilityLabel("Buffering")
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var centerControls: some View {
