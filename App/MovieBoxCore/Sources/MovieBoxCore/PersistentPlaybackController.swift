@@ -102,6 +102,7 @@ public struct PersistentPlaybackStartRequest: Sendable {
     public let knownDurationSeconds: Double?
     public let waitTimeout: TimeInterval
     public let onSessionStarted: (@MainActor (TorrentStreamSession) -> Void)?
+    public let onPlaybackOpened: (@MainActor (TorrentResult) -> Void)?
 
     public init(
         mode: Mode,
@@ -117,7 +118,8 @@ public struct PersistentPlaybackStartRequest: Sendable {
         resumePosition: Double? = nil,
         knownDurationSeconds: Double? = nil,
         waitTimeout: TimeInterval = 180,
-        onSessionStarted: (@MainActor (TorrentStreamSession) -> Void)? = nil
+        onSessionStarted: (@MainActor (TorrentStreamSession) -> Void)? = nil,
+        onPlaybackOpened: (@MainActor (TorrentResult) -> Void)? = nil
     ) {
         self.mode = mode
         self.movieId = movieId
@@ -133,6 +135,7 @@ public struct PersistentPlaybackStartRequest: Sendable {
         self.knownDurationSeconds = knownDurationSeconds
         self.waitTimeout = waitTimeout
         self.onSessionStarted = onSessionStarted
+        self.onPlaybackOpened = onPlaybackOpened
     }
 
     var primaryTorrent: TorrentResult {
@@ -148,8 +151,8 @@ public struct PersistentPlaybackStartRequest: Sendable {
         let seeded = torrents.filter { $0.seeders > 0 }
         let candidates = seeded.isEmpty ? torrents : seeded
         return candidates.sorted { lhs, rhs in
-            if lhs.quality != rhs.quality { return lhs.quality > rhs.quality }
             if lhs.seeders != rhs.seeders { return lhs.seeders > rhs.seeders }
+            if lhs.quality != rhs.quality { return lhs.quality > rhs.quality }
             return lhs.sizeBytes > rhs.sizeBytes
         }
     }
@@ -387,6 +390,7 @@ public final class PersistentPlaybackController {
                 knownDurationSeconds: request.knownDurationSeconds
             )
             playerState.isStreamingTorrent = true
+            request.onPlaybackOpened?(torrent)
             resetToIdleAfterPlayerOpen()
             return
         }
@@ -463,6 +467,7 @@ public final class PersistentPlaybackController {
                     knownDurationSeconds: request.knownDurationSeconds
                 )
                 playerState.isStreamingTorrent = true
+                request.onPlaybackOpened?(torrent)
                 resetToIdleAfterPlayerOpen()
                 return
             }
@@ -529,6 +534,7 @@ public final class PersistentPlaybackController {
                 knownDurationSeconds: request.knownDurationSeconds
             )
             playerState.isStreamingTorrent = true
+            request.onPlaybackOpened?(torrent)
             resetToIdleAfterPlayerOpen()
         } catch {
             phase = .failed(error.localizedDescription)

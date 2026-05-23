@@ -16,10 +16,7 @@ public final class HTTPRangeServer {
     private var streamByteLength: Int64 = 0
     private var contentType = "application/octet-stream"
 
-    /// When set, AVPlayer requests are translated through a synthesized fast-start MP4
-    /// layout (moov at byte 0). Synthesized header bytes are served from memory; the
-    /// remainder maps to original mdat content on disk.
-    public private(set) var remuxedLayout: MP4FastStartRemuxer.RemuxedLayout?
+
 
     /// Coalesces concurrent identical torrent-range reads — AVPlayer often issues
     /// 6–8 parallel range requests for the same bytes; we keep a single inflight
@@ -32,8 +29,8 @@ public final class HTTPRangeServer {
     private var rangeRequestSequence = 0
 
     private static let maxRangeBytes = 32 * 1024 * 1024
-    private static let readTimeoutSeconds: UInt64 = 300
-    private static let bufferWaitSeconds: UInt64 = 300
+    private static let readTimeoutSeconds: UInt64 = 36_000
+    private static let bufferWaitSeconds: UInt64 = 36_000
 
     public init() {}
 
@@ -120,7 +117,6 @@ public final class HTTPRangeServer {
         pieceStore = nil
         pieceManager = nil
         onPlayerRead = nil
-        remuxedLayout = nil
         // Fail any pending waiters so we don't leak continuations
         let pending = pendingRangeWaiters
         pendingRangeWaiters.removeAll()
@@ -129,16 +125,6 @@ public final class HTTPRangeServer {
                 waiter.resume(throwing: CancellationError())
             }
         }
-    }
-
-    /// Patches the server to serve a virtual fast-start MP4 layout.
-    /// Safe to call after `start()` — subsequent range requests will translate
-    /// through the synthetic header + remapped mdat content.
-    public func setRemuxedLayout(_ layout: MP4FastStartRemuxer.RemuxedLayout) {
-        remuxedLayout = layout
-        TorrentLog.info(
-            "[HTTPRangeServer] Fast-start remux installed — virtual length \(layout.virtualFileLength) header \(layout.syntheticHeader.count) B"
-        )
     }
 
     private func handleConnection(_ connection: NWConnection) async {
@@ -256,9 +242,7 @@ public final class HTTPRangeServer {
             return HTTPResponse(status: 405, body: "Method Not Allowed")
         }
 
-        // The "media length" presented to AVPlayer: virtual length when remuxing,
-        // raw stream length otherwise.
-        let mediaLength = remuxedLayout?.virtualFileLength ?? streamByteLength
+        let mediaLength = streamByteLength
         let rangeHeaderValue = lines
             .first { $0.lowercased().hasPrefix("range:") }
             .map { String($0.dropFirst(6)).trimmingCharacters(in: .whitespaces) }
@@ -331,94 +315,13 @@ public final class HTTPRangeServer {
 
                     await notifyPlayerRead(mediaOffset: mediaStart, length: length)
 
-                    let resolution = resolveVirtualRange(mediaStart: mediaStart, length: length)
-
-                    switch resolution {
-                    case .syntheticHeaderBytes(let data):
-                        // Served entirely from the synthesized fast-start header in memory —
-                        // no disk wait, no torrent traffic needed.
-                        bodyData = data
-                        let headerServeStart = mediaStart
-                        let headerServeEnd = mediaStart + Int64(data.count) - 1
-                        statusCode = 206
-                        contentRange = "bytes \(headerServeStart)-\(headerServeEnd)/\(mediaLength)"
-                        contentLength = Int64(bodyData.count)
-                        logRangeServerResponse(
-                            id: rangeReqID,
-                            statusCode: statusCode,
-                            servedBytes: bodyData.count,
-                            torrentOffset: -1,
-                            wasReadable: true
-                        )
-
-                    case .rawTorrentBytes(let torrentOffset, let resolvedLength):
-                        guard let resolvedSpan = await waitForReadableSpan(
-                            pieceStore: pieceStore,
-                            offset: torrentOffset,
-                            length: resolvedLength,
-                            preferSuffix: isSuffixRange
-                        ) else {
-                            TorrentLog.warn(
-                                "[HTTPRangeServer] No readable bytes for range \(mediaStart)-\(mediaEnd) (suffix=\(isSuffixRange)) after \(Self.bufferWaitSeconds)s — " +
-                                "torrentOffset=\(torrentOffset) (AVPlayer may be probing for moov)"
-                            )
-                            DebugSessionLog.event(
-                                "range_unreadable",
-                                location: "HTTPRangeServer.handleRange",
-                                data: [
-                                    "mediaStart": mediaStart,
-                                    "mediaEnd": mediaEnd,
-                                    "suffix": isSuffixRange,
-                                    "torrentOffset": torrentOffset,
-                                ]
-                            )
-                            return logRangeServerAndReturn(
-                                id: rangeReqID,
-                                response: HTTPResponse(status: 503, body: "Buffering", retryAfterSeconds: 1),
-                                statusCode: 503,
-                                servedBytes: 0,
-                                torrentOffset: torrentOffset,
-                                wasReadable: false
-                            )
-                        }
-
-                        let serveOffset = resolvedSpan.offset
-                        let serveLength = resolvedSpan.length
-
-                        do {
-                            bodyData = try await waitForTorrentRange(
-                                pieceStore: pieceStore,
-                                offset: serveOffset,
-                                length: serveLength
-                            )
-                            guard bodyData.count == serveLength else {
-                                TorrentLog.warn(
-                                    "[HTTPRangeServer] Short read \(bodyData.count)/\(serveLength) at \(mediaStart) — still buffering"
-                                )
-                                return logRangeServerAndReturn(
-                                    id: rangeReqID,
-                                    response: HTTPResponse(status: 503, body: "Buffering", retryAfterSeconds: 1),
-                                    statusCode: 503,
-                                    servedBytes: bodyData.count,
-                                    torrentOffset: serveOffset,
-                                    wasReadable: false
-                                )
-                            }
-                            // Translate the served torrent offset back to virtual media coordinates
-                            // so AVPlayer's Content-Range matches what it requested.
-                            let mdatServeStart = virtualMediaOffset(forTorrentOffset: serveOffset)
-                            let mdatServeEnd = mdatServeStart + Int64(bodyData.count) - 1
-                            statusCode = 206
-                            contentRange = "bytes \(mdatServeStart)-\(mdatServeEnd)/\(mediaLength)"
-                            contentLength = Int64(bodyData.count)
-                            logRangeServerResponse(
-                                id: rangeReqID,
-                                statusCode: statusCode,
-                                servedBytes: bodyData.count,
-                                torrentOffset: serveOffset,
-                                wasReadable: true
-                            )
-                        } catch is CancellationError {
+                    let torrentOffset = streamByteOffset + mediaStart
+                    guard let resolvedSpan = await waitForReadableSpan(
+                        pieceStore: pieceStore,
+                        offset: torrentOffset,
+                        length: length,
+                        preferSuffix: isSuffixRange
+                    ) else {
                         return logRangeServerAndReturn(
                             id: rangeReqID,
                             response: HTTPResponse(status: 499, body: "Client Closed Request"),
@@ -427,42 +330,38 @@ public final class HTTPRangeServer {
                             torrentOffset: torrentOffset,
                             wasReadable: false
                         )
-                    } catch is HTTPRangeReadTimeout {
-                        TorrentLog.warn(
-                            "[HTTPRangeServer] Range \(mediaStart)-\(mediaEnd) timed out after \(Self.readTimeoutSeconds)s — still buffering"
+                    }
+
+                    let serveOffset = resolvedSpan.offset
+                    let serveLength = resolvedSpan.length
+
+                    do {
+                        bodyData = try await waitForFullTorrentRange(
+                            pieceStore: pieceStore,
+                            offset: serveOffset,
+                            length: serveLength
                         )
+                        let serveStart = serveOffset - streamByteOffset
+                        let serveEnd = serveStart + Int64(bodyData.count) - 1
+                        statusCode = 206
+                        contentRange = "bytes \(serveStart)-\(serveEnd)/\(mediaLength)"
+                        contentLength = Int64(bodyData.count)
+                        logRangeServerResponse(
+                            id: rangeReqID,
+                            statusCode: statusCode,
+                            servedBytes: bodyData.count,
+                            torrentOffset: serveOffset,
+                            wasReadable: true
+                        )
+                    } catch is CancellationError {
                         return logRangeServerAndReturn(
                             id: rangeReqID,
-                            response: HTTPResponse(status: 503, body: "Buffering", retryAfterSeconds: 2),
-                            statusCode: 503,
+                            response: HTTPResponse(status: 499, body: "Client Closed Request"),
+                            statusCode: 499,
                             servedBytes: 0,
                             torrentOffset: torrentOffset,
                             wasReadable: false
                         )
-                    } catch let error as PieceStoreError {
-                        if case .readTimeout = error {
-                            TorrentLog.warn(
-                                "[HTTPRangeServer] PieceStore read timeout at \(mediaStart) — still buffering"
-                            )
-                            return logRangeServerAndReturn(
-                                id: rangeReqID,
-                                response: HTTPResponse(status: 503, body: "Buffering", retryAfterSeconds: 2),
-                                statusCode: 503,
-                                servedBytes: 0,
-                                torrentOffset: torrentOffset,
-                                wasReadable: false
-                            )
-                        } else {
-                            TorrentLog.warn("[HTTPRangeServer] Range read failed: \(error.localizedDescription)")
-                            return logRangeServerAndReturn(
-                                id: rangeReqID,
-                                response: HTTPResponse(status: 500, body: "Internal Server Error"),
-                                statusCode: 500,
-                                servedBytes: 0,
-                                torrentOffset: torrentOffset,
-                                wasReadable: false
-                            )
-                        }
                     } catch {
                         TorrentLog.warn("[HTTPRangeServer] Range read failed: \(error.localizedDescription)")
                         return logRangeServerAndReturn(
@@ -474,7 +373,6 @@ public final class HTTPRangeServer {
                             wasReadable: false
                         )
                     }
-                    } // close switch resolution
                 }     // close if mediaStart >= 0
             }         // close if rangeParts.count == 2
         } else if method == "GET" {
@@ -496,22 +394,19 @@ public final class HTTPRangeServer {
             ) else {
                 return logRangeServerAndReturn(
                     id: rangeReqID,
-                    response: HTTPResponse(status: 503, body: "Buffering", retryAfterSeconds: 1),
-                    statusCode: 503,
+                    response: HTTPResponse(status: 499, body: "Client Closed Request"),
+                    statusCode: 499,
                     servedBytes: 0,
                     torrentOffset: streamByteOffset,
                     wasReadable: false
                 )
             }
             do {
-                bodyData = try await readBytes(
+                bodyData = try await waitForFullTorrentRange(
                     pieceStore: pieceStore,
                     offset: span.offset,
                     length: span.length
                 )
-                guard bodyData.count == span.length else {
-                    return HTTPResponse(status: 503, body: "Buffering", retryAfterSeconds: 1)
-                }
                 contentLength = Int64(bodyData.count)
                 logRangeServerResponse(
                     id: rangeReqID,
@@ -529,35 +424,6 @@ public final class HTTPRangeServer {
                     torrentOffset: span.offset,
                     wasReadable: false
                 )
-            } catch is HTTPRangeReadTimeout {
-                return logRangeServerAndReturn(
-                    id: rangeReqID,
-                    response: HTTPResponse(status: 503, body: "Buffering", retryAfterSeconds: 1),
-                    statusCode: 503,
-                    servedBytes: 0,
-                    torrentOffset: span.offset,
-                    wasReadable: false
-                )
-            } catch let error as PieceStoreError {
-                if case .readTimeout = error {
-                    return logRangeServerAndReturn(
-                        id: rangeReqID,
-                        response: HTTPResponse(status: 503, body: "Buffering", retryAfterSeconds: 1),
-                        statusCode: 503,
-                        servedBytes: 0,
-                        torrentOffset: span.offset,
-                        wasReadable: false
-                    )
-                } else {
-                    return logRangeServerAndReturn(
-                        id: rangeReqID,
-                        response: HTTPResponse(status: 500, body: "Internal Server Error"),
-                        statusCode: 500,
-                        servedBytes: 0,
-                        torrentOffset: span.offset,
-                        wasReadable: false
-                    )
-                }
             } catch {
                 return logRangeServerAndReturn(
                     id: rangeReqID,
@@ -665,11 +531,8 @@ public final class HTTPRangeServer {
         length: Int,
         preferSuffix: Bool
     ) async -> (offset: Int64, length: Int)? {
-        let attempts = Int(Self.bufferWaitSeconds * 10)
-        for attempt in 0..<attempts {
-            if Task.isCancelled {
-                return nil
-            }
+        var attempt = 0
+        while !Task.isCancelled {
             if let span = await pieceStore.readableSpan(
                 offset: offset,
                 length: length,
@@ -682,6 +545,12 @@ public final class HTTPRangeServer {
                 }
                 return span
             }
+            attempt += 1
+            if attempt % 100 == 0 {
+                TorrentLog.info(
+                    "[HTTPRangeServer] Still waiting for readable span @ \(offset) len=\(length) suffix=\(preferSuffix) (\(attempt / 10)s)"
+                )
+            }
             do {
                 try await Task.sleep(for: .milliseconds(100))
             } catch {
@@ -691,55 +560,27 @@ public final class HTTPRangeServer {
         return nil
     }
 
-    // MARK: - Virtual fast-start translation
-
-    enum VirtualRangeResolution {
-        /// Bytes served directly from the synthesized header (no disk wait).
-        case syntheticHeaderBytes(data: Data)
-        /// Bytes that map to actual mdat content in the on-disk torrent file.
-        case rawTorrentBytes(torrentOffset: Int64, length: Int)
-    }
-
-    /// Translates a virtual-media range (what AVPlayer sees) into either an
-    /// in-memory header slice or an absolute torrent-file offset.
-    func resolveVirtualRange(mediaStart: Int64, length: Int) -> VirtualRangeResolution {
-        guard let layout = remuxedLayout else {
-            // No remux installed — serve raw torrent bytes as before.
-            return .rawTorrentBytes(
-                torrentOffset: streamByteOffset + mediaStart,
-                length: length
-            )
+    /// Waits until the full byte span is readable and returns it (WebTorrent-style stall, no 503).
+    private func waitForFullTorrentRange(
+        pieceStore: PieceStore,
+        offset: Int64,
+        length: Int
+    ) async throws -> Data {
+        var waitLoops = 0
+        while !Task.isCancelled {
+            if let data = try? await waitForTorrentRange(pieceStore: pieceStore, offset: offset, length: length),
+               data.count == length {
+                return data
+            }
+            waitLoops += 1
+            if waitLoops % 100 == 0 {
+                TorrentLog.info(
+                    "[HTTPRangeServer] Still buffering range @ \(offset) need \(length) B (\(waitLoops / 10)s)"
+                )
+            }
+            try await Task.sleep(for: .milliseconds(100))
         }
-
-        let headerLen = Int64(layout.syntheticHeader.count)
-        let requestEnd = mediaStart + Int64(length)
-
-        if mediaStart < headerLen {
-            // Range falls (at least partially) in the synthesized header.
-            // Serve only the header portion in this response; AVPlayer will issue
-            // a follow-up range request for any remaining bytes.
-            let end = min(requestEnd, headerLen)
-            let from = layout.syntheticHeader.startIndex + Int(mediaStart)
-            let to = layout.syntheticHeader.startIndex + Int(end)
-            let slice = layout.syntheticHeader[from..<to]
-            return .syntheticHeaderBytes(data: Data(slice))
-        } else {
-            // Range falls fully inside mdat — translate to original torrent offset.
-            let mdatVirtualStart = mediaStart - headerLen
-            let absoluteMdatTorrentOffset = streamByteOffset + layout.mdatContentTorrentOffset + mdatVirtualStart
-            return .rawTorrentBytes(torrentOffset: absoluteMdatTorrentOffset, length: length)
-        }
-    }
-
-    /// Reverse-translate a torrent offset back into the virtual-media coordinate
-    /// space presented to AVPlayer. Used to set Content-Range correctly.
-    func virtualMediaOffset(forTorrentOffset torrentOffset: Int64) -> Int64 {
-        guard let layout = remuxedLayout else {
-            return torrentOffset - streamByteOffset
-        }
-        let mdatTorrentOffset = streamByteOffset + layout.mdatContentTorrentOffset
-        let mdatVirtualStart = Int64(layout.syntheticHeader.count)
-        return mdatVirtualStart + (torrentOffset - mdatTorrentOffset)
+        throw CancellationError()
     }
 
     /// Coalesces duplicate concurrent torrent reads. AVPlayer commonly fires

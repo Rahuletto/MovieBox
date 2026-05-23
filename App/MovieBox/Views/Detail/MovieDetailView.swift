@@ -602,8 +602,26 @@ struct MovieDetailView: View {
                 )
             } ?? nil
 
+            let resumePosition = WatchProgressStore.resumePosition(for: movieId, in: storedMovies)
+            let lastHash = storedMovies.first(where: { $0.tmdbId == movieId })?.lastStreamInfoHash
+            let hasContinue = resumePosition != nil
+            guard let chosen = TorrentSelection.torrentForHeroPlay(
+                from: torrents,
+                lastStreamInfoHash: lastHash,
+                hasContinueProgress: hasContinue
+            ) else {
+                errorMessage = torrentFailureMessage(imdbId: detail?.imdbId)
+                return
+            }
+
+            LogStore.shared.log(
+                .info,
+                category: "playback",
+                "Play — \(hasContinue ? "resume" : "fresh") torrent \"\(chosen.title)\" seeders=\(chosen.seeders) quality=\(chosen.quality.rawValue)"
+            )
+
             let request = PersistentPlaybackStartRequest(
-                mode: .bestAvailable(torrents: torrents, maxAttempts: 5),
+                mode: .single(chosen),
                 movieId: movieId,
                 mediaKind: kind,
                 allTorrents: torrents,
@@ -613,9 +631,16 @@ struct MovieDetailView: View {
                 displayTitle: detail?.movie.title,
                 subtitleURL: subtitleFileURL,
                 playback: playback,
-                resumePosition: WatchProgressStore.resumePosition(for: movieId, in: storedMovies),
+                resumePosition: resumePosition,
                 knownDurationSeconds: detail?.movie.runtime.map { Double($0) * 60 },
-                waitTimeout: 90
+                waitTimeout: 90,
+                onPlaybackOpened: { torrent in
+                    guard let record = storedMovies.first(where: { $0.tmdbId == movieId }) else { return }
+                    if let hash = torrent.resolvedInfoHash {
+                        record.lastStreamInfoHash = hash.lowercased()
+                        try? modelContext.save()
+                    }
+                }
             )
 
             let result = appServices.persistentPlayback.start(
