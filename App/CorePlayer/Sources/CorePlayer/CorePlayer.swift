@@ -2054,6 +2054,12 @@ public struct PlayerView<
             MouseTrackingView(onMove: resetControlFade)
             }
         }
+        .overlay {
+            PlaybackCursorView(
+                showsControls: state.showsControls,
+                isActive: state.isPresented && !state.isPlaybackChromeHidden
+            )
+        }
         .ignoresSafeArea()
         .task {
             resetControlFade()
@@ -3364,6 +3370,106 @@ class MouseTrackingNSView: NSView {
 
     override func mouseMoved(with event: NSEvent) {
         onMove?()
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+}
+
+// MARK: - Fullscreen cursor
+
+private enum PlaybackCursorPolicy {
+    static func sync(showsControls: Bool, isActive: Bool, window: NSWindow?) {
+        guard isActive, isFullScreen(window) else {
+            restore()
+            return
+        }
+        if showsControls {
+            NSCursor.unhide()
+        } else {
+            NSCursor.setHiddenUntilMouseMoves(true)
+        }
+    }
+
+    static func restore() {
+        NSCursor.unhide()
+    }
+
+    private static func isFullScreen(_ window: NSWindow?) -> Bool {
+        if window?.styleMask.contains(.fullScreen) == true { return true }
+        if NSApp.keyWindow?.styleMask.contains(.fullScreen) == true { return true }
+        return NSApp.mainWindow?.styleMask.contains(.fullScreen) == true
+    }
+}
+
+struct PlaybackCursorView: NSViewRepresentable {
+    let showsControls: Bool
+    let isActive: Bool
+
+    func makeNSView(context: Context) -> PlaybackCursorNSView {
+        PlaybackCursorNSView()
+    }
+
+    func updateNSView(_ nsView: PlaybackCursorNSView, context: Context) {
+        nsView.showsControls = showsControls
+        nsView.isActive = isActive
+        nsView.syncCursor()
+    }
+
+    static func dismantleNSView(_ nsView: PlaybackCursorNSView, coordinator: ()) {
+        nsView.teardown()
+        PlaybackCursorPolicy.restore()
+    }
+}
+
+final class PlaybackCursorNSView: NSView {
+    var showsControls = true
+    var isActive = false
+    private var observers: [NSObjectProtocol] = []
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        installWindowObservers()
+        syncCursor()
+    }
+
+    func syncCursor() {
+        PlaybackCursorPolicy.sync(
+            showsControls: showsControls,
+            isActive: isActive,
+            window: window
+        )
+    }
+
+    func teardown() {
+        for observer in observers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        observers.removeAll()
+    }
+
+    private func installWindowObservers() {
+        teardown()
+        guard let window else { return }
+
+        let names: [Notification.Name] = [
+            NSWindow.willEnterFullScreenNotification,
+            NSWindow.didEnterFullScreenNotification,
+            NSWindow.willExitFullScreenNotification,
+            NSWindow.didExitFullScreenNotification,
+        ]
+        for name in names {
+            observers.append(
+                NotificationCenter.default.addObserver(
+                    forName: name,
+                    object: window,
+                    queue: .main
+                ) { [weak self] _ in
+                    self?.syncCursor()
+                }
+            )
+        }
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
