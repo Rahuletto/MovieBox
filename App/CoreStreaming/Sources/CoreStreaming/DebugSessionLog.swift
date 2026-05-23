@@ -4,7 +4,7 @@ import Foundation
 /// Appends NDJSON debug lines to `~/Library/Logs/MovieBox/moviebox.log` (live, same file as TorrentLog).
 enum DebugSessionLog {
     /// Bump when logging format or streaming debug paths change.
-    static let logVersion = "20260522-moov-tail-order-v4"
+    static let logVersion = "20260523-findings-all-tiers"
 
     private static let sessionId = "828a86"
 

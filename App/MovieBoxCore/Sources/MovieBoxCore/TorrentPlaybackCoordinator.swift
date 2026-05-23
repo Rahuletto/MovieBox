@@ -70,6 +70,7 @@ public final class TorrentPlaybackCoordinator {
 
         PlaybackLog.log("finishPlayback → loading player url=\(MovieBoxFileLogger.redactURL(url)) movieId=\(movieId) hdr=\(torrent.hdrType?.rawValue ?? "none")")
         let hudTitle = displayTitle.map { PlaybackDisplayTitle.clean($0) }
+        let resourceLoader = TorrentStreamPlaybackRegistry.shared.resourceLoader(for: url)
         let loadPayload = (
             url: url,
             title: torrent.title,
@@ -81,7 +82,8 @@ public final class TorrentPlaybackCoordinator {
             episodeTitle: episodeTitle,
             hudTitle: hudTitle,
             resume: resumePosition,
-            knownDuration: knownDurationSeconds
+            knownDuration: knownDurationSeconds,
+            resourceLoader: resourceLoader
         )
         Task { @MainActor in
             await Task.yield()
@@ -96,7 +98,9 @@ public final class TorrentPlaybackCoordinator {
                 episodeTitle: loadPayload.episodeTitle,
                 displayTitle: loadPayload.hudTitle,
                 resumePosition: loadPayload.resume,
-                knownDurationSeconds: loadPayload.knownDuration
+                knownDurationSeconds: loadPayload.knownDuration,
+                resourceLoaderDelegate: loadPayload.resourceLoader,
+                resourceLoaderQueue: DispatchQueue(label: "com.marban.moviebox.torrent-resource-loader")
             )
         }
     }

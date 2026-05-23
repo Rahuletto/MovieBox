@@ -302,17 +302,10 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
 
         let verifiedHeadBytes = await orchestrator.verifiedMediaBytesFromStart()
         let inFlightHeadBytes = await orchestrator.streamHeadContiguousBytes()
-        // bufferedPieces >= 1 used to short-circuit this gate, but a cached bitmap
-        // would flip it true on resume before the tail / peer state was real, so
-        // AVPlayer launched against an unreachable stream and died. Require the
-        // actual verified-head threshold every time.
-        let hasEnoughHead = verifiedHeadBytes >= headThreshold
-            || inFlightHeadBytes >= headThreshold
+        // FINDINGS Tier 1 #3: no moov-on-disk gate — piece 0 verified (MP4) or MKV head threshold.
+        let hasEnoughHead = await orchestrator.hasMinimumPlaybackHead()
 
         if hasEnoughHead {
-            if verifiedHeadBytes >= headThreshold {
-                _ = await orchestrator.hasMinimumPlaybackHead()
-            }
             // Live peer gate: a resumed session with cached pieces but 0 peers will
             // fail the moment AVPlayer requests a byte we don't have. Only bypass
             // the gate if literally every piece in this file is already on disk.

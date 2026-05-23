@@ -46,6 +46,17 @@ public enum StreamTailPlanner {
         lastPercentPieceIndices(target: target, pieceLength: pieceLength, pieceCount: pieceCount)
     }
 
+    /// qBittorrent-style bootstrap set: first 1% + last 1% of the streamed file.
+    public static func bootstrapPieceIndices(
+        target: TorrentStreamTarget,
+        pieceLength: Int64,
+        pieceCount: Int
+    ) -> [Int] {
+        let first = firstPercentPieceIndices(target: target, pieceLength: pieceLength, pieceCount: pieceCount)
+        let last = lastPercentPieceIndices(target: target, pieceLength: pieceLength, pieceCount: pieceCount)
+        return Array(Set(first + last)).sorted()
+    }
+
     public static func tailPieceIndices(
         target: TorrentStreamTarget,
         pieceLength: Int64,
