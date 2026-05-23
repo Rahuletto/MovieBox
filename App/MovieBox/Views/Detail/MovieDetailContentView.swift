@@ -12,6 +12,7 @@ struct MovieDetailContentView: View {
     let subtitles: [SubtitleInfo]
     @Binding var selectedSubtitle: SubtitleInfo?
     let isLoadingSubtitles: Bool
+    let subtitleLoadHint: String?
     let subtitleFileURL: URL?
     let subtitleAppearance: SubtitleAppearance
     let subtitleFontSize: CGFloat
@@ -149,6 +150,7 @@ struct MovieDetailContentView: View {
                         subtitles: subtitles,
                         selectedSubtitle: $selectedSubtitle,
                         isLoading: isLoadingSubtitles,
+                        emptyHint: subtitleLoadHint,
                         onSearch: onSearchSubtitles,
                         onSelect: onDownloadSubtitle
                     )

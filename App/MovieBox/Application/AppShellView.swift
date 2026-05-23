@@ -62,6 +62,8 @@ struct AppShellView: View {
                             playerState: playerState,
                             torrents: appServices.playbackCoordinator.torrents
                         )
+                    } subtitlesSidebar: {
+                        PlaybackSubtitlesSidebar(playerState: playerState)
                     } streamStatsAccessory: {
                         if let session = appServices.activeSession {
                             TorrentStreamStatsAccessory(session: session)
@@ -106,9 +108,13 @@ struct AppShellView: View {
             )
             #if DEBUG
             DevelopmentSettings.applyIfNeeded(modelContext: modelContext)
-            let refreshed = (try? modelContext.fetch(FetchDescriptor<AppSettings>()))?.first
-            TorrentBackendSync.apply(from: refreshed)
             #endif
+            if let settings = (try? modelContext.fetch(FetchDescriptor<AppSettings>()))?.first {
+                if TorrentBackendSync.repairProxySettings(settings) {
+                    try? modelContext.save()
+                }
+                TorrentBackendSync.apply(from: settings)
+            }
         }
         .overlay(alignment: .top) {
             AppErrorBanner()

@@ -234,7 +234,11 @@ public actor PieceManager {
 
     private func needsIndexBootstrap() -> Bool {
         if indexBootstrapCompleted { return false }
-        return !downloadedPieces.contains(UInt32(streamFirstPiece))
+        if !downloadedPieces.contains(UInt32(streamFirstPiece)) { return true }
+        for piece in streamTailPieces where !downloadedPieces.contains(UInt32(piece)) {
+            return true
+        }
+        return false
     }
 
     private func firstIncompletePiece(in priority: [UInt32], peerBitfield: Data) -> UInt32? {

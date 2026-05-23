@@ -186,7 +186,7 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
                 let inFlightKB = await orchestrator.streamHeadContiguousBytes() / 1024
                 let indexLabel = await orchestrator.streamIndexProbeLabel()
                 let minKB = (indexLabel.contains("MKV")
-                    ? StreamPlaybackThreshold.minimumHeadBytesForMKV
+                    ? StreamPlaybackThreshold.minimumContiguousHeadBytesForMKV
                     : StreamPlaybackThreshold.minimumContiguousHeadBytesForMP4) / 1024
                 await orchestrator.stop()
                 let message: String
@@ -297,7 +297,7 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
         let indexLabel = await orchestrator.streamIndexProbeLabel()
         let isMKV = indexLabel.contains("MKV")
         let headThreshold = isMKV
-            ? StreamPlaybackThreshold.minimumHeadBytesForMKV
+            ? StreamPlaybackThreshold.minimumContiguousHeadBytesForMKV
             : StreamPlaybackThreshold.minimumContiguousHeadBytesForMP4
 
         let verifiedHeadBytes = await orchestrator.verifiedMediaBytesFromStart()
@@ -315,8 +315,9 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
                 let tailFraction = await orchestrator.streamTailPiecesProgress()
                 let headProgress = min(1.0, Double(verifiedHeadBytes) / Double(headThreshold))
                 let tailProgress = min(1.0, tailFraction)
-                let overallProgress = (headProgress * 0.90) + (tailProgress * 0.10)
-                let hint = max(progress, overallProgress, 0.15)
+            let headWeight = isMKV ? 0.55 : 0.90
+            let overallProgress = (headProgress * headWeight) + (tailProgress * (1 - headWeight))
+            let hint = max(progress, overallProgress, 0.15)
                 if case .preparing = state {
                     TorrentLog.info(
                         "[StreamSession] buffering — head ready but no live peers yet (\(peerCount) live, \(transferringPeerCount) transferring) — holding ready"
@@ -337,7 +338,8 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
             let tailFraction = await orchestrator.streamTailPiecesProgress()
             let headProgress = min(1.0, Double(verifiedHeadBytes) / Double(headThreshold))
             let tailProgress = min(1.0, tailFraction)
-            let overallProgress = (headProgress * 0.90) + (tailProgress * 0.10)
+            let headWeight = isMKV ? 0.55 : 0.90
+            let overallProgress = (headProgress * headWeight) + (tailProgress * (1 - headWeight))
             let hint = max(progress, overallProgress, 0.02)
             if case .preparing = state {
                 TorrentLog.info(

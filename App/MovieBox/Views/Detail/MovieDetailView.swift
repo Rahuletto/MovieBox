@@ -26,6 +26,7 @@ struct MovieDetailView: View {
     @State private var errorMessage: String?
     @State private var isLoading = false
     @State private var isLoadingSubtitles = false
+    @State private var subtitleLoadHint: String?
     @State private var subtitleFileURL: URL?
     @State private var preparingVideoURL: URL?
     @State private var isPreparingStream = false
@@ -64,6 +65,7 @@ struct MovieDetailView: View {
                     subtitles: subtitles,
                     selectedSubtitle: $selectedSubtitle,
                     isLoadingSubtitles: isLoadingSubtitles,
+                    subtitleLoadHint: subtitleLoadHint,
                     subtitleFileURL: subtitleFileURL,
                     subtitleAppearance: settings.first?.subtitleAppearance ?? .cinematic,
                     subtitleFontSize: settings.first?.subtitleFontSizePoints ?? 20,
@@ -184,10 +186,23 @@ struct MovieDetailView: View {
 
             isLoadingSubtitles = true
             Task {
-                let subs = await MovieDetailLoader.loadSubtitles(detail: loadedDetail, settings: settings.first)
+                let subs = await MovieDetailLoader.loadSubtitles(
+                    detail: loadedDetail,
+                    kind: kind,
+                    settings: settings.first
+                )
                 await MainActor.run {
                     subtitles = subs
                     isLoadingSubtitles = false
+                    if subs.isEmpty {
+                        if MovieDetailLoader.subtitleServiceMode(from: settings.first) == nil {
+                            subtitleLoadHint = "Add your MovieBox backend URL and app token in Settings."
+                        } else {
+                            subtitleLoadHint = nil
+                        }
+                    } else {
+                        subtitleLoadHint = nil
+                    }
                 }
             }
 
@@ -387,16 +402,24 @@ struct MovieDetailView: View {
         Task {
             isLoadingSubtitles = true
             do {
-                guard let mode = settings.first?.metadataMode else { return }
+                guard let mode = MovieDetailLoader.subtitleServiceMode(from: settings.first) else {
+                    subtitleLoadHint = "Add your MovieBox backend URL and app token in Settings."
+                    errorMessage = "Configure the MovieBox backend in Settings to search subtitles."
+                    return
+                }
                 let year = Int(movie.releaseDate.prefix(4))
                 let client = SubtitleClient(mode: mode)
                 subtitles = try await client.searchSubtitles(
                     title: movie.title,
                     year: year,
-                    language: settings.first?.preferredSubtitleLang ?? "en"
+                    language: "all",
+                    type: kind == .tv ? "tv" : "movie",
+                    imdbId: detail?.imdbId
                 )
+                if !subtitles.isEmpty { subtitleLoadHint = nil }
             } catch {
                 errorMessage = error.localizedDescription
+                subtitleLoadHint = error.localizedDescription
             }
             isLoadingSubtitles = false
         }
@@ -409,7 +432,7 @@ struct MovieDetailView: View {
     private func downloadSubtitleAsync(_ subtitle: SubtitleInfo) async {
         selectedSubtitle = subtitle
         do {
-            guard let mode = settings.first?.metadataMode else { return }
+            guard let mode = MovieDetailLoader.subtitleServiceMode(from: settings.first) else { return }
             let client = SubtitleClient(mode: mode)
             let data = try await client.downloadSubtitle(url: subtitle.downloadUrl)
             let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("moviebox_subtitles")
@@ -620,6 +643,19 @@ struct MovieDetailView: View {
                 "Play — \(hasContinue ? "resume" : "fresh") torrent \"\(chosen.title)\" seeders=\(chosen.seeders) quality=\(chosen.quality.rawValue)"
             )
 
+            let subtitleContext: SubtitleSearchContext? = {
+                guard let mode = MovieDetailLoader.subtitleServiceMode(from: settings.first),
+                      let movie = detail?.movie else { return nil }
+                return SubtitleSearchContext(
+                    title: movie.title,
+                    year: Int(movie.releaseDate.prefix(4)),
+                    imdbId: detail?.imdbId,
+                    mediaKind: kind,
+                    preferredLanguage: settings.first?.preferredSubtitleLang ?? "en",
+                    metadataMode: mode
+                )
+            }()
+
             let request = PersistentPlaybackStartRequest(
                 mode: .single(chosen),
                 movieId: movieId,
@@ -630,6 +666,9 @@ struct MovieDetailView: View {
                 episodeTitle: episodeTitle,
                 displayTitle: detail?.movie.title,
                 subtitleURL: subtitleFileURL,
+                subtitleCatalog: subtitles,
+                selectedSubtitleID: selectedSubtitle?.id,
+                subtitleSearchContext: subtitleContext,
                 playback: playback,
                 resumePosition: resumePosition,
                 knownDurationSeconds: detail?.movie.runtime.map { Double($0) * 60 },

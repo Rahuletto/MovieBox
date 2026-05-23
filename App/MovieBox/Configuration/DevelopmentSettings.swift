@@ -25,7 +25,13 @@ enum DevelopmentSettings {
         var changed = false
         if settings.proxyBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             settings.proxyBaseURL = proxyBaseURL
-            settings.useLocalBackend = true
+            settings.useLocalBackend = false
+            changed = true
+        }
+        // Older builds pointed at production URL but still routed API calls to localhost.
+        if settings.useLocalBackend,
+           settings.proxyBaseURL.trimmingCharacters(in: .whitespacesAndNewlines) == proxyBaseURL {
+            settings.useLocalBackend = false
             changed = true
         }
         let trimmedToken = settings.appToken.trimmingCharacters(in: .whitespacesAndNewlines)

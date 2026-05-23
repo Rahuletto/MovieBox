@@ -53,7 +53,10 @@ struct HomeView: View {
                                   }
 
                             if !continueWatching.isEmpty {
-                                ContinueWatchingRow(records: continueWatching) { record in
+                                ContinueWatchingRow(
+                                    records: continueWatching,
+                                    metadataMode: metadataMode
+                                ) { record in
                                     router.showDetail(id: record.tmdbId, kind: record.mediaKindEnum)
                                 }
                             }
@@ -388,6 +391,7 @@ private struct ContinueWatchingRow: View {
     @Environment(AppRouter.self) private var router
     @State private var movieDetails: [Int: Movie] = [:]
     let records: [MovieRecord]
+    let metadataMode: MetadataEndpointMode?
     let action: (MovieRecord) -> Void
 
     var body: some View {
@@ -433,8 +437,9 @@ private struct ContinueWatchingRow: View {
     @ViewBuilder
     private func continueWatchingBanner(for record: MovieRecord) -> some View {
         let progress = WatchProgressStore.progressFraction(for: record)
-        let backdropPath = movieDetails[record.tmdbId]?.backdropPath
-        let imageURL = backdropPath.flatMap { MetadataClient().imageURL(path: $0, width: 780) }
+        let movie = movieDetails[record.tmdbId]
+        let bannerPath = movie?.backdropPath ?? movie?.posterPath ?? record.posterPath
+        let imageURL = bannerPath.flatMap { MetadataClient().imageURL(path: $0, width: 780) }
 
         RoundedRectangle(cornerRadius: 12, style: .continuous)
             .fill(Color(nsColor: .controlBackgroundColor))
@@ -446,6 +451,7 @@ private struct ContinueWatchingRow: View {
                     } content: { image in
                         image.resizable().scaledToFill()
                     }
+                    .id(imageURL)
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 } else {
                     Image(systemName: "film.stack")
@@ -483,14 +489,15 @@ private struct ContinueWatchingRow: View {
 
     private func fetchMovieDetail(for record: MovieRecord) async {
         guard movieDetails[record.tmdbId] == nil else { return }
+        guard let mode = metadataMode else { return }
         do {
-            let client = MetadataClient()
+            let client = MetadataClient(mode: mode)
             let detail = try await client.movieDetail(id: record.tmdbId, kind: record.mediaKindEnum)
             await MainActor.run {
                 movieDetails[record.tmdbId] = detail.movie
             }
         } catch {
-            print("Failed to fetch movie detail for \(record.tmdbId): \(error)")
+            NSLog("Continue Watching backdrop fetch failed for \(record.tmdbId): \(error.localizedDescription)")
         }
     }
 }

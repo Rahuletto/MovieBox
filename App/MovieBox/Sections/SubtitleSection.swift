@@ -7,6 +7,7 @@ struct SubtitleSection: View {
     let subtitles: [SubtitleInfo]
     @Binding var selectedSubtitle: SubtitleInfo?
     let isLoading: Bool
+    var emptyHint: String?
     let onSearch: () -> Void
     let onSelect: (SubtitleInfo) -> Void
 
@@ -29,14 +30,28 @@ struct SubtitleSection: View {
                     .controlSize(.small)
                     .frame(maxWidth: .infinity, minHeight: 60)
             } else if subtitles.isEmpty {
-                Text("No subtitles found. Try searching.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, minHeight: 40)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("No subtitles found.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let emptyHint, !emptyHint.isEmpty {
+                        Text(emptyHint)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        Text("Check Settings → Backend Proxy, then tap Search.")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
             } else {
+                Text("\(subtitles.count) subtitles")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 10) {
-                        ForEach(subtitles.prefix(10)) { sub in
+                        ForEach(subtitles.prefix(12)) { sub in
                             SubtitleCard(
                                 subtitle: sub,
                                 isSelected: selectedSubtitle?.id == sub.id,

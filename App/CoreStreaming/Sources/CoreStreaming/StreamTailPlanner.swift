@@ -4,6 +4,20 @@ import Foundation
 public enum StreamTailPlanner {
     private static let tailPercent: Double = 0.01
 
+    private static func tailByteSpan(
+        target: TorrentStreamTarget,
+        pieceLength: Int64,
+        percent: Double
+    ) -> Int64 {
+        let ext = (target.file.relativePath as NSString).pathExtension.lowercased()
+        let isMatroska = ext == "mkv" || ext == "webm" || target.contentType.contains("matroska")
+        if isMatroska {
+            // MKV Cues often span the last 8–16 MB (FINDINGS; Interstellar/Off Campus -11828 at play).
+            return min(target.byteLength, max(16 * 1024 * 1024, Int64(Double(target.byteLength) * 0.02)))
+        }
+        return max(pieceLength * 2, Int64(Double(target.byteLength) * percent))
+    }
+
     /// Last `percent` of the file by byte length (minimum two pieces).
     public static func lastPercentPieceIndices(
         target: TorrentStreamTarget,
@@ -12,7 +26,7 @@ public enum StreamTailPlanner {
         percent: Double = 0.01
     ) -> [Int] {
         guard target.needsTailProbeForPlayback else { return [] }
-        let tailBytes = max(pieceLength * 2, Int64(Double(target.byteLength) * percent))
+        let tailBytes = tailByteSpan(target: target, pieceLength: pieceLength, percent: percent)
         return tailPieceIndices(
             target: target,
             pieceLength: pieceLength,

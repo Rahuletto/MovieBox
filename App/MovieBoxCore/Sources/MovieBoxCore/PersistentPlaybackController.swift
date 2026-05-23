@@ -97,6 +97,9 @@ public struct PersistentPlaybackStartRequest: Sendable {
     public let episodeTitle: String?
     public let displayTitle: String?
     public let subtitleURL: URL?
+    public let subtitleCatalog: [SubtitleInfo]
+    public let selectedSubtitleID: String?
+    public let subtitleSearchContext: SubtitleSearchContext?
     public let playback: PlaybackSettings
     public let resumePosition: Double?
     public let knownDurationSeconds: Double?
@@ -114,6 +117,9 @@ public struct PersistentPlaybackStartRequest: Sendable {
         episodeTitle: String? = nil,
         displayTitle: String? = nil,
         subtitleURL: URL? = nil,
+        subtitleCatalog: [SubtitleInfo] = [],
+        selectedSubtitleID: String? = nil,
+        subtitleSearchContext: SubtitleSearchContext? = nil,
         playback: PlaybackSettings,
         resumePosition: Double? = nil,
         knownDurationSeconds: Double? = nil,
@@ -130,6 +136,9 @@ public struct PersistentPlaybackStartRequest: Sendable {
         self.episodeTitle = episodeTitle
         self.displayTitle = displayTitle
         self.subtitleURL = subtitleURL
+        self.subtitleCatalog = subtitleCatalog
+        self.selectedSubtitleID = selectedSubtitleID
+        self.subtitleSearchContext = subtitleSearchContext
         self.playback = playback
         self.resumePosition = resumePosition
         self.knownDurationSeconds = knownDurationSeconds
@@ -389,6 +398,7 @@ public final class PersistentPlaybackController {
                 resumePosition: request.resumePosition,
                 knownDurationSeconds: request.knownDurationSeconds
             )
+            applySubtitlePlayback(request: request, playerState: playerState)
             playerState.isStreamingTorrent = true
             request.onPlaybackOpened?(torrent)
             resetToIdleAfterPlayerOpen()
@@ -533,6 +543,7 @@ public final class PersistentPlaybackController {
                 resumePosition: request.resumePosition,
                 knownDurationSeconds: request.knownDurationSeconds
             )
+            applySubtitlePlayback(request: request, playerState: playerState)
             playerState.isStreamingTorrent = true
             request.onPlaybackOpened?(torrent)
             resetToIdleAfterPlayerOpen()
@@ -540,6 +551,18 @@ public final class PersistentPlaybackController {
             phase = .failed(error.localizedDescription)
             await session.cancel()
         }
+    }
+
+    private func applySubtitlePlayback(
+        request: PersistentPlaybackStartRequest,
+        playerState: PlayerState
+    ) {
+        SubtitlePlaybackSupport.configure(
+            playerState: playerState,
+            catalog: request.subtitleCatalog,
+            searchContext: request.subtitleSearchContext,
+            selectedSubtitleID: request.selectedSubtitleID ?? request.subtitleCatalog.first?.id
+        )
     }
 
     private func resetToIdleAfterPlayerOpen() {
