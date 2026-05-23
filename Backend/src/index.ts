@@ -12,7 +12,9 @@ import {
   INDEXER_CATALOG,
   DEFAULT_ENABLED_INDEXER_IDS,
 } from './torrent'
-import { assertSafeSubtitleURL, buildSubf2mURL } from './subtitle-guard'
+import { assertSafeSubtitleCDNURL, assertSafeSubtitleURL, buildSubf2mURL } from './subtitle-guard'
+import { searchSubdlSubtitles, SubdlUpstreamError } from './subdl'
+import { acquireSubdlSearchSlot, SubdlQuotaExceededError } from './subdl-quota'
 import {
   ImageProxyQuerySchema,
   LogoRouteParamsSchema,
@@ -44,6 +46,7 @@ type Bindings = {
   CORS_ORIGIN: string
   RATE_LIMIT_WINDOW_MS: string
   RATE_LIMIT_MAX_REQUESTS: string
+  SUBDL_API_KEY?: string
   MOVIEBOX_CACHE: KVNamespace
 }
 
@@ -86,24 +89,34 @@ app.use('/api/*', async (c, next) => {
   return corsHandler(c, next)
 })
 
-// Rate limiting middleware
+// Rate limiting middleware — subtitles use a separate bucket so TMDB/torrent traffic
+// cannot block caption search/download.
 app.use('/api/*', async (c, next) => {
   const windowMs = parseInt(c.env.RATE_LIMIT_WINDOW_MS || '60000')
-  const maxRequests = parseInt(c.env.RATE_LIMIT_MAX_REQUESTS || '100')
+  const path = c.req.path
+  const isSubtitleRoute = path.startsWith('/api/subtitles/')
+  const maxRequests = isSubtitleRoute
+    ? parseInt(c.env.RATE_LIMIT_SUBTITLE_MAX_REQUESTS || '40')
+    : parseInt(c.env.RATE_LIMIT_MAX_REQUESTS || '180')
   const clientIp = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || 'unknown'
-  const cacheKey = `rate_limit:${clientIp}:${Math.floor(Date.now() / windowMs)}`
+  const bucket = isSubtitleRoute ? 'subtitle' : 'api'
+  const cacheKey = `rate_limit:${bucket}:${clientIp}:${Math.floor(Date.now() / windowMs)}`
 
   const current = await kvGet(c.env.MOVIEBOX_CACHE, cacheKey)
   const count = current ? parseInt(current) : 0
 
   if (count >= maxRequests) {
+    const retryAfter = Math.ceil(windowMs / 1000)
     return c.json(
       {
         error: 'rate_limit_exceeded',
-        message: `Too many requests. Try again in ${Math.ceil(windowMs / 1000)}s.`,
-        retryAfter: Math.ceil(windowMs / 1000),
+        message: isSubtitleRoute
+          ? `Subtitle requests are temporarily limited. Try again in ${retryAfter}s.`
+          : `Too many requests. Try again in ${retryAfter}s.`,
+        retryAfter,
       },
-      429
+      429,
+      { headers: { 'Retry-After': String(retryAfter) } }
     )
   }
 
@@ -668,7 +681,10 @@ app.get('/api/torrent/search', async (c) => {
       enabledIndexerIDs: search.enabled ?? search.indexers ?? null,
     })
     return c.json(payload, {
-      headers: { 'Cache-Control': 'private, max-age=120' },
+      headers: {
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        Pragma: 'no-cache',
+      },
     })
   } catch (error) {
     return c.json(
@@ -814,12 +830,15 @@ app.get('/api/title/:kind/:id', async (c) => {
     const { kind, id } = route
 
     // v8: refresh bundle after RT stream quality policy (prefer 1080p+) update.
+    const bypassKV = c.req.query('fresh') === '1'
     const cacheKey = `title:${kind}:${id}`
-    const cached = await kvGet(c.env.MOVIEBOX_CACHE,cacheKey)
-    if (cached) {
-      return c.json(JSON.parse(cached), {
-        headers: { 'X-Cache': 'HIT', 'Cache-Control': 'public, max-age=21600' },
-      })
+    if (!bypassKV) {
+      const cached = await kvGet(c.env.MOVIEBOX_CACHE,cacheKey)
+      if (cached) {
+        return c.json(JSON.parse(cached), {
+          headers: { 'X-Cache': 'HIT', 'Cache-Control': 'public, max-age=21600' },
+        })
+      }
     }
 
     const append =
@@ -1088,81 +1107,196 @@ app.get('/api/omdb', async (c) => {
   }
 })
 
-// Subf2m subtitle search and download
+/** Subf2m scrape fallback — SubDL API returns 403 from Cloudflare Workers IPs. */
+async function searchSubf2mSubtitles(options: {
+  title?: string | null
+  year?: number | null
+  language?: string
+  imdbId?: string | null
+}): Promise<SubtitleResult[]> {
+  const langParam = normalizeLanguageCode(options.language ?? 'all')
+  const searchQueries: string[] = []
+  if (options.imdbId?.trim()) {
+    searchQueries.push(`tt${options.imdbId.replace(/^tt/i, '').trim()}`)
+  }
+  if (options.title?.trim()) {
+    searchQueries.push(options.title.trim())
+  }
+
+  const yearFilter = options.year ? String(options.year) : null
+  let results: Subf2mSearchResult[] = []
+
+  for (const searchQuery of searchQueries) {
+    const searchUrl = buildSubf2mURL(
+      `/subtitles/searchbytitle?query=${encodeURIComponent(searchQuery)}&l=`
+    ).toString()
+    const searchHtml = await fetchWithTimeout(searchUrl, {
+      headers: SUBF2M_FETCH_HEADERS,
+      timeout: 20000,
+    })
+    if (!searchHtml || typeof searchHtml !== 'string') continue
+    results = parseSubf2mSearchResults(searchHtml, yearFilter)
+    if (results.length === 0 && yearFilter) {
+      results = parseSubf2mSearchResults(searchHtml, null)
+    }
+    if (results.length > 0) break
+  }
+
+  if (results.length === 0) return []
+
+  const subtitles: SubtitleResult[] = []
+  const seenDownloadUrls = new Set<string>()
+  for (const result of results.slice(0, 5)) {
+    const detailPath = langParam === 'all' ? result.path : `${result.path}/${langParam}`
+    const detailUrl = buildSubf2mURL(detailPath).toString()
+    const detailHtml = await fetchWithTimeout(detailUrl, {
+      headers: SUBF2M_FETCH_HEADERS,
+      timeout: 30000,
+    })
+    if (!detailHtml || typeof detailHtml !== 'string') continue
+    const items = parseSubf2mDetailPage(detailHtml, result.path, options.language ?? 'all')
+    for (const item of items) {
+      if (seenDownloadUrls.has(item.downloadUrl)) continue
+      seenDownloadUrls.add(item.downloadUrl)
+      subtitles.push(item)
+    }
+  }
+
+  return subtitles
+}
+
+// SubDL subtitle search (subf2m fallback when SubDL blocks worker egress)
 app.get('/api/subtitles/search', async (c) => {
   try {
     const sub = parseQuery(c, SubtitleSearchQuerySchema, c.req.query())
     if (sub instanceof Response) return sub
 
-    const title = sub.title
-    const year = sub.year
-    const language = sub.language
-    const type = sub.type
-    const imdbId = sub.imdb_id
+    const apiKey = c.env.SUBDL_API_KEY?.trim()
+    if (!apiKey) {
+      return c.json(
+        {
+          error: 'misconfigured',
+          message: 'SUBDL_API_KEY is not set on the Worker. Run: wrangler secret put SUBDL_API_KEY',
+        },
+        503
+      )
+    }
 
-    const cacheKey = `subf2m:v2:search:${title ?? ''}:${imdbId ?? ''}:${year ?? ''}:${language}:${type}`
-    const cached = await kvGet(c.env.MOVIEBOX_CACHE,cacheKey)
+    const cacheKey = `subdl:v2:search:${sub.title ?? ''}:${sub.imdb_id ?? ''}:${sub.tmdb_id ?? ''}:${sub.year ?? ''}:${sub.language}:${sub.type}:${sub.season_number ?? ''}:${sub.episode_number ?? ''}`
+    const cached = await kvGet(c.env.MOVIEBOX_CACHE, cacheKey)
     if (cached) {
-      return c.json(JSON.parse(cached), { headers: { 'X-Cache': 'HIT' } })
-    }
-
-    const langParam = normalizeLanguageCode(language)
-    const searchQueries: string[] = []
-    if (imdbId) {
-      searchQueries.push(`tt${imdbId.replace(/^tt/i, '')}`)
-    }
-    if (title?.trim()) {
-      searchQueries.push(title.trim())
-    }
-
-    let results: Subf2mSearchResult[] = []
-    for (const searchQuery of searchQueries) {
-      const searchUrl = buildSubf2mURL(
-        `/subtitles/searchbytitle?query=${encodeURIComponent(searchQuery)}&l=`
-      ).toString()
-      const searchHtml = await fetchWithTimeout(searchUrl, {
-        headers: SUBF2M_FETCH_HEADERS,
-        timeout: 20000,
+      return c.json(JSON.parse(cached), {
+        headers: { 'X-Cache': 'HIT', 'X-Subtitle-Provider': 'subdl' },
       })
-      if (!searchHtml) continue
-      results = parseSubf2mSearchResults(searchHtml, year)
-      if (results.length === 0 && year) {
-        results = parseSubf2mSearchResults(searchHtml, null)
+    }
+
+    const quota = await acquireSubdlSearchSlot(c.env.MOVIEBOX_CACHE)
+    if (!quota.allowed) {
+      return c.json(
+        {
+          error: 'subtitle_quota_exceeded',
+          message: 'Subtitle search quota reached. Cached results still work; try again in an hour.',
+          retryAfter: 3600,
+        },
+        429,
+        { headers: { 'Retry-After': '3600', 'X-Subtitle-Provider': 'subdl' } }
+      )
+    }
+
+    let subtitles: SubtitleResult[] = []
+    let provider = 'subdl'
+    let subdlFailed = false
+
+    try {
+      subtitles = await searchSubdlSubtitles({
+        apiKey,
+        title: sub.title ?? null,
+        year: sub.year,
+        language: sub.language,
+        type: sub.type,
+        imdbId: sub.imdb_id ?? null,
+        tmdbId: sub.tmdb_id,
+        seasonNumber: sub.season_number,
+        episodeNumber: sub.episode_number,
+      })
+    } catch (error) {
+      if (error instanceof SubdlUpstreamError && error.status === 429) {
+        return c.json(
+          {
+            error: 'subtitle_rate_limited',
+            message: 'SubDL rate limit hit. Try again shortly.',
+            retryAfter: 120,
+          },
+          429,
+          { headers: { 'Retry-After': '120', 'X-Subtitle-Provider': 'subdl' } }
+        )
       }
-      if (results.length > 0) break
+      // Any other SubDL failure (403, 502, timeout, parse) — fall through to subf2m.
+      subdlFailed = true
+      subtitles = []
+      console.warn(
+        '[subtitles] SubDL search failed, using subf2m fallback:',
+        error instanceof Error ? error.message : error
+      )
     }
 
-    if (results.length === 0) {
-      return c.json({ subtitles: [] })
-    }
-
-    const subtitles: SubtitleResult[] = []
-    const seenDownloadUrls = new Set<string>()
-    for (const result of results.slice(0, 5)) {
-      const detailPath =
-        langParam === 'all' ? result.path : `${result.path}/${langParam}`
-      const detailUrl = buildSubf2mURL(detailPath).toString()
-      const detailHtml = await fetchWithTimeout(detailUrl, {
-        headers: SUBF2M_FETCH_HEADERS,
-        timeout: 30000,
-      })
-      if (!detailHtml) continue
-      const items = parseSubf2mDetailPage(detailHtml, result.path, language)
-      for (const item of items) {
-        if (seenDownloadUrls.has(item.downloadUrl)) continue
-        seenDownloadUrls.add(item.downloadUrl)
-        subtitles.push(item)
+    if (subtitles.length === 0) {
+      try {
+        subtitles = await searchSubf2mSubtitles({
+          title: sub.title ?? null,
+          year: sub.year,
+          language: sub.language,
+          imdbId: sub.imdb_id ?? null,
+        })
+        if (subtitles.length > 0) {
+          provider = 'subf2m'
+        } else if (subdlFailed) {
+          console.warn('[subtitles] SubDL and subf2m both returned no results')
+        }
+      } catch (fallbackError) {
+        console.error('[subtitles] subf2m fallback error:', fallbackError)
+        return c.json(
+          {
+            error: 'subtitle_search_failed',
+            message:
+              fallbackError instanceof Error
+                ? fallbackError.message
+                : 'Subtitle providers are temporarily unavailable.',
+          },
+          502
+        )
       }
     }
 
     const response = { subtitles }
-    if (subtitles.length > 0) {
-      await kvPut(c.env.MOVIEBOX_CACHE, cacheKey, JSON.stringify(response), {
-        expirationTtl: 60 * 60 * 6,
-      })
-    }
-    return c.json(response, { headers: { 'X-Cache': 'MISS' } })
+    const ttl =
+      subtitles.length > 0
+        ? 60 * 60 * 24 // 24h — successful catalog
+        : 60 * 60 * 2 // 2h negative cache — avoid hammering SubDL on empty titles
+
+    await kvPut(c.env.MOVIEBOX_CACHE, cacheKey, JSON.stringify(response), {
+      expirationTtl: ttl,
+    })
+
+    return c.json(response, {
+      headers: {
+        'X-Cache': 'MISS',
+        'X-Subtitle-Provider': provider,
+        'X-Subdl-Quota-Remaining': String(quota.remaining),
+      },
+    })
   } catch (error) {
+    if (error instanceof SubdlQuotaExceededError) {
+      return c.json(
+        {
+          error: 'subtitle_quota_exceeded',
+          message: error.message,
+          retryAfter: 3600,
+        },
+        429,
+        { headers: { 'Retry-After': '3600' } }
+      )
+    }
     return c.json(
       {
         error: 'subtitle_search_failed',
@@ -1177,9 +1311,8 @@ app.get('/api/subtitles/download', async (c) => {
   try {
     const dl = parseQuery(c, SubtitleDownloadQuerySchema, c.req.query())
     if (dl instanceof Response) return dl
-    const subtitleUrl = dl.url
 
-    const cacheKey = `subf2m:dl:${btoa(subtitleUrl)}`
+    const cacheKey = `sub:dl:${btoa(dl.url)}`
     const cached = await kvGetBuffer(c.env.MOVIEBOX_CACHE, cacheKey)
     if (cached) {
       return c.body(cached, {
@@ -1190,50 +1323,24 @@ app.get('/api/subtitles/download', async (c) => {
       })
     }
 
-    let fullUrl: string
-    try {
-      fullUrl = buildSubf2mURL(subtitleUrl).toString()
-    } catch {
-      return c.json({ error: 'bad_request', message: 'Subtitle URL is not allowed.' }, 400)
-    }
-    const html = await fetchWithTimeout(fullUrl, { headers: SUBF2M_FETCH_HEADERS })
-    if (!html) {
-      return c.json({ error: 'not_found', message: 'Could not fetch subtitle page.' }, 404)
+    const isSubf2mPath =
+      dl.url.startsWith('/subtitles/') || dl.url.includes('subf2m.co')
+    const isSubdlCDNPath =
+      dl.url.includes('dl.subdl.com') ||
+      dl.url.includes('isubcdn.com') ||
+      dl.url.startsWith('/subtitle/')
+
+    if (isSubf2mPath || isSubdlCDNPath) {
+      const hint = isSubf2mPath
+        ? 'Subf2m CDN blocked the worker; the Mac app downloads these tracks directly.'
+        : 'SubDL CDN blocked the worker; the Mac app downloads these tracks directly.'
+      return c.json({ error: 'client_download_required', message: hint }, 400)
     }
 
-    const downloadLink = extractSubf2mDownloadLink(html)
-    if (!downloadLink) {
-      return c.json({ error: 'not_found', message: 'No download link found.' }, 404)
-    }
-
-    let dlUrl: string
-    try {
-      dlUrl = downloadLink.startsWith('http')
-        ? assertSafeSubtitleURL(downloadLink).toString()
-        : buildSubf2mURL(downloadLink).toString()
-    } catch {
-      return c.json({ error: 'bad_request', message: 'Subtitle download URL is not allowed.' }, 400)
-    }
-    const zipResponse = await fetchWithTimeout(dlUrl, {
-      returnType: 'arrayBuffer',
-      headers: SUBF2M_FETCH_HEADERS,
-    })
-    if (!zipResponse) {
-      return c.json({ error: 'download_failed', message: 'Failed to download subtitle ZIP.' }, 502)
-    }
-
-    const srtContent = await extractSrtFromZip(zipResponse as ArrayBuffer)
-    if (!srtContent) {
-      return c.json({ error: 'extract_failed', message: 'No SRT file found in ZIP.' }, 502)
-    }
-
-    await kvPut(c.env.MOVIEBOX_CACHE,cacheKey, srtContent, { expirationTtl: 60 * 60 * 24 })
-    return c.body(srtContent, {
-      headers: {
-        'Content-Type': 'application/x-subrip',
-        'X-Cache': 'MISS',
-      },
-    })
+    return c.json(
+      { error: 'bad_request', message: 'Unsupported subtitle download URL.' },
+      400
+    )
   } catch (error) {
     return c.json(
       {
@@ -1469,6 +1576,125 @@ function parseSubf2mDetailPage(html: string, basePath: string, language: string)
   }
 
   return subtitles
+}
+
+async function downloadSubtitleSRT(pageUrl: string): Promise<string | null> {
+  const pagePath = new URL(pageUrl).pathname
+  let downloadPageUrl: string | null
+  if (pagePath.endsWith('/download')) {
+    downloadPageUrl = pageUrl
+  } else {
+    downloadPageUrl = await resolveSubf2mDownloadPageURL(pageUrl)
+    if (!downloadPageUrl) {
+      try {
+        downloadPageUrl = buildSubf2mURL(`${pagePath.replace(/\/$/, '')}/download`).toString()
+      } catch {
+        return null
+      }
+    }
+  }
+  if (!downloadPageUrl) return null
+
+  let zipUrl = await resolveSubf2mZipRedirectURL(downloadPageUrl)
+  if (!zipUrl) return null
+
+  for (let hop = 0; hop < 4; hop++) {
+    let cdnURL: string
+    try {
+      cdnURL = zipUrl.startsWith('http')
+        ? assertSafeSubtitleCDNURL(zipUrl).toString()
+        : assertSafeSubtitleCDNURL(new URL(zipUrl, downloadPageUrl).toString()).toString()
+    } catch {
+      try {
+        cdnURL = buildSubf2mURL(zipUrl).toString()
+      } catch {
+        return null
+      }
+    }
+
+    const archive = await fetchWithTimeout(cdnURL, {
+      returnType: 'arrayBuffer',
+      timeout: 45000,
+      headers: {
+        ...SUBF2M_FETCH_HEADERS,
+        Referer: downloadPageUrl,
+      },
+    })
+    if (!archive) return null
+
+    const bytes = archive as ArrayBuffer
+    const text = extractSubtitleText(bytes)
+    if (text) return text
+
+    const html = new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(bytes))
+    const jsRedirect = html.match(/window\.location\.href\s*=\s*["']([^"']+)["']/i)
+    if (!jsRedirect?.[1]) break
+    zipUrl = new URL(jsRedirect[1], cdnURL).toString()
+  }
+
+  return null
+}
+
+async function resolveSubf2mDownloadPageURL(pageUrl: string): Promise<string | null> {
+  const html = await fetchWithTimeout(pageUrl, { headers: SUBF2M_FETCH_HEADERS, timeout: 20000 })
+  if (!html || typeof html !== 'string') return null
+
+  const downloadLink = extractSubf2mDownloadLink(html)
+  if (!downloadLink) return null
+
+  try {
+    return downloadLink.startsWith('http')
+      ? assertSafeSubtitleURL(downloadLink).toString()
+      : buildSubf2mURL(downloadLink).toString()
+  } catch {
+    return null
+  }
+}
+
+async function resolveSubf2mZipRedirectURL(downloadPageUrl: string): Promise<string | null> {
+  const controller = new AbortController()
+  const id = setTimeout(() => controller.abort(), 20000)
+  try {
+    const response = await fetch(downloadPageUrl, {
+      signal: controller.signal,
+      redirect: 'manual',
+      headers: {
+        ...SUBF2M_FETCH_HEADERS,
+        Referer: 'https://subf2m.co/',
+      },
+    })
+    clearTimeout(id)
+
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get('location')
+      if (location) return new URL(location, downloadPageUrl).toString()
+    }
+
+    const html = await response.text()
+    const jsRedirect = html.match(/window\.location\.href\s*=\s*["']([^"']+)["']/i)
+    if (jsRedirect?.[1]) {
+      return new URL(jsRedirect[1], downloadPageUrl).toString()
+    }
+    const metaRefresh = html.match(/url=([^"'>]+)/i)
+    if (metaRefresh?.[1]) {
+      return new URL(metaRefresh[1].trim(), downloadPageUrl).toString()
+    }
+  } catch {
+    clearTimeout(id)
+  }
+  return null
+}
+
+function extractSubtitleText(buffer: ArrayBuffer): string | null {
+  const bytes = new Uint8Array(buffer)
+  if (bytes.length >= 2 && bytes[0] === 0x50 && bytes[1] === 0x4b) {
+    return extractSrtFromZip(buffer)
+  }
+
+  const text = new TextDecoder('utf-8', { fatal: false }).decode(buffer).trim()
+  if (!text || (text.startsWith('{') && text.includes('"error"'))) return null
+  if (text.includes('-->')) return text
+  return null
 }
 
 function extractSubf2mDownloadLink(html: string): string | null {

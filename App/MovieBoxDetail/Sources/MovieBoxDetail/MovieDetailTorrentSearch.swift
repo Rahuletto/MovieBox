@@ -22,6 +22,8 @@ public enum MovieDetailTorrentSearch {
         }
     }
 
+    /// Live indexer search — callers should pass metadata from `MovieDetailLoader.freshDetailForTorrentSearch`
+    /// so IMDb/runtime are not taken from long-lived KV or in-app detail cache alone.
     @MainActor
     public static func searchStream(
         detail: MovieDetail,
@@ -65,19 +67,18 @@ public enum MovieDetailTorrentSearch {
                     if Task.isCancelled { break }
 
                     var torrents = progress.torrents
-                    if kind == .tv, let episode {
-                        torrents = TorrentEpisodeFilter.filter(
-                            torrents,
-                            season: episode.seasonNumber,
-                            episode: episode.episodeNumber
-                        )
-                    } else if kind == .movie {
-                        let runtimeMinutes = detail.movie.runtime ?? detail.enrichment?.runtimeMin
+                    if kind == .movie {
                         torrents = TorrentMovieRelevanceFilter.filter(
                             torrents,
                             movieTitle: title,
                             year: year,
-                            runtimeMinutes: runtimeMinutes
+                            runtimeMinutes: detail.movie.runtime
+                        )
+                    } else if kind == .tv, let episode {
+                        torrents = TorrentEpisodeFilter.filter(
+                            torrents,
+                            season: episode.seasonNumber,
+                            episode: episode.episodeNumber
                         )
                     }
 

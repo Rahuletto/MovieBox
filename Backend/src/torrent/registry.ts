@@ -45,7 +45,7 @@ export const INDEXER_IDS = INDEXERS.map((i) => i.id)
 
 export { INDEXER_CATALOG, DEFAULT_ENABLED_INDEXER_IDS, parseEnabledIndexerIDs } from './catalog'
 
-const INDEXER_TIMEOUT_MS = 8_000
+const INDEXER_TIMEOUT_MS = 15_000
 
 function tagIndexerRows(rows: TorrentSearchHit[], indexerId: string): TorrentSearchHit[] {
   return rows.map((row) => ({ ...row, indexerId }))
@@ -76,22 +76,7 @@ export async function runIndexersStreaming(
   const counts: Record<string, number> = {}
   const errors: Record<string, string> = {}
 
-  const byHash = new Map<string, TorrentSearchHit>()
-  const unhashed: TorrentSearchHit[] = []
-
-  const mergeRows = (rows: TorrentSearchHit[], indexerId: string) => {
-    for (const row of tagIndexerRows(rows, indexerId)) {
-      const key = row.infoHash?.toLowerCase()
-      if (!key) {
-        unhashed.push(row)
-        continue
-      }
-      const existing = byHash.get(key)
-      if (!existing || (row.seeders ?? 0) > (existing.seeders ?? 0)) {
-        byHash.set(key, row)
-      }
-    }
-  }
+  const allRows: TorrentSearchHit[] = []
 
   await Promise.allSettled(
     active.map(async (indexer) => {
@@ -99,7 +84,7 @@ export async function runIndexersStreaming(
         const rows = await withTimeout(indexer.search(ctx), INDEXER_TIMEOUT_MS)
         const tagged = tagIndexerRows(rows, indexer.id)
         counts[indexer.id] = tagged.length
-        mergeRows(rows, indexer.id)
+        allRows.push(...tagged)
         await onBatch({ id: indexer.id, rows: tagged })
       } catch (reason) {
         const message = reason instanceof Error ? reason.message : String(reason)
@@ -110,7 +95,7 @@ export async function runIndexersStreaming(
     })
   )
 
-  const merged = [...byHash.values(), ...unhashed].toSorted(
+  const merged = allRows.toSorted(
     (a, b) => (b.seeders ?? 0) - (a.seeders ?? 0)
   )
 
@@ -137,12 +122,7 @@ export async function runIndexers(
     })
   )
 
-  // Dedup by infoHash, keeping the row with the HIGHEST seeders.
-  // This avoids the previous bug where torrentio's lower-seeded entry would
-  // silently absorb a Pirate Bay / 1337x match with more seeders, making
-  // those sources look like they returned nothing.
-  const byHash = new Map<string, TorrentSearchHit>()
-  const unhashed: TorrentSearchHit[] = []
+  const allRows: TorrentSearchHit[] = []
 
   for (let i = 0; i < settled.length; i++) {
     const outcome = settled[i]
@@ -151,17 +131,7 @@ export async function runIndexers(
       const { id, rows } = outcome.value
       const tagged = tagIndexerRows(rows, id)
       counts[id] = tagged.length
-      for (const row of tagged) {
-        const key = row.infoHash?.toLowerCase()
-        if (!key) {
-          unhashed.push(row)
-          continue
-        }
-        const existing = byHash.get(key)
-        if (!existing || (row.seeders ?? 0) > (existing.seeders ?? 0)) {
-          byHash.set(key, row)
-        }
-      }
+      allRows.push(...tagged)
     } else {
       errors[indexer.id] =
         outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason)
@@ -169,9 +139,7 @@ export async function runIndexers(
     }
   }
 
-  // Sort merged results by seeders (descending) so the most healthy releases
-  // surface first regardless of which indexer returned them.
-  const merged = [...byHash.values(), ...unhashed].toSorted(
+  const merged = allRows.toSorted(
     (a, b) => (b.seeders ?? 0) - (a.seeders ?? 0)
   )
 

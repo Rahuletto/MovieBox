@@ -404,7 +404,7 @@ Note: ${LOCAL_DEV_URL} is up (wrangler dev is running).
         path: '/api/subtitles/download',
         query: { url: firstSubPath },
         token,
-        expectStatus: [200, 404, 502],
+        expectStatus: [200, 400, 404, 502],
         bodyKind: 'binary',
         timeoutMs: 60_000,
       })

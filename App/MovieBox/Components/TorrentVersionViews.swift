@@ -15,14 +15,17 @@ struct TorrentCardModel: Identifiable, Hashable {
     let seeders: Int
     let leechers: Int
     let isDownloaded: Bool
+    /// Last streamed release for this title with saved watch progress.
+    let showsResumePlay: Bool
 
-    init(torrent: TorrentResult, isDownloaded: Bool = false) {
+    init(torrent: TorrentResult, isDownloaded: Bool = false, showsResumePlay: Bool = false) {
         id = torrent.id
         source = torrent.trackerSource.label
         quality = torrent.quality.rawValue
         techKinds = torrentTechKinds(for: torrent)
         title = torrent.title
         self.isDownloaded = isDownloaded
+        self.showsResumePlay = showsResumePlay
 
         var parts: [String] = []
         if torrent.sizeBytes > 0 {
@@ -215,13 +218,22 @@ struct TorrentVersionRow: View, Equatable {
             trailing: {
                 HStack(spacing: 4) {
                     Button(action: onStream) {
-                        Image(systemName: model.isDownloaded ? "play.fill" : "play.circle.fill")
-                            .font(.system(size: 22))
-                            .symbolRenderingMode(.palette)
-                            .foregroundStyle(.white, Color.accentColor)
+                        if model.showsResumePlay {
+                            Text("Resume")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 7)
+                                .background(Color.accentColor, in: Capsule(style: .continuous))
+                        } else {
+                            Image(systemName: model.isDownloaded ? "play.fill" : "play.circle.fill")
+                                .font(.system(size: 22))
+                                .symbolRenderingMode(.palette)
+                                .foregroundStyle(.white, Color.accentColor)
+                        }
                     }
                     .buttonStyle(.plain)
-                    .help("Play")
+                    .help(model.showsResumePlay ? "Resume" : "Play")
 
                     if !model.isDownloaded {
                         Button(action: onDownload) {
@@ -234,7 +246,7 @@ struct TorrentVersionRow: View, Equatable {
                         .help("Download")
                     }
                 }
-                .frame(width: 64, alignment: .trailing)
+                .frame(minWidth: model.showsResumePlay ? 88 : 64, alignment: .trailing)
                 .opacity(isBusy ? 0.35 : 1)
                 .overlay {
                     if isBusy {

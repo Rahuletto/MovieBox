@@ -28,18 +28,20 @@ struct AppShellView: View {
 
     private var streamPillPlacement: StreamPillPlacement {
         guard persistentPlayback.isActive, persistentPlayback.item != nil else { return .hidden }
-        if isBrowsingObstructed && !playerState.isStreamingTorrent {
+        if isBrowsingObstructed {
             return .topTrailing
         }
-        if !isBrowsingObstructed {
-            return .bottom
-        }
-        return .hidden
+        return .bottom
+    }
+
+    /// Window chrome is grey; player uses rounded corners — fill with black so letterboxing isn’t grey.
+    private var shellBackdropColor: Color {
+        playerState.isPresented ? .black : Color(nsColor: .windowBackgroundColor)
     }
 
     var body: some View {
         ZStack(alignment: .top) {
-            Color(nsColor: .windowBackgroundColor).ignoresSafeArea()
+            shellBackdropColor.ignoresSafeArea()
 
             RootContentView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -48,12 +50,13 @@ struct AppShellView: View {
                 .allowsHitTesting(!isBrowsingObstructed)
                 .animation(MovieBoxMotion.player, value: isBrowsingObstructed)
                 .animation(MovieBoxMotion.navigation, value: router.selectedRoute)
+                .zIndex(playerState.isPresented && playerState.isPlaybackChromeHidden ? 8 : 0)
 
             RootTabBarChrome()
                 .opacity(isBrowsingObstructed ? 0 : 1)
                 .allowsHitTesting(!isBrowsingObstructed)
                 .animation(MovieBoxMotion.player, value: isBrowsingObstructed)
-                .zIndex(5)
+                .zIndex(playerState.isPresented && playerState.isPlaybackChromeHidden ? 9 : 5)
 
             Group {
                 if playerState.isPresented {
@@ -70,13 +73,13 @@ struct AppShellView: View {
                         }
                     }
                     .ignoresSafeArea()
-                    .opacity(playerChromeOpacity)
+                    .opacity(shellPlayerOpacity)
                     .allowsHitTesting(!playerState.isPlaybackChromeHidden && playerState.isPlayerRevealed)
                     .transition(.opacity)
                 }
             }
             .animation(MovieBoxMotion.player, value: playerState.isPlaybackChromeHidden)
-            .zIndex(10)
+            .zIndex(playerState.isPlaybackChromeHidden ? 2 : 10)
 
             StreamPillLayer(
                 placement: streamPillPlacement,
@@ -140,8 +143,17 @@ struct AppShellView: View {
     }
 
     private var playerChromeOpacity: Double {
-        if playerState.isPlaybackChromeHidden { return 0.001 }
+        if playerState.isPlaybackChromeHidden { return 1 }
+        if playerState.isPictureInPictureActive { return 1 }
         return playerState.isPlayerRevealed ? 1 : 0
+    }
+
+    /// Keep the AVPlayer layer fully opaque while PiP/detached so frames keep updating.
+    private var shellPlayerOpacity: Double {
+        if playerState.isPlaybackChromeHidden || playerState.isPictureInPictureActive {
+            return 1
+        }
+        return playerChromeOpacity
     }
 
     private func openStreamPillDestination(item: PersistentPlaybackItem) {
@@ -192,6 +204,7 @@ private enum StreamPillPlacement: Equatable {
 /// Isolated pill host so `uiTick` progress updates do not relayout the whole shell.
 private struct StreamPillLayer: View {
     @Environment(AppServices.self) private var appServices
+    @Environment(PlayerState.self) private var playerState
 
     let placement: StreamPillPlacement
     let isVisible: Bool
@@ -220,13 +233,28 @@ private struct StreamPillLayer: View {
                             onCancel: onCancel
                         )
                         .matchedGeometryEffect(id: "streamPillCapsule", in: namespace)
-                        .padding(placement.edgePadding)
+                        .padding(pillEdgePadding)
                         .transition(.opacity)
                     }
             }
         }
         .animation(MovieBoxMotion.streamPillAppear, value: isVisible)
         .animation(MovieBoxMotion.streamPill, value: placement)
+        .animation(MovieBoxMotion.streamPill, value: playerState.showsControls)
+    }
+
+    private var pillEdgePadding: EdgeInsets {
+        switch placement {
+        case .topTrailing:
+            let hudVisible = playerState.isPresented
+                && !playerState.isPlaybackChromeHidden
+                && playerState.showsControls
+            // 24pt HUD inset + 36pt control row + 12pt gap; compact when controls hidden.
+            let top: CGFloat = hudVisible ? 72 : 52
+            return EdgeInsets(top: top, leading: 0, bottom: 0, trailing: 20)
+        default:
+            return placement.edgePadding
+        }
     }
 
     private func pillStatusPhase(tick: PersistentPlaybackUITick) -> String {

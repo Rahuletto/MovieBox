@@ -6,8 +6,7 @@ enum YouTubeDurationResolver {
         "https://pipedapi.kavin.rocks",
         "https://pipedapi.adminforge.de",
     ]
-    private static var cache: [String: Int] = [:]
-    private static let cacheLock = NSLock()
+    private static let cache = YouTubeDurationCache()
 
     static func durations(for keys: [String]) async -> [String: Int] {
         var result: [String: Int] = [:]
@@ -23,12 +22,9 @@ enum YouTubeDurationResolver {
     }
 
     static func duration(for key: String) async -> Int? {
-        cacheLock.lock()
-        if let cached = cache[key] {
-            cacheLock.unlock()
+        if let cached = await cache.value(for: key) {
             return cached
         }
-        cacheLock.unlock()
 
         struct PipedPayload: Decodable {
             let duration: Int?
@@ -45,9 +41,7 @@ enum YouTubeDurationResolver {
                 }
                 let payload = try JSONDecoder().decode(PipedPayload.self, from: data)
                 if let duration = payload.duration, duration > 0 {
-                    cacheLock.lock()
-                    cache[key] = duration
-                    cacheLock.unlock()
+                    await cache.set(duration, for: key)
                     return duration
                 }
             } catch {
@@ -55,5 +49,17 @@ enum YouTubeDurationResolver {
             }
         }
         return nil
+    }
+}
+
+private actor YouTubeDurationCache {
+    private var values: [String: Int] = [:]
+
+    func value(for key: String) -> Int? {
+        values[key]
+    }
+
+    func set(_ value: Int, for key: String) {
+        values[key] = value
     }
 }

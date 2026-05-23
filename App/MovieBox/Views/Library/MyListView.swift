@@ -15,9 +15,9 @@ struct MyListView: View {
         ScrollView {
             if movies.isEmpty {
                 ContentUnavailableView(
-                    "My List Is Empty",
+                    "Your List Is Empty",
                     systemImage: "bookmark",
-                    description: Text("Add movies from the detail screen.")
+                    description: Text("Add titles from a movie or show detail page.")
                 )
                 .frame(maxWidth: .infinity, minHeight: 260)
             } else {

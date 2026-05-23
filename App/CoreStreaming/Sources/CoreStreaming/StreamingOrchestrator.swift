@@ -236,6 +236,24 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         await pieceStore?.streamHeadContiguousBytes() ?? 0
     }
 
+    public func readableMediaTimeRanges(durationSeconds: Double) async -> [ClosedRange<Double>] {
+        guard durationSeconds.isFinite, durationSeconds > 0,
+              let target = streamTarget,
+              let pieceStore else {
+            return []
+        }
+        let mediaLength = target.byteLength
+        guard mediaLength > 0 else { return [] }
+
+        let byteRanges = await pieceStore.accumulatedReadableMediaByteRanges()
+        return byteRanges.compactMap { byteRange in
+            let start = Double(byteRange.lowerBound) / Double(mediaLength) * durationSeconds
+            let end = Double(byteRange.upperBound + 1) / Double(mediaLength) * durationSeconds
+            guard end.isFinite, start.isFinite, end > start else { return nil }
+            return max(0, start)...min(durationSeconds, end)
+        }
+    }
+
     public func isStreamTailPieceReady() async -> Bool {
         await hasMinimumPlaybackHead()
     }
@@ -443,6 +461,41 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         torrentEngine?.downloadSpeed ?? 0
     }
 
+    public func uploadSpeed() async -> Double {
+        torrentEngine?.uploadSpeed ?? 0
+    }
+
+    /// Local media slice for ffprobe / embedded subtitle extraction while streaming.
+    public func mediaFileURLForSubtitleProbe() async -> URL? {
+        guard let pieceStore, let metadata, let target = streamTarget else { return nil }
+
+        let contiguous = await pieceStore.streamHeadContiguousBytes()
+        let minProbeBytes: Int64 = 512 * 1024
+        let exportLength: Int64
+        if contiguous >= target.byteLength {
+            exportLength = target.byteLength
+        } else if contiguous >= minProbeBytes {
+            exportLength = contiguous
+        } else {
+            return nil
+        }
+
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("moviebox_embedded_probe", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+            return try TorrentFileAssembler.exportPrimaryFile(
+                metadata: metadata,
+                pieceStorePath: pieceStore.storageURL,
+                outputDirectory: workDir,
+                maxBytes: exportLength
+            )
+        } catch {
+            TorrentLog.debug("[StreamingOrchestrator] embedded probe export failed: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
     public func peerCount() async -> Int {
         torrentEngine?.livePeerCount() ?? 0
     }
@@ -462,6 +515,7 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         swarmLeechers: Int,
         livePeerCount: Int,
         liveDownloadSpeed: Double,
+        liveUploadSpeed: Double,
         liveBufferedBytes: Int64,
         liveBufferedPieces: Int,
         streamURL: URL?
@@ -478,6 +532,7 @@ public final class StreamingOrchestrator: @unchecked Sendable {
                     swarmLeechers: swarmLeechers,
                     livePeerCount: livePeerCount,
                     liveDownloadSpeed: liveDownloadSpeed,
+                    liveUploadSpeed: liveUploadSpeed,
                     liveBufferedBytes: liveBufferedBytes,
                     liveBufferedPieces: liveBufferedPieces,
                     streamURL: streamURL
@@ -536,6 +591,7 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         swarmLeechers: Int,
         livePeerCount: Int,
         liveDownloadSpeed: Double,
+        liveUploadSpeed: Double,
         liveBufferedBytes: Int64,
         liveBufferedPieces: Int,
         streamURL: URL?
@@ -555,6 +611,7 @@ public final class StreamingOrchestrator: @unchecked Sendable {
             .init(label: "Indexer seeders (scrape)", value: "\(swarmSeeders)"),
             .init(label: "Indexer leechers", value: "\(swarmLeechers)"),
             .init(label: "Download speed", value: StreamDiagnosticsFormatting.speed(liveDownloadSpeed)),
+            .init(label: "Upload speed", value: StreamDiagnosticsFormatting.speed(liveUploadSpeed)),
             .init(label: "Head buffered", value: StreamDiagnosticsFormatting.bytes(liveBufferedBytes)),
             .init(label: "Verified head pieces", value: "\(liveBufferedPieces)"),
         ]
@@ -676,6 +733,7 @@ public enum StreamingOrchestratorError: Error, LocalizedError {
 @MainActor
 public final class TorrentEngine {
     public private(set) var downloadSpeed: Double = 0
+    public private(set) var uploadSpeed: Double = 0
     public private(set) var activePeerCount: Int = 0
 
     private let metadata: TorrentMetadata
@@ -697,7 +755,8 @@ public final class TorrentEngine {
     private var bootstrapTask: Task<Void, Never>?
 
     private var bytesDownloaded: Int64 = 0
-    private var recentBytesSamples: [(date: Date, bytes: Int64)] = []
+    private var bytesUploaded: Int64 = 0
+    private var recentBytesSamples: [(date: Date, downloaded: Int64, uploaded: Int64)] = []
     private var lastAnnounceTime = Date.distantPast
 
     private let maxPeerConnections = 64
@@ -984,6 +1043,9 @@ public final class TorrentEngine {
             guard connectedPeerKeys.insert(key).inserted else { continue }
 
             let connection = PeerConnection(peerInfo: peerInfo, connectionPeerId: peerId)
+            connection.onOutboundBytes = { [weak self] count in
+                self?.bytesUploaded += Int64(count)
+            }
             peerConnections.append(connection)
             connected += 1
 
@@ -1077,25 +1139,28 @@ public final class TorrentEngine {
 
     private func publishProgress() async {
         let progress = await pieceManager.progress()
-        downloadSpeed = recentDownloadSpeed()
+        downloadSpeed = recentTransferSpeed(\.downloaded)
+        uploadSpeed = recentTransferSpeed(\.uploaded)
         activePeerCount = transferringPeerCount()
         progressHandler(progress, downloadSpeed, livePeerCount())
     }
 
     private func recordBytesSample() {
         let now = Date.now
-        recentBytesSamples.append((now, bytesDownloaded))
+        recentBytesSamples.append((now, bytesDownloaded, bytesUploaded))
         let cutoff = now.addingTimeInterval(-3)
         recentBytesSamples.removeAll { $0.date < cutoff }
     }
 
-    private func recentDownloadSpeed() -> Double {
+    private func recentTransferSpeed(
+        _ keyPath: KeyPath<(date: Date, downloaded: Int64, uploaded: Int64), Int64>
+    ) -> Double {
         guard let oldest = recentBytesSamples.first,
               let newest = recentBytesSamples.last,
               newest.date > oldest.date else { return 0 }
-        let deltaBytes = Double(newest.bytes - oldest.bytes)
+        let deltaBytes = Double(newest[keyPath: keyPath] - oldest[keyPath: keyPath])
         let deltaTime = newest.date.timeIntervalSince(oldest.date)
-        return deltaTime > 0 ? deltaBytes / deltaTime : 0
+        return deltaTime > 0 ? max(0, deltaBytes / deltaTime) : 0
     }
 
     private func peerKey(_ peer: PeerInfo) -> String {
@@ -1120,6 +1185,7 @@ public final class TorrentEngine {
 
         var rows: [StreamDiagnosticsSnapshot.Row] = [
             .init(label: "Bytes downloaded", value: StreamDiagnosticsFormatting.bytes(bytesDownloaded)),
+            .init(label: "Bytes uploaded", value: StreamDiagnosticsFormatting.bytes(bytesUploaded)),
             .init(label: "Transferring peers", value: "\(activePeerCount)"),
             .init(label: "Live peers", value: "\(livePeerCount())"),
             .init(label: "Peer sockets", value: "\(peerConnections.count) / \(maxPeerConnections)"),

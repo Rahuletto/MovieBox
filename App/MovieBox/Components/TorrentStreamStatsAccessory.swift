@@ -12,16 +12,16 @@ struct TorrentStreamStatsAccessory: View {
         Button {
             isPresented.toggle()
         } label: {
-            Image(systemName: "gauge.with.dots.needle.67percent")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white.opacity(isPresented ? 1.0 : 0.85))
-                .frame(width: 30, height: 30)
-                .nativeGlassEffect()
+            Image(systemName: "externaldrive.connected.to.line.below")
+                .font(.system(size: 15, weight: .semibold))
+                .playerGlassSymbol()
+                .frame(width: 36, height: 36)
+                .playerGlassChrome(.circle, strength: .thick)
         }
         .buttonStyle(.plain)
         .help("Stream stats")
         .popover(isPresented: $isPresented, arrowEdge: .bottom) {
-            DiagnosticsStatsPopover(snapshot: snapshot.diagnosticsPanel)
+            DiagnosticsStatsPopover(snapshot: snapshot.diagnosticsPanel())
                 .onAppear { startRefreshing() }
                 .onDisappear { stopRefreshing() }
         }
@@ -51,7 +51,7 @@ struct TorrentStreamStatsAccessory: View {
 }
 
 private extension StreamDiagnosticsSnapshot {
-    var diagnosticsPanel: DiagnosticsPanelSnapshot {
+    func diagnosticsPanel() -> DiagnosticsPanelSnapshot {
         DiagnosticsPanelSnapshot(
             title: "Stream Stats",
             subtitle: "Updated \(updatedAt.formatted(date: .omitted, time: .standard))",

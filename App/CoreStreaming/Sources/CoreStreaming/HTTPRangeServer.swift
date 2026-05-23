@@ -585,8 +585,7 @@ public final class HTTPRangeServer {
 
         while remaining > 0, !Task.isCancelled {
             let thisChunk = min(Self.streamChunkBytes, remaining)
-            let mediaOffset = mediaPosition - streamByteOffset
-            await notifyPlayerRead(mediaOffset: mediaOffset, length: thisChunk)
+            await notifyPlayerRead(mediaOffset: mediaPosition, length: thisChunk)
             let torrentOffset = streamByteOffset + mediaPosition
 
             do {

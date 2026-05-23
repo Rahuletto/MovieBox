@@ -51,11 +51,13 @@ public enum TorrentIndexerPreferences {
 
     /// Keeps rows whose indexer is enabled in Settings (backend returns all indexers).
     public static func filter(_ results: [TorrentResult], enabledIDs: Set<String>) -> [TorrentResult] {
-        guard !enabledIDs.isEmpty else { return [] }
-        return results.filter { torrent in
+        let active = enabledIDs.isEmpty ? defaultIDs : enabledIDs
+        let filtered = results.filter { torrent in
             guard let id = torrent.indexerId ?? indexerId(for: torrent.trackerSource) else { return true }
-            return enabledIDs.contains(id)
+            return active.contains(id)
         }
+        // Never drop everything when the backend sent rows — misconfigured CSV should not blank the UI.
+        return filtered.isEmpty && !results.isEmpty ? results : filtered
     }
 
     /// Maps API `trackerSource` labels to catalog indexer ids.

@@ -144,6 +144,12 @@ struct WindowConfigurator: NSViewRepresentable {
             let isFullScreen = window.styleMask.contains(.fullScreen)
 
             if isPlayerPresented || isFullScreen {
+                window.backgroundColor = .black
+            } else {
+                window.backgroundColor = .windowBackgroundColor
+            }
+
+            if isPlayerPresented || isFullScreen {
                 // Completely strip the toolbar when player is active OR when in fullscreen mode.
                 // This forces titlebarAppearsTransparent = true to render 100% clear.
                 window.toolbar = nil
@@ -192,8 +198,11 @@ struct WindowConfigurator: NSViewRepresentable {
             if isFullScreen {
                 contentView.layer?.cornerRadius = 0
                 contentView.layer?.masksToBounds = false
+                contentView.layer?.backgroundColor = NSColor.black.cgColor
                 return
             }
+
+            contentView.layer?.backgroundColor = nil
 
             contentView.layer?.cornerCurve = .continuous
             contentView.layer?.cornerRadius = windowCornerRadius

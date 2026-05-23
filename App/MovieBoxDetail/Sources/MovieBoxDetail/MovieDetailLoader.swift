@@ -100,7 +100,8 @@ public enum MovieDetailLoader {
                 year: year,
                 language: "all",
                 type: kind == .tv ? "tv" : "movie",
-                imdbId: imdb
+                imdbId: imdb,
+                tmdbId: detail.movie.id
             )
             if results.isEmpty {
                 NSLog("Subtitle search returned 0 for \"\(title)\" year=\(year.map(String.init) ?? "nil") imdb=\(imdb ?? "nil")")
@@ -109,6 +110,27 @@ public enum MovieDetailLoader {
         } catch {
             NSLog("Subtitle search failed for \"\(title)\": \(error.localizedDescription)")
             return []
+        }
+    }
+
+    /// Resolves current IMDb id + runtime for live torrent indexers (bypasses in-app detail cache and backend KV read).
+    @MainActor
+    public static func freshDetailForTorrentSearch(
+        movieId: Int,
+        kind: MediaKind,
+        settings: AppSettings?,
+        fallback: MovieDetail
+    ) async -> MovieDetail {
+        guard let mode = settings?.metadataMode else { return fallback }
+        await MovieDetailCache.shared.removeDetail(id: movieId, kind: kind)
+        do {
+            let client = MetadataClient(mode: mode)
+            return try await client.movieDetail(id: movieId, kind: kind, fresh: true)
+        } catch {
+            NSLog(
+                "Fresh metadata for torrent search failed (movieId=\(movieId)): \(error.localizedDescription)"
+            )
+            return fallback
         }
     }
 

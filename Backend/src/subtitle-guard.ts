@@ -1,5 +1,13 @@
 const ALLOWED_SUBTITLE_HOSTS = new Set(['subf2m.co', 'www.subf2m.co'])
 
+/** CDN hosts for subtitle archives (SubDL + legacy subf2m). */
+const ALLOWED_SUBTITLE_CDN_HOSTS = new Set([
+  'dl.subdl.com',
+  'www.dl.subdl.com',
+  'isubcdn.com',
+  'www.isubcdn.com',
+])
+
 const PRIVATE_IPV4_RANGES: Array<[number, number]> = [
   [0x0a000000, 0x0affffff], // 10.0.0.0/8
   [0xac100000, 0xac1fffff], // 172.16.0.0/12
@@ -48,4 +56,28 @@ export function assertSafeSubtitleURL(raw: string): URL {
 export function buildSubf2mURL(pathOrURL: string): URL {
   const full = pathOrURL.startsWith('http') ? pathOrURL : `https://subf2m.co${pathOrURL}`
   return assertSafeSubtitleURL(full)
+}
+
+export function assertSafeSubtitleCDNURL(raw: string): URL {
+  let parsed: URL
+  try {
+    parsed = new URL(raw)
+  } catch {
+    throw new Error('invalid_url')
+  }
+
+  if (parsed.protocol !== 'https:') {
+    throw new Error('invalid_protocol')
+  }
+
+  const host = parsed.hostname.toLowerCase()
+  if (isPrivateIPv4(host) || host === 'localhost' || host.endsWith('.local')) {
+    throw new Error('private_host_blocked')
+  }
+
+  if (!ALLOWED_SUBTITLE_CDN_HOSTS.has(host)) {
+    throw new Error('host_not_allowed')
+  }
+
+  return parsed
 }

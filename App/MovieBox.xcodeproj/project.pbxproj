@@ -26,11 +26,24 @@
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		D2898CB42FB9961F005174CF /* MovieBox */ = {
+			exceptions = (
+				D2898CC02FB99621005174CF /* Exceptions for "MovieBox" folder in "MovieBox" target */,
+			);
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = MovieBox;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		D2898CC02FB99621005174CF /* Exceptions for "MovieBox" folder in "MovieBox" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = D2898CB12FB9961F005174CF /* MovieBox */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		D2898CAF2FB9961F005174CF /* Frameworks */ = {

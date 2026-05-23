@@ -41,7 +41,7 @@ public struct DiagnosticsPanelSnapshot: Sendable {
         sections: [Section],
         emptyTitle: String = "No data",
         emptyDescription: String = "Stats are not available yet.",
-        emptySystemImage: String = "gauge.with.dots.needle.67percent"
+        emptySystemImage: String = "externaldrive.connected.to.line.below"
     ) {
         self.title = title
         self.subtitle = subtitle
@@ -104,7 +104,7 @@ public struct DiagnosticsStatsPopover: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Image(systemName: "gauge.with.dots.needle.67percent")
+                Image(systemName: "externaldrive.connected.to.line.below")
                     .font(.title3)
                     .foregroundStyle(.secondary)
                 VStack(alignment: .leading, spacing: 2) {

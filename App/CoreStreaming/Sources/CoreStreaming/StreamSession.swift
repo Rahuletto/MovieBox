@@ -27,6 +27,7 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
 
     @Published public private(set) var state: State = .idle
     @Published public private(set) var downloadSpeed: Double = 0
+    @Published public private(set) var uploadSpeed: Double = 0
     @Published public private(set) var peerCount: Int = 0
     @Published public private(set) var transferringPeerCount: Int = 0
     @Published public private(set) var bufferedPieces: Int = 0
@@ -85,6 +86,7 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
                     Task { @MainActor in
                         guard let self else { return }
                         self.downloadSpeed = speed
+                        self.uploadSpeed = await orchestrator.uploadSpeed()
                         self.peerCount = peers
                         self.transferringPeerCount = await orchestrator.transferringPeerCount()
                         await self.refreshBufferMetrics()
@@ -221,6 +223,10 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
         }
     }
 
+    public func mediaFileURLForSubtitleProbe() async -> URL? {
+        await orchestrator.mediaFileURLForSubtitleProbe()
+    }
+
     public func cancel() async {
         TorrentLog.info("[StreamSession] cancel — was \(stateLabel)")
         bufferingWatchdogTask?.cancel()
@@ -251,10 +257,12 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
                     guard let strongSelf = self else { break }
                     let progress = await strongSelf.orchestrator.progress()
                     let speed = await strongSelf.orchestrator.downloadSpeed()
+                    let upload = await strongSelf.orchestrator.uploadSpeed()
                     let peers = await strongSelf.orchestrator.peerCount()
                     let transferring = await strongSelf.orchestrator.transferringPeerCount()
 
                     strongSelf.downloadSpeed = speed
+                    strongSelf.uploadSpeed = upload
                     strongSelf.peerCount = peers
                     strongSelf.transferringPeerCount = transferring
                     await strongSelf.refreshBufferMetrics()
@@ -450,6 +458,7 @@ public extension StreamSession where O == StreamingOrchestrator {
             swarmLeechers: swarmLeechers,
             livePeerCount: peerCount,
             liveDownloadSpeed: downloadSpeed,
+            liveUploadSpeed: uploadSpeed,
             liveBufferedBytes: bufferedBytes,
             liveBufferedPieces: bufferedPieces,
             streamURL: activeStreamURL

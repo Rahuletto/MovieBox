@@ -1,0 +1,6 @@
+# Copy to .dev.vars (gitignored). Never commit real secrets.
+TMDB_TOKEN=
+OMDB_API_KEY=
+APP_SECRET=
+FANART_API_KEY=
+SUBDL_API_KEY=
