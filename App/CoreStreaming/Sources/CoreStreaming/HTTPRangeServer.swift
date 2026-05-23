@@ -29,6 +29,9 @@ public final class HTTPRangeServer {
     private var rangeRequestSequence = 0
 
     private static let maxRangeBytes = 32 * 1024 * 1024
+    /// Ranges at or below this size get a single 206 whose Content-Length exactly matches the body.
+    private static let maxBufferedRangeBytes = 8 * 1024 * 1024
+    private static let streamChunkBytes = 512 * 1024
     private static let readTimeoutSeconds: UInt64 = 36_000
     private static let bufferWaitSeconds: UInt64 = 36_000
 
@@ -182,8 +185,17 @@ public final class HTTPRangeServer {
                 }
                 let responseTask = Task { @MainActor [weak self, weak connection] in
                     guard let self, let connection else { return }
-                    let response = await self.handleRequest(request, pieceStore: pieceStore)
-                    self.sendResponse(connection: connection, response: response)
+                    let result = await self.handleRequest(request, pieceStore: pieceStore)
+                    switch result {
+                    case .complete(let response):
+                        self.sendResponse(connection: connection, response: response)
+                    case .streamRange(let plan):
+                        await self.sendStreamingRange(
+                            connection: connection,
+                            pieceStore: pieceStore,
+                            plan: plan
+                        )
+                    }
                     connection.stateUpdateHandler = nil
                 }
                 connection.stateUpdateHandler = { [weak connection] state in
@@ -210,13 +222,28 @@ public final class HTTPRangeServer {
         }
     }
 
-    func handleRequest(_ request: String, pieceStore: PieceStore) async -> HTTPResponse {
+    private enum HTTPRequestResult {
+        case complete(HTTPResponse)
+        case streamRange(RangeStreamPlan)
+    }
+
+    private struct RangeStreamPlan {
+        let rangeReqID: Int
+        let method: String
+        let mediaStart: Int64
+        let mediaEnd: Int64
+        let requestedLength: Int
+        let isSuffixRange: Bool
+        let rangeHeaderValue: String?
+    }
+
+    private func handleRequest(_ request: String, pieceStore: PieceStore) async -> HTTPRequestResult {
         rangeRequestSequence += 1
         let rangeReqID = rangeRequestSequence
 
         let lines = request.components(separatedBy: "\r\n")
         guard let requestLine = lines.first else {
-            return HTTPResponse(status: 400, body: "Bad Request")
+            return .complete(HTTPResponse(status: 400, body: "Bad Request"))
         }
 
         // SECURITY: DNS rebinding protection.
@@ -230,16 +257,16 @@ public final class HTTPRangeServer {
         let bareHost = hostHeader.map { $0.components(separatedBy: ":").first ?? $0 } ?? ""
         guard allowedHosts.contains(bareHost) else {
             TorrentLog.warn("[HTTPRangeServer] Rejected request with non-loopback Host: \(hostHeader ?? "<nil>")")
-            return HTTPResponse(status: 403, body: "Forbidden")
+            return .complete(HTTPResponse(status: 403, body: "Forbidden"))
         }
 
         let parts = requestLine.components(separatedBy: " ")
         guard parts.count >= 2 else {
-            return HTTPResponse(status: 400, body: "Bad Request")
+            return .complete(HTTPResponse(status: 400, body: "Bad Request"))
         }
         let method = parts[0].uppercased()
         guard method == "GET" || method == "HEAD" else {
-            return HTTPResponse(status: 405, body: "Method Not Allowed")
+            return .complete(HTTPResponse(status: 405, body: "Method Not Allowed"))
         }
 
         let mediaLength = streamByteLength
@@ -285,24 +312,15 @@ public final class HTTPRangeServer {
 
                 if mediaStart >= 0 {
                     guard mediaStart < mediaLength, mediaEnd >= mediaStart else {
-                        return HTTPResponse(status: 416, body: "Range Not Satisfiable")
+                        return .complete(HTTPResponse(status: 416, body: "Range Not Satisfiable"))
                     }
 
-                    // AVPlayer often sends open-ended ranges (e.g. bytes=0-). Cap the span
-                    // instead of 416 — oversized ranges surface as "unknown error" in AVFoundation.
-                    let maxSpan = Int64(Self.maxRangeBytes)
-                    var cappedEnd = mediaEnd
-                    if cappedEnd - mediaStart + 1 > maxSpan {
-                        cappedEnd = mediaStart + maxSpan - 1
-                    }
-
-                    let span = cappedEnd &- mediaStart
+                    let span = mediaEnd &- mediaStart
                     let spanPlusOne = span &+ 1
-                    guard spanPlusOne > 0 else {
-                        return HTTPResponse(status: 416, body: "Range Not Satisfiable")
+                    guard spanPlusOne > 0, spanPlusOne <= Int64(Int.max) else {
+                        return .complete(HTTPResponse(status: 416, body: "Range Not Satisfiable"))
                     }
-                    var length = Int(spanPlusOne)
-                    length = min(length, Self.maxRangeBytes)
+                    let requestedLength = Int(spanPlusOne)
 
                     logRangeServerRequest(
                         id: rangeReqID,
@@ -310,69 +328,42 @@ public final class HTTPRangeServer {
                         rangeHeader: rangeHeaderValue,
                         mediaStart: mediaStart,
                         mediaEnd: mediaEnd,
-                        length: length
+                        length: requestedLength
                     )
 
-                    await notifyPlayerRead(mediaOffset: mediaStart, length: length)
+                    let plan = RangeStreamPlan(
+                        rangeReqID: rangeReqID,
+                        method: method,
+                        mediaStart: mediaStart,
+                        mediaEnd: mediaEnd,
+                        requestedLength: requestedLength,
+                        isSuffixRange: isSuffixRange,
+                        rangeHeaderValue: rangeHeaderValue
+                    )
 
-                    let torrentOffset = streamByteOffset + mediaStart
-                    guard let resolvedSpan = await waitForReadableSpan(
-                        pieceStore: pieceStore,
-                        offset: torrentOffset,
-                        length: length,
-                        preferSuffix: isSuffixRange
-                    ) else {
-                        return logRangeServerAndReturn(
-                            id: rangeReqID,
-                            response: HTTPResponse(status: 499, body: "Client Closed Request"),
-                            statusCode: 499,
-                            servedBytes: 0,
-                            torrentOffset: torrentOffset,
-                            wasReadable: false
-                        )
-                    }
-
-                    let serveOffset = resolvedSpan.offset
-                    let serveLength = resolvedSpan.length
-
-                    do {
-                        bodyData = try await waitForFullTorrentRange(
+                    // CoreMedia -12939 (moviebox.log): AVPlayer compares body bytes to the Range header
+                    // length. A 206 with Content-Length=1.9GB but only 32MB on the wire always fails.
+                    // FINDINGS §13: small exact ranges (0-1 probe, suffix moov) use buffered 206;
+                    // large scans use chunked 206 so the client can stop early without a length mismatch.
+                    if requestedLength <= Self.maxBufferedRangeBytes {
+                        if let response = await buildBufferedRangeResponse(
                             pieceStore: pieceStore,
-                            offset: serveOffset,
-                            length: serveLength
-                        )
-                        let serveStart = serveOffset - streamByteOffset
-                        let serveEnd = serveStart + Int64(bodyData.count) - 1
-                        statusCode = 206
-                        contentRange = "bytes \(serveStart)-\(serveEnd)/\(mediaLength)"
-                        contentLength = Int64(bodyData.count)
-                        logRangeServerResponse(
-                            id: rangeReqID,
-                            statusCode: statusCode,
-                            servedBytes: bodyData.count,
-                            torrentOffset: serveOffset,
-                            wasReadable: true
-                        )
-                    } catch is CancellationError {
-                        return logRangeServerAndReturn(
-                            id: rangeReqID,
-                            response: HTTPResponse(status: 499, body: "Client Closed Request"),
-                            statusCode: 499,
-                            servedBytes: 0,
-                            torrentOffset: torrentOffset,
-                            wasReadable: false
-                        )
-                    } catch {
-                        TorrentLog.warn("[HTTPRangeServer] Range read failed: \(error.localizedDescription)")
-                        return logRangeServerAndReturn(
-                            id: rangeReqID,
-                            response: HTTPResponse(status: 500, body: "Internal Server Error"),
-                            statusCode: 500,
-                            servedBytes: 0,
-                            torrentOffset: torrentOffset,
-                            wasReadable: false
+                            plan: plan
+                        ) {
+                            return .complete(response)
+                        }
+                        return .complete(
+                            logRangeServerAndReturn(
+                                id: rangeReqID,
+                                response: HTTPResponse(status: 499, body: "Client Closed Request"),
+                                statusCode: 499,
+                                servedBytes: 0,
+                                torrentOffset: streamByteOffset + mediaStart,
+                                wasReadable: false
+                            )
                         )
                     }
+                    return .streamRange(plan)
                 }     // close if mediaStart >= 0
             }         // close if rangeParts.count == 2
         } else if method == "GET" {
@@ -392,13 +383,15 @@ public final class HTTPRangeServer {
                 length: length,
                 preferSuffix: false
             ) else {
-                return logRangeServerAndReturn(
-                    id: rangeReqID,
-                    response: HTTPResponse(status: 499, body: "Client Closed Request"),
-                    statusCode: 499,
-                    servedBytes: 0,
-                    torrentOffset: streamByteOffset,
-                    wasReadable: false
+                return .complete(
+                    logRangeServerAndReturn(
+                        id: rangeReqID,
+                        response: HTTPResponse(status: 499, body: "Client Closed Request"),
+                        statusCode: 499,
+                        servedBytes: 0,
+                        torrentOffset: streamByteOffset,
+                        wasReadable: false
+                    )
                 )
             }
             do {
@@ -416,22 +409,26 @@ public final class HTTPRangeServer {
                     wasReadable: true
                 )
             } catch is CancellationError {
-                return logRangeServerAndReturn(
-                    id: rangeReqID,
-                    response: HTTPResponse(status: 499, body: "Client Closed Request"),
-                    statusCode: 499,
-                    servedBytes: 0,
-                    torrentOffset: span.offset,
-                    wasReadable: false
+                return .complete(
+                    logRangeServerAndReturn(
+                        id: rangeReqID,
+                        response: HTTPResponse(status: 499, body: "Client Closed Request"),
+                        statusCode: 499,
+                        servedBytes: 0,
+                        torrentOffset: span.offset,
+                        wasReadable: false
+                    )
                 )
             } catch {
-                return logRangeServerAndReturn(
-                    id: rangeReqID,
-                    response: HTTPResponse(status: 500, body: "Internal Server Error"),
-                    statusCode: 500,
-                    servedBytes: 0,
-                    torrentOffset: span.offset,
-                    wasReadable: false
+                return .complete(
+                    logRangeServerAndReturn(
+                        id: rangeReqID,
+                        response: HTTPResponse(status: 500, body: "Internal Server Error"),
+                        statusCode: 500,
+                        servedBytes: 0,
+                        torrentOffset: span.offset,
+                        wasReadable: false
+                    )
                 )
             }
         } else {
@@ -466,7 +463,7 @@ public final class HTTPRangeServer {
 
         let headerString = headers.joined(separator: "\r\n") + "\r\n\r\n"
         guard let headerData = headerString.data(using: .utf8) else {
-            return HTTPResponse(status: 500, body: "Internal Server Error")
+            return .complete(HTTPResponse(status: 500, body: "Internal Server Error"))
         }
         var response = Data()
         response.append(headerData)
@@ -474,7 +471,174 @@ public final class HTTPRangeServer {
             response.append(bodyData)
         }
 
-        return HTTPResponse(status: statusCode, data: response, retryAfterSeconds: nil)
+        return .complete(HTTPResponse(status: statusCode, data: response, retryAfterSeconds: nil))
+    }
+
+    /// Buffered 206: Content-Length equals body (required for bytes=0-1 and suffix moov per FINDINGS §13).
+    private func buildBufferedRangeResponse(
+        pieceStore: PieceStore,
+        plan: RangeStreamPlan
+    ) async -> HTTPResponse? {
+        let mediaLength = streamByteLength
+        let torrentOffset = streamByteOffset + plan.mediaStart
+        await notifyPlayerRead(mediaOffset: plan.mediaStart, length: plan.requestedLength)
+
+        guard let span = await waitForReadableSpan(
+            pieceStore: pieceStore,
+            offset: torrentOffset,
+            length: plan.requestedLength,
+            preferSuffix: plan.isSuffixRange
+        ) else { return nil }
+
+        let bodyData: Data
+        do {
+            bodyData = try await waitForFullTorrentRange(
+                pieceStore: pieceStore,
+                offset: span.offset,
+                length: span.length
+            )
+        } catch {
+            TorrentLog.warn("[HTTPRangeServer] Buffered range read failed: \(error)")
+            return HTTPResponse(status: 500, body: "Internal Server Error")
+        }
+
+        let serveStart = span.offset - streamByteOffset
+        let serveEnd = serveStart + Int64(bodyData.count) - 1
+        let contentRange = "bytes \(serveStart)-\(serveEnd)/\(mediaLength)"
+        logRangeServerResponse(
+            id: plan.rangeReqID,
+            statusCode: 206,
+            servedBytes: bodyData.count,
+            torrentOffset: span.offset,
+            wasReadable: true,
+            contentRange: contentRange
+        )
+
+        var headers = [
+            "HTTP/1.1 206 Partial Content",
+            "Content-Type: \(contentType)",
+            "Content-Length: \(bodyData.count)",
+            "Content-Range: \(contentRange)",
+            "Accept-Ranges: bytes",
+            "Connection: close",
+        ]
+        let headerString = headers.joined(separator: "\r\n") + "\r\n\r\n"
+        guard let headerData = headerString.data(using: .utf8) else {
+            return HTTPResponse(status: 500, body: "Internal Server Error")
+        }
+        var response = Data()
+        response.append(headerData)
+        if plan.method == "GET" {
+            response.append(bodyData)
+        }
+        return HTTPResponse(status: 206, data: response, retryAfterSeconds: nil)
+    }
+
+    /// Large ranges: chunked 206 so AVPlayer can disconnect after reading moov/head without -12939.
+    private func sendStreamingRange(
+        connection: NWConnection,
+        pieceStore: PieceStore,
+        plan: RangeStreamPlan
+    ) async {
+        let mediaLength = streamByteLength
+        let contentRange = "bytes \(plan.mediaStart)-\(plan.mediaEnd)/\(mediaLength)"
+
+        // FINDINGS §13 step 2: boost tail when AVPlayer opens a whole-file scan from byte 0.
+        if plan.mediaStart == 0, plan.requestedLength > Self.maxBufferedRangeBytes {
+            let tailLen = min(2 * 1024 * 1024, Int(mediaLength))
+            let tailStart = max(0, mediaLength - Int64(tailLen))
+            await notifyPlayerRead(mediaOffset: tailStart, length: tailLen)
+        }
+
+        let headerLines = [
+            "HTTP/1.1 206 Partial Content",
+            "Content-Type: \(contentType)",
+            "Content-Range: \(contentRange)",
+            "Accept-Ranges: bytes",
+            "Transfer-Encoding: chunked",
+            "Connection: close",
+        ]
+        guard let headerData = (headerLines.joined(separator: "\r\n") + "\r\n\r\n").data(using: .utf8) else {
+            connection.cancel()
+            return
+        }
+        await sendOnConnection(connection, headerData)
+
+        guard plan.method == "GET" else {
+            await sendChunkedEnd(connection)
+            logRangeServerResponse(
+                id: plan.rangeReqID,
+                statusCode: 206,
+                servedBytes: 0,
+                torrentOffset: streamByteOffset + plan.mediaStart,
+                wasReadable: true,
+                contentRange: contentRange,
+                transferEncoding: "chunked"
+            )
+            connection.cancel()
+            return
+        }
+
+        var mediaPosition = plan.mediaStart
+        var remaining = plan.requestedLength
+        var totalServed = 0
+
+        while remaining > 0, !Task.isCancelled {
+            let thisChunk = min(Self.streamChunkBytes, remaining)
+            let mediaOffset = mediaPosition - streamByteOffset
+            await notifyPlayerRead(mediaOffset: mediaOffset, length: thisChunk)
+            let torrentOffset = streamByteOffset + mediaPosition
+
+            do {
+                let data = try await waitForFullTorrentRange(
+                    pieceStore: pieceStore,
+                    offset: torrentOffset,
+                    length: thisChunk
+                )
+                await sendHTTPChunk(connection, data)
+                totalServed += data.count
+                remaining -= data.count
+                mediaPosition += Int64(data.count)
+            } catch is CancellationError {
+                break
+            } catch {
+                TorrentLog.warn("[HTTPRangeServer] Stream range read failed: \(error.localizedDescription)")
+                break
+            }
+        }
+
+        await sendChunkedEnd(connection)
+        logRangeServerResponse(
+            id: plan.rangeReqID,
+            statusCode: 206,
+            servedBytes: totalServed,
+            torrentOffset: streamByteOffset + plan.mediaStart,
+            wasReadable: totalServed > 0,
+            contentRange: contentRange,
+            transferEncoding: "chunked"
+        )
+        connection.cancel()
+    }
+
+    private func sendHTTPChunk(_ connection: NWConnection, _ data: Data) async {
+        guard !data.isEmpty else { return }
+        var chunk = Data()
+        chunk.append(contentsOf: String(format: "%X\r\n", data.count).utf8)
+        chunk.append(data)
+        chunk.append(contentsOf: "\r\n".utf8)
+        await sendOnConnection(connection, chunk)
+    }
+
+    private func sendChunkedEnd(_ connection: NWConnection) async {
+        await sendOnConnection(connection, Data("0\r\n\r\n".utf8))
+    }
+
+    private func sendOnConnection(_ connection: NWConnection, _ data: Data) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            connection.send(content: data, completion: .contentProcessed { _ in
+                continuation.resume()
+            })
+        }
     }
 
     private func logRangeServerRequest(
@@ -495,10 +659,14 @@ public final class HTTPRangeServer {
         statusCode: Int,
         servedBytes: Int,
         torrentOffset: Int64,
-        wasReadable: Bool
+        wasReadable: Bool,
+        contentRange: String? = nil,
+        transferEncoding: String? = nil
     ) {
+        let rangePart = contentRange.map { " contentRange=\($0)" } ?? ""
+        let tePart = transferEncoding.map { " transfer=\($0)" } ?? ""
         TorrentLog.info(
-            "[RangeServer] → RESPONSE #\(id) status=\(statusCode) servedBytes=\(servedBytes) torrentOffset=\(torrentOffset) readable=\(wasReadable)"
+            "[RangeServer] → RESPONSE #\(id) status=\(statusCode) servedBytes=\(servedBytes) torrentOffset=\(torrentOffset) readable=\(wasReadable)\(rangePart)\(tePart)"
         )
     }
 
@@ -538,12 +706,30 @@ public final class HTTPRangeServer {
                 length: length,
                 preferSuffix: preferSuffix
             ) {
-                if attempt > 0 {
-                    TorrentLog.info(
-                        "[HTTPRangeServer] Range ready after \(attempt * 100)ms — \(span.length) B @ \(span.offset) suffix=\(preferSuffix)"
-                    )
+                // AVPlayer/CoreMedia (-12939) rejects 206 when the body is shorter than the
+                // requested Range span (moviebox.log: asked length 1946450165, got 1900543).
+                // Stall until the full requested window is contiguously readable (FINDINGS Tier 1).
+                let fulfilled: (offset: Int64, length: Int)?
+                if preferSuffix {
+                    if span.length >= length {
+                        let start = span.offset + Int64(span.length - length)
+                        fulfilled = (start, length)
+                    } else {
+                        fulfilled = nil
+                    }
+                } else if span.offset == offset, span.length >= length {
+                    fulfilled = (offset, length)
+                } else {
+                    fulfilled = nil
                 }
-                return span
+                if let fulfilled {
+                    if attempt > 0 {
+                        TorrentLog.info(
+                            "[HTTPRangeServer] Range ready after \(attempt * 100)ms — \(fulfilled.length) B @ \(fulfilled.offset) suffix=\(preferSuffix)"
+                        )
+                    }
+                    return fulfilled
+                }
             }
             attempt += 1
             if attempt % 100 == 0 {

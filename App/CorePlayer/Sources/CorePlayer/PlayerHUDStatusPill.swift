@@ -5,6 +5,7 @@ public enum PlayerHUDStatusPillModel: Equatable, Sendable {
     case fastScan(icon: String, multiplier: Int)
     case playbackRate(rate: Double)
     case videoGravity(title: String, icon: String = "aspectratio")
+    case qualityBadges(kinds: [PlayerQualityBadgeKind])
 }
 
 extension Animation {
@@ -53,6 +54,13 @@ public struct PlayerHUDStatusPill: View {
                     .contentTransition(.symbolEffect(.replace))
                 Text(title)
                     .font(.system(size: 13, weight: .semibold))
+            case .qualityBadges(let kinds):
+                HStack(spacing: 10) {
+                    ForEach(kinds, id: \.self) { kind in
+                        PlayerQualityBadgeImage(kind: kind)
+                            .accessibilityLabel(kind.accessibilityLabel)
+                    }
+                }
             }
         }
         .foregroundStyle(.white)

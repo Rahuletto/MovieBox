@@ -34,6 +34,12 @@ public struct PlayerEpisode: Identifiable, Sendable, Equatable {
 @MainActor
 @Observable
 public final class PlayerState {
+    /// Matches CoreStreaming `TorrentPlaybackURLScheme` (CorePlayer cannot import CoreStreaming).
+    private static func isTorrentResourceLoaderURL(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased() else { return false }
+        return scheme == "mbtorrenthttps" || scheme == "mbtorrent"
+    }
+
     public var player: AVPlayer
     public var title: String
     public var seriesName: String = ""
@@ -72,6 +78,7 @@ public final class PlayerState {
     public var subtitleFontSize: CGFloat = 20
     
     public var hdrType: PlayerHDRType? = nil
+    public var audioFormat: PlayerAudioFormat? = nil
     public var errorMessage: String? = nil
     public var onPositionUpdate: ((Int, Double, Double) -> Void)?
 
@@ -103,6 +110,7 @@ public final class PlayerState {
     private var wasPlayingBeforeFastScan = false
     private var hudPillDismissTask: Task<Void, Never>?
     private var hudPillDismissGeneration: UInt64 = 0
+    private var qualityBadgePillShownForCurrentItem = false
 
     private var timeObserver: Any?
     private var itemStatusObserver: NSKeyValueObservation?
@@ -132,6 +140,7 @@ public final class PlayerState {
         let movieId: Int
         let subtitleURL: URL?
         let hdrType: PlayerHDRType?
+        let audioFormat: PlayerAudioFormat?
         let subtitleAppearance: SubtitleAppearance
         let subtitleFontSize: CGFloat
         let episodeTitle: String?
@@ -163,6 +172,7 @@ public final class PlayerState {
         self.subtitleURL = nil
         self.activeSubtitleTrack = -1
         self.hdrType = nil
+        self.audioFormat = nil
     }
 
     /// Opens the player immediately and shows buffering until `load(url:)` is called.
@@ -212,6 +222,7 @@ public final class PlayerState {
         movieId: Int = 0,
         subtitleURL: URL? = nil,
         hdrType: PlayerHDRType? = nil,
+        audioFormat: PlayerAudioFormat? = nil,
         subtitleAppearance: SubtitleAppearance = .cinematic,
         subtitleFontSize: CGFloat = 20,
         episodeTitle: String? = nil,
@@ -226,14 +237,16 @@ public final class PlayerState {
         stopPlaybackResources()
 
         streamsFromLocalTorrentServer =
-            url.scheme == "mbtorrent"
+            Self.isTorrentResourceLoaderURL(url)
             || url.host.map { $0 == "127.0.0.1" || $0 == "localhost" } == true
 
         self.title = title
         self.movieId = movieId
         self.subtitleURL = subtitleURL
         self.hdrType = hdrType
+        self.audioFormat = audioFormat
         self.subtitleAppearance = subtitleAppearance
+        qualityBadgePillShownForCurrentItem = false
         self.subtitleFontSize = subtitleFontSize
         self.errorMessage = nil
         if !episodes.isEmpty {
@@ -281,32 +294,35 @@ public final class PlayerState {
         lastSubtitleSyncTime = -1
         isBuffering = true
 
-        // Build headers for video playback
-        var headers: [String: String] = [
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        let isTorrentCustomScheme = Self.isTorrentResourceLoaderURL(url)
+        var assetOptions: [String: Any] = [
+            AVURLAssetAllowsExpensiveNetworkAccessKey: true,
+            AVURLAssetAllowsCellularAccessKey: true,
+            AVURLAssetAllowsConstrainedNetworkAccessKey: true,
+            // Avoid blocking the main thread probing duration on large torrent streams.
+            AVURLAssetPreferPreciseDurationAndTimingKey: false,
         ]
-        
-        // Add Referer for Piped proxy URLs (required for video access)
-        if url.host?.contains("piped") == true || url.host?.contains("googlevideo.com") == true {
-            let referer = url.scheme ?? "https" + "://" + (url.host ?? "youtube.com")
-            headers["Referer"] = referer
+        if !isTorrentCustomScheme {
+            var headers: [String: String] = [
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            ]
+            if url.host?.contains("piped") == true || url.host?.contains("googlevideo.com") == true {
+                let referer = url.scheme ?? "https" + "://" + (url.host ?? "youtube.com")
+                headers["Referer"] = referer
+            }
+            assetOptions["AVURLAssetHTTPHeaderFieldsKey"] = headers
         }
-        
-        let asset = AVURLAsset(
-            url: url,
-            options: [
-                "AVURLAssetHTTPHeaderFieldsKey": headers,
-                AVURLAssetAllowsExpensiveNetworkAccessKey: true,
-                AVURLAssetAllowsCellularAccessKey: true,
-                AVURLAssetAllowsConstrainedNetworkAccessKey: true,
-                // Avoid blocking the main thread probing duration on large torrent streams.
-                AVURLAssetPreferPreciseDurationAndTimingKey: false,
-            ] as [String: Any]
-        )
+
+        let asset = AVURLAsset(url: url, options: assetOptions)
         if let resourceLoaderDelegate {
             let queue = resourceLoaderQueue
                 ?? DispatchQueue(label: "com.marban.moviebox.torrent-resource-loader")
             asset.resourceLoader.setDelegate(resourceLoaderDelegate, queue: queue)
+            if isTorrentCustomScheme {
+                PlaybackLog.log("load mbtorrent — resource loader delegate attached host=\(url.host ?? "?")")
+            }
+        } else if isTorrentCustomScheme {
+            PlaybackLog.log("load mbtorrent URL without resource loader delegate — playback will fail host=\(url.host ?? "?")")
         }
         if let existing = thumbnailService {
             Task { await existing.clearCache() }
@@ -321,6 +337,7 @@ public final class PlayerState {
             movieId: movieId,
             subtitleURL: subtitleURL,
             hdrType: hdrType,
+            audioFormat: audioFormat,
             subtitleAppearance: subtitleAppearance,
             subtitleFontSize: subtitleFontSize,
             episodeTitle: episodeTitle,
@@ -414,6 +431,9 @@ public final class PlayerState {
             if underlying.code == -16849 || underlyingText.contains("503") || underlyingText.contains("service unavailable") {
                 return "The torrent has not buffered that part of the file yet. Leave the download running, then tap play again — it does not recover by itself on this screen."
             }
+            if underlying.domain == "CoreMediaErrorDomain", underlying.code == -12939 {
+                return "The local stream’s HTTP response did not match the byte range AVPlayer requested. Rebuild with the latest app and try again; if it persists, leave the torrent buffering longer before Retry."
+            }
         }
         if ns.domain == AVFoundationErrorDomain, ns.code == -11828 {
             return "The player could not read the stream (often incomplete MKV/MP4 index or a bad range response). This is not “unsupported format.” Buffer more — especially the end of the file — then tap play again."
@@ -500,8 +520,23 @@ public final class PlayerState {
         }
     }
 
+    private func presentQualityBadgesHUDPillIfNeeded() {
+        guard !qualityBadgePillShownForCurrentItem, !isFastScanning else { return }
+        let kinds = qualityBadgeKinds
+        guard !kinds.isEmpty else { return }
+        qualityBadgePillShownForCurrentItem = true
+        presentTransientHUDPill(
+            .qualityBadges(kinds: kinds),
+            dismissAfter: 5
+        ) { pill in
+            if case .qualityBadges = pill { return true }
+            return false
+        }
+    }
+
     private func presentTransientHUDPill(
         _ pill: PlayerHUDStatusPillModel,
+        dismissAfter seconds: TimeInterval = 2,
         shouldDismiss: @escaping (PlayerHUDStatusPillModel) -> Bool
     ) {
         cancelHUDPillDismissTask()
@@ -509,7 +544,7 @@ public final class PlayerState {
         let generation = hudPillDismissGeneration
         setHUDStatusPill(pill)
         hudPillDismissTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(2))
+            try? await Task.sleep(for: .seconds(seconds))
             guard !Task.isCancelled else { return }
             guard self.hudPillDismissGeneration == generation else { return }
             if let current = self.hudStatusPill, shouldDismiss(current) {
@@ -683,6 +718,7 @@ public final class PlayerState {
             movieId: last.movieId,
             subtitleURL: last.subtitleURL,
             hdrType: last.hdrType,
+            audioFormat: last.audioFormat,
             subtitleAppearance: last.subtitleAppearance,
             subtitleFontSize: last.subtitleFontSize,
             episodeTitle: last.episodeTitle,
@@ -744,6 +780,8 @@ public final class PlayerState {
         seriesName = ""
         episodeTitle = nil
         hdrType = nil
+        audioFormat = nil
+        qualityBadgePillShownForCurrentItem = false
         playbackSources = []
         selectedPlaybackSourceID = nil
         isSwitchingSource = false
@@ -1068,6 +1106,7 @@ public final class PlayerState {
                     self.bufferingDetail = nil
                     self.tryApplyPendingResume()
                     self.updateBufferingState(for: item)
+                    self.presentQualityBadgesHUDPillIfNeeded()
                 case .unknown:
                     PlaybackLog.log("AVPlayerItem status=unknown (buffering)")
                     self.updateBufferingState(for: item)
