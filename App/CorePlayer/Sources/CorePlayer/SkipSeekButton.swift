@@ -76,11 +76,11 @@ struct SkipSeekButton: View {
 
     var body: some View {
         Image(systemName: iconName)
-            .font(.system(size: 20, weight: .semibold))
-            .foregroundStyle(.white)
+            .font(.system(size: 18, weight: .semibold))
+            .playerGlassSymbol()
             .contentTransition(.symbolEffect(.replace))
-            .frame(width: 52, height: 52)
-            .nativeGlassEffect()
+            .frame(width: 48, height: 48)
+            .playerGlassChrome(.circle, strength: .thick)
             .contentShape(Circle())
             .gesture(pressGesture)
             .animation(.spring(response: 0.02, dampingFraction: 0.85), value: iconName)

@@ -2,7 +2,8 @@ import Foundation
 
 /// Single backend call for all torrent sources (Torrentio + indexers). Indexer logic lives on the Worker.
 public struct BackendTorrentSearcher: Sendable {
-    private static let defaultStreamSession: URLSession = {
+    /// Torrent indexers are live — never use URLCache (batch route used to send max-age=120).
+    private static let liveSearchSession: URLSession = {
         let config = URLSessionConfiguration.default
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         config.urlCache = nil
@@ -13,18 +14,20 @@ public struct BackendTorrentSearcher: Sendable {
     private let baseURL: URL
     private let appToken: String
     private let session: URLSession
-    private let streamSession: URLSession
 
     public init(
         baseURL: URL,
         appToken: String,
-        session: URLSession = .shared,
-        streamSession: URLSession? = nil
+        session: URLSession? = nil
     ) {
         self.baseURL = baseURL
         self.appToken = appToken
-        self.session = session
-        self.streamSession = streamSession ?? Self.defaultStreamSession
+        self.session = session ?? Self.liveSearchSession
+    }
+
+    private func applyLiveSearchHeaders(to request: inout URLRequest) {
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
     }
 
     public struct SearchResponse: Sendable {
@@ -54,6 +57,7 @@ public struct BackendTorrentSearcher: Sendable {
         var request = URLRequest(url: url)
         request.setValue(appToken, forHTTPHeaderField: "X-MovieBox-Token")
         request.timeoutInterval = 45
+        applyLiveSearchHeaders(to: &request)
 
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
@@ -113,7 +117,7 @@ public struct BackendTorrentSearcher: Sendable {
     ) -> AsyncThrowingStream<StreamEvent, Error> {
         let baseURL = baseURL
         let appToken = appToken
-        let streamSession = streamSession
+        let session = session
         return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -137,8 +141,10 @@ public struct BackendTorrentSearcher: Sendable {
                     request.setValue(appToken, forHTTPHeaderField: "X-MovieBox-Token")
                     request.timeoutInterval = 120
                     request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                    request.cachePolicy = .reloadIgnoringLocalCacheData
+                    request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
 
-                    let (bytes, response) = try await streamSession.bytes(for: request)
+                    let (bytes, response) = try await session.bytes(for: request)
                     guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
                         let code = (response as? HTTPURLResponse)?.statusCode ?? -1
                         throw NSError(domain: "BackendTorrentSearcher", code: code, userInfo: [

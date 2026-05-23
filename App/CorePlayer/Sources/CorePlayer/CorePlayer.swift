@@ -46,6 +46,8 @@ public final class PlayerState {
     public var episodeTitle: String? = nil
     public var videoGravity: AVLayerVideoGravity = .resizeAspect
     public var movieId: Int
+    /// Poster shown in Control Center / Now Playing when set.
+    public var posterURL: URL?
     public var isPresented: Bool
     /// True when the player was opened for a torrent stream (not trailer/clip-only).
     public var isStreamingTorrent: Bool = false
@@ -63,6 +65,10 @@ public final class PlayerState {
     public var currentTime: Double = 0
     public var duration: Double = 0
     public var bufferedTimeRanges: [ClosedRange<Double>] = []
+    /// Furthest timeline reached this session — scrubber keeps a dim “already visited” span after seeking back.
+    public private(set) var peakPlaybackTime: Double = 0
+    /// When set (torrent streams), polled to merge disk-backed ranges into the scrubber.
+    public var streamBufferTimeRangesProvider: (@Sendable () async -> [ClosedRange<Double>])?
     public var volume: Float = 1.0
     public var isMuted: Bool = false
     public var playbackRate: Double = 1.0
@@ -101,16 +107,31 @@ public final class PlayerState {
     public var availableSubtitles: [PlayerSubtitleOption] = []
     public var selectedSubtitleID: String?
     public var isLoadingSubtitleCatalog: Bool = false
+    /// Shown in the sidebar and on-video when a subtitle file is being fetched or parsed.
+    public var subtitleLoadProgress: SubtitleLoadProgress?
     public var onSelectSubtitle: (@MainActor (PlayerSubtitleOption) async -> Void)?
     public var onRefreshSubtitles: (@MainActor () async -> Void)?
+    /// Downloads and loads the default English subtitle when enabling captions without a file yet.
+    public var onEnsureSubtitleSelected: (@MainActor () async -> Void)?
+    /// Fired when AVPlayer exposes `.legible` subtitle tracks on the current item.
+    public var onEmbeddedLegibleTracksDiscovered: (@MainActor ([EmbeddedLegibleTrack]) -> Void)?
+    /// Refreshes the torrent export slice used for ffmpeg subtitle extraction while streaming.
+    public var resolveEmbeddedMediaURL: (() async -> URL?)?
+    /// Captions rendered by AVPlayer in the video layer (not the custom SRT overlay).
+    public var usesAVPlayerEmbeddedSubtitles = false
     /// Seek here once the item is `readyToPlay` (continue watching).
     public var pendingResumePosition: Double?
+    private var isApplyingResumeSeek = false
+
+    var legibleSelectionGroup: AVMediaSelectionGroup?
 
     // Picture in Picture
     public var isPictureInPictureActive: Bool = false
     public var isPictureInPicturePossible: Bool = false
     private var pipController: AVPictureInPictureController?
     private var pipDelegate: PlayerPiPDelegate?
+    private weak var pipPlayerLayer: AVPlayerLayer?
+    private var pipPossibleObservation: NSKeyValueObservation?
     private var fastScanBackwardTask: Task<Void, Never>?
     private var fastScanIsForward = false
     private var wasPlayingBeforeFastScan = false
@@ -133,9 +154,18 @@ public final class PlayerState {
     private var lastPositionReportTime: Date = .distantPast
     private var lastReportedPosition: Double = -1
     private var lastSubtitleSyncTime: Double = -1
+    private var cachedStreamBufferRanges: [ClosedRange<Double>] = []
+    private var streamBufferPollTask: Task<Void, Never>?
+    private var mediaCommandCenter: PlayerMediaCommandCenter?
+    private var lastNowPlayingPublishTime: Date = .distantPast
+    /// User chose play (not paused) — used to auto-resume after torrent rebuffer.
+    private var userWantsPlayback = false
+    private var lastPlaybackResumeAttempt = Date.distantPast
+    private var playbackLikelyToKeepUpObserver: NSKeyValueObservation?
 
     private var previousWindowFrame: NSRect? = nil
     private var hasResizedForCurrentVideo = false
+    private var windowAutosizeTask: Task<Void, Never>?
     private var presentationTransitionTask: Task<Void, Never>?
     private var lastPlaybackLoad: StoredPlaybackLoad?
     private var streamsFromLocalTorrentServer = false
@@ -154,6 +184,7 @@ public final class PlayerState {
         let currentEpisodeIndex: Int?
         let displayTitle: String?
         let resumePosition: Double?
+        let posterURL: URL?
     }
 
     private static let positionReportInterval: TimeInterval = 5
@@ -179,6 +210,8 @@ public final class PlayerState {
         self.activeSubtitleTrack = -1
         self.hdrType = nil
         self.audioFormat = nil
+        player.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
+        player.preventsDisplaySleepDuringVideoPlayback = true
     }
 
     /// Opens the player immediately and shows buffering until `load(url:)` is called.
@@ -188,13 +221,15 @@ public final class PlayerState {
         subtitleAppearance: SubtitleAppearance = .cinematic,
         subtitleFontSize: CGFloat = 20,
         episodeTitle: String? = nil,
-        displayTitle: String? = nil
+        displayTitle: String? = nil,
+        posterURL: URL? = nil
     ) {
         errorMessage = nil
         isBuffering = true
         bufferingDetail = "Preparing stream…"
         self.title = title
         self.movieId = movieId
+        if let posterURL { self.posterURL = posterURL }
         self.subtitleAppearance = subtitleAppearance
         self.subtitleFontSize = subtitleFontSize
 
@@ -208,6 +243,7 @@ public final class PlayerState {
         self.episodeTitle = episodeTitle
 
         showsControls = true
+        hasResizedForCurrentVideo = false
         isPresented = true
         isPlayerRevealed = true
         isPlaying = false
@@ -237,6 +273,7 @@ public final class PlayerState {
         displayTitle: String? = nil,
         resumePosition: Double? = nil,
         knownDurationSeconds: Double? = nil,
+        posterURL: URL? = nil,
         resourceLoaderDelegate: AVAssetResourceLoaderDelegate? = nil,
         resourceLoaderQueue: DispatchQueue? = nil
     ) {
@@ -248,6 +285,7 @@ public final class PlayerState {
 
         self.title = title
         self.movieId = movieId
+        if let posterURL { self.posterURL = posterURL }
         self.subtitleURL = subtitleURL
         self.hdrType = hdrType
         self.audioFormat = audioFormat
@@ -284,16 +322,19 @@ public final class PlayerState {
 
         if let resumePosition, resumePosition > 20 {
             pendingResumePosition = resumePosition
+            currentTime = resumePosition
         } else {
             pendingResumePosition = nil
+            currentTime = 0
         }
+        peakPlaybackTime = 0
 
         if let knownDurationSeconds, knownDurationSeconds.isFinite, knownDurationSeconds > 0 {
             duration = knownDurationSeconds
         } else {
             duration = 0
         }
-        currentTime = 0
+        cachedStreamBufferRanges = []
 
         lastPositionReportTime = .distantPast
         lastReportedPosition = -1
@@ -350,7 +391,8 @@ public final class PlayerState {
             episodes: episodes,
             currentEpisodeIndex: currentEpisodeIndex,
             displayTitle: displayTitle,
-            resumePosition: resumePosition
+            resumePosition: resumePosition,
+            posterURL: posterURL ?? self.posterURL
         )
 
         let playerItem = AVPlayerItem(asset: asset)
@@ -361,6 +403,7 @@ public final class PlayerState {
         }
         player.volume = volume
         player.isMuted = isMuted
+        player.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
 
         if subtitleURL != nil {
             disableEmbeddedCaptions(on: playerItem, asset: asset)
@@ -393,14 +436,50 @@ public final class PlayerState {
 
     private func startPlayback(subtitleURL: URL?) {
         setupObservers()
+        activateMediaCommands()
+        scheduleWindowAutosizeRetries()
+        if isStreamingTorrent {
+            startStreamBufferPolling()
+        }
         if let subtitleURL {
             loadSubtitleStream(from: subtitleURL)
         } else {
             cancelSubtitleWork()
         }
-        player.play()
-        player.rate = Float(playbackRate)
+        beginPlaybackFromUserIntent(restartTorrentAtEdges: false)
+    }
+
+    /// Single path for user-initiated playback — initial load and resume after pause.
+    private func beginPlaybackFromUserIntent(restartTorrentAtEdges: Bool) {
+        if playbackRate <= 0 {
+            playbackRate = 1.0
+        }
+        if restartTorrentAtEdges,
+           pendingResumePosition == nil,
+           streamsFromLocalTorrentServer,
+           shouldRestartTorrentStreamFromBeginning() {
+            let atStart = currentTime < 1
+            let atEnd = duration > 0 && currentTime >= max(0, duration - 3)
+            if atStart || atEnd {
+                seek(to: 0)
+            }
+        }
+
+        userWantsPlayback = true
         isPlaying = true
+        lastPlaybackResumeAttempt = .distantPast
+
+        if pendingResumePosition != nil {
+            isBuffering = true
+            tryApplyPendingResume()
+            updateBufferingState()
+            publishNowPlayingIfNeeded(force: true)
+            return
+        }
+
+        player.playImmediately(atRate: Float(playbackRate))
+        updateBufferingState()
+        publishNowPlayingIfNeeded(force: true)
     }
 
     private func revealPlayerWithTransition(onRevealed: @escaping () -> Void) {
@@ -592,6 +671,18 @@ public final class PlayerState {
                 currentSubtitleText = ""
                 currentSubtitleCueID = nil
             }
+            clearEmbeddedLegibleSelection()
+            return
+        }
+
+        if usesAVPlayerEmbeddedSubtitles {
+            if activeSubtitleTrack < 0,
+               let group = legibleSelectionGroup,
+               let first = group.options.first,
+               let item = player.currentItem {
+                item.select(first, in: group)
+                activeSubtitleTrack = 0
+            }
             return
         }
 
@@ -617,25 +708,114 @@ public final class PlayerState {
         }
     }
 
+    public func setSubtitleLoadProgress(_ progress: SubtitleLoadProgress?) {
+        subtitleLoadProgress = progress
+    }
+
+    public var showsCustomSubtitleOverlay: Bool {
+        activeSubtitleTrack >= 0 && !usesAVPlayerEmbeddedSubtitles
+    }
+
+    public func discoverEmbeddedLegibleTracks() async -> [EmbeddedLegibleTrack] {
+        guard let item = player.currentItem else {
+            legibleSelectionGroup = nil
+            return []
+        }
+        guard let group = try? await item.asset.loadMediaSelectionGroup(for: .legible),
+              !group.options.isEmpty else {
+            legibleSelectionGroup = nil
+            return []
+        }
+        legibleSelectionGroup = group
+        return group.options.enumerated().map { index, option in
+            let language =
+                option.locale?.identifier
+                ?? option.extendedLanguageTag
+                ?? "unknown"
+            return EmbeddedLegibleTrack(
+                index: index,
+                displayName: option.displayName,
+                language: language
+            )
+        }
+    }
+
+    public func selectEmbeddedLegibleTrack(at index: Int) {
+        guard let group = legibleSelectionGroup,
+              let item = player.currentItem,
+              index >= 0,
+              index < group.options.count else { return }
+
+        subtitleLoadTask?.cancel()
+        subtitleStream = nil
+        usesAVPlayerEmbeddedSubtitles = true
+        item.select(group.options[index], in: group)
+        activeSubtitleTrack = index
+        currentSubtitleText = ""
+        currentSubtitleCueID = nil
+        setSubtitleLoadProgress(nil)
+    }
+
+    public func clearEmbeddedLegibleSelection() {
+        guard let group = legibleSelectionGroup, let item = player.currentItem else {
+            usesAVPlayerEmbeddedSubtitles = false
+            return
+        }
+        item.select(nil, in: group)
+        usesAVPlayerEmbeddedSubtitles = false
+    }
+
     public func loadSubtitleStream(from url: URL) {
+        clearEmbeddedLegibleSelection()
         subtitleURL = url
         subtitleLoadTask?.cancel()
         subtitleUpdateTask?.cancel()
         subtitleStream = nil
+        let fileLabel = url.deletingPathExtension().lastPathComponent
+        setSubtitleLoadProgress(SubtitleLoadProgress(title: "Loading subtitle file", detail: fileLabel))
         subtitleLoadTask = Task { @MainActor in
+            defer { setSubtitleLoadProgress(nil) }
             do {
-                let (data, _) = try await URLSession.shared.data(from: url)
+                setSubtitleLoadProgress(
+                    SubtitleLoadProgress(title: "Reading subtitle file", detail: fileLabel)
+                )
+                let data: Data
+                if url.isFileURL {
+                    data = try Data(contentsOf: url)
+                } else {
+                    (data, _) = try await URLSession.shared.data(from: url)
+                }
                 guard !Task.isCancelled else { return }
+                setSubtitleLoadProgress(
+                    SubtitleLoadProgress(title: "Parsing subtitles", detail: fileLabel)
+                )
                 let stream = SubtitleStream()
                 await stream.load(from: data)
                 guard !Task.isCancelled else { return }
+                let cueCount = await stream.totalCues
+                guard cueCount > 0 else {
+                    NSLog("Subtitle file has no cues: \(url.lastPathComponent)")
+                    setSubtitleLoadProgress(
+                        SubtitleLoadProgress(title: "No cues in subtitle file", detail: fileLabel)
+                    )
+                    try? await Task.sleep(for: .seconds(2.5))
+                    return
+                }
                 subtitleStream = stream
                 activeSubtitleTrack = 0
                 lastSubtitleSyncTime = -1
                 updateSubtitle(at: currentTime, force: true)
+                NSLog("Loaded \(cueCount) subtitle cues from \(url.lastPathComponent)")
             } catch {
                 guard !Task.isCancelled else { return }
                 NSLog("Failed to load subtitle stream: \(error)")
+                setSubtitleLoadProgress(
+                    SubtitleLoadProgress(
+                        title: "Couldn't load subtitles",
+                        detail: (error as NSError).localizedDescription
+                    )
+                )
+                try? await Task.sleep(for: .seconds(3))
             }
         }
     }
@@ -646,7 +826,33 @@ public final class PlayerState {
 
     public func setSubtitlesEnabled(_ enabled: Bool) {
         if enabled {
-            if subtitleURL != nil {
+            activeSubtitleTrack = 0
+            currentSubtitleText = ""
+            currentSubtitleCueID = nil
+
+            if let url = subtitleURL {
+                if subtitleStream == nil {
+                    loadSubtitleStream(from: url)
+                } else {
+                    updateSubtitle(at: currentTime, force: true)
+                }
+                return
+            }
+
+            Task { @MainActor in
+                setSubtitleLoadProgress(SubtitleLoadProgress(title: "Finding subtitles", detail: nil))
+                await onEnsureSubtitleSelected?()
+                guard subtitleURL != nil else {
+                    if subtitleStream == nil {
+                        activeSubtitleTrack = -1
+                        setSubtitleLoadProgress(
+                            SubtitleLoadProgress(title: "No subtitle available", detail: "Pick a track from the list")
+                        )
+                        try? await Task.sleep(for: .seconds(2.5))
+                        setSubtitleLoadProgress(nil)
+                    }
+                    return
+                }
                 if subtitleStream == nil, let url = subtitleURL {
                     loadSubtitleStream(from: url)
                 } else {
@@ -658,11 +864,17 @@ public final class PlayerState {
             activeSubtitleTrack = -1
             currentSubtitleText = ""
             currentSubtitleCueID = nil
+            setSubtitleLoadProgress(nil)
         }
     }
 
     public var areSubtitlesEnabled: Bool {
         activeSubtitleTrack >= 0
+    }
+
+    /// Subtitles sidebar can open when catalog handlers or embedded tracks exist.
+    public var canOpenSubtitlesSidebar: Bool {
+        onSelectSubtitle != nil || onRefreshSubtitles != nil || !availableSubtitles.isEmpty
     }
 
     public func updateSubtitle(at time: TimeInterval, force: Bool = false) {
@@ -698,15 +910,20 @@ public final class PlayerState {
         guard index >= 0 && index < episodes.count else { return }
         let ep = episodes[index]
         self.currentEpisodeIndex = index
-        self.episodeTitle = ep.title
-        
+        let episodeLabel = PlayerTVEpisodeLabel.subtitle(
+            season: ep.seasonNumber,
+            episode: ep.episodeNumber,
+            name: ep.title
+        )
+        self.episodeTitle = episodeLabel
+
         load(
             url: ep.url,
             title: seriesName,
             movieId: movieId,
             subtitleURL: ep.subtitleURL,
             hdrType: hdrType,
-            episodeTitle: ep.title
+            episodeTitle: episodeLabel
         )
     }
 
@@ -743,7 +960,8 @@ public final class PlayerState {
             currentEpisodeIndex: last.currentEpisodeIndex,
             displayTitle: last.displayTitle,
             resumePosition: resume,
-            knownDurationSeconds: duration > 0 ? duration : nil
+            knownDurationSeconds: duration > 0 ? duration : nil,
+            posterURL: last.posterURL
         )
     }
 
@@ -751,7 +969,7 @@ public final class PlayerState {
         if let window = NSApplication.shared.keyWindow, window.styleMask.contains(.fullScreen) {
             window.toggleFullScreen(nil)
         }
-        if let prevFrame = previousWindowFrame, let window = NSApplication.shared.keyWindow, !window.styleMask.contains(.fullScreen) {
+        if let prevFrame = previousWindowFrame, let window = Self.playbackHostWindow() {
             window.setFrame(prevFrame, display: true, animate: true)
             previousWindowFrame = nil
         }
@@ -759,7 +977,10 @@ public final class PlayerState {
         guard isPresented else { return }
 
         presentationTransitionTask?.cancel()
+        deactivateMediaCommands()
+        userWantsPlayback = false
         isPlaying = false
+        isBuffering = false
         player.pause()
 
         withAnimation(.easeInOut(duration: 0.38)) {
@@ -786,6 +1007,11 @@ public final class PlayerState {
         currentTime = 0
         duration = 0
         bufferedTimeRanges = []
+        peakPlaybackTime = 0
+        cachedStreamBufferRanges = []
+        streamBufferTimeRangesProvider = nil
+        stopStreamBufferPolling()
+        deactivateMediaCommands()
         errorMessage = nil
         episodes = []
         currentEpisodeIndex = nil
@@ -795,13 +1021,17 @@ public final class PlayerState {
         availableSubtitles = []
         selectedSubtitleID = nil
         isLoadingSubtitleCatalog = false
+        subtitleLoadProgress = nil
         onSelectSubtitle = nil
         onRefreshSubtitles = nil
+        onEnsureSubtitleSelected = nil
         pendingResumePosition = nil
+        isApplyingResumeSeek = false
         isBuffering = false
         bufferingDetail = nil
         seriesName = ""
         episodeTitle = nil
+        posterURL = nil
         hdrType = nil
         audioFormat = nil
         qualityBadgePillShownForCurrentItem = false
@@ -824,7 +1054,15 @@ public final class PlayerState {
 
     private func stopPlaybackResources() {
         setHUDStatusPill(nil)
+        windowAutosizeTask?.cancel()
+        windowAutosizeTask = nil
+        presentationTransitionTask?.cancel()
+        presentationTransitionTask = nil
+        isApplyingResumeSeek = false
         stopFastScan()
+        stopStreamBufferPolling()
+        deactivateMediaCommands()
+        userWantsPlayback = false
         removeObservers()
         teardownPiP()
         cancelSubtitleWork()
@@ -844,37 +1082,60 @@ public final class PlayerState {
         currentSubtitleText = ""
         currentSubtitleCueID = nil
         lastSubtitleSyncTime = -1
+        subtitleLoadProgress = nil
     }
 
     private func teardownPiP() {
         if pipController?.isPictureInPictureActive == true {
             pipController?.stopPictureInPicture()
         }
+        pipPossibleObservation?.invalidate()
+        pipPossibleObservation = nil
         pipController = nil
         pipDelegate = nil
+        pipPlayerLayer = nil
         isPictureInPictureActive = false
         isPictureInPicturePossible = false
     }
 
     public func setupPiP(with playerLayer: AVPlayerLayer) {
         guard AVPictureInPictureController.isPictureInPictureSupported() else { return }
-        guard pipController == nil else { return }
+        if pipPlayerLayer === playerLayer, pipController != nil { return }
+        if pipController?.isPictureInPictureActive == true { return }
+
+        teardownPiP()
+
+        pipPlayerLayer = playerLayer
         let delegate = PlayerPiPDelegate(state: self)
         pipDelegate = delegate
-        let controller = AVPictureInPictureController(playerLayer: playerLayer)
-        controller?.delegate = delegate
+
+        let contentSource = AVPictureInPictureController.ContentSource(playerLayer: playerLayer)
+        let controller = AVPictureInPictureController(contentSource: contentSource)
+        controller.delegate = delegate
         pipController = controller
-        isPictureInPicturePossible = controller?.isPictureInPicturePossible ?? false
+
+        pipPossibleObservation = controller.observe(\.isPictureInPicturePossible, options: [.initial, .new]) { [weak self] controller, _ in
+            let possible = controller.isPictureInPicturePossible
+            DispatchQueue.main.async { [weak self] in
+                self?.isPictureInPicturePossible = possible
+            }
+        }
+        isPictureInPicturePossible = controller.isPictureInPicturePossible
     }
 
     public func togglePictureInPicture() {
-        guard let controller = pipController else { return }
+        guard let controller = pipController else {
+            PlaybackLog.log("PiP unavailable — controller not ready")
+            return
+        }
         if controller.isPictureInPictureActive {
-            isPictureInPictureActive = false
             controller.stopPictureInPicture()
         } else {
             dismissPlaybackWhenPiPCloses = false
-            isPictureInPictureActive = true
+            guard controller.isPictureInPicturePossible else {
+                PlaybackLog.log("PiP unavailable — not possible yet")
+                return
+            }
             controller.startPictureInPicture()
         }
     }
@@ -884,9 +1145,18 @@ public final class PlayerState {
         guard let controller = pipController else { return false }
         if controller.isPictureInPictureActive { return true }
         guard controller.isPictureInPicturePossible else { return false }
-        isPictureInPictureActive = true
         controller.startPictureInPicture()
         return true
+    }
+
+    /// Keeps torrent/custom streams playing when entering PiP or browsing behind the player.
+    fileprivate func keepPlaybackAliveForPiP() {
+        guard userWantsPlayback else { return }
+        if playbackRate <= 0 { playbackRate = 1.0 }
+        if player.timeControlStatus != .playing {
+            player.playImmediately(atRate: Float(playbackRate))
+        }
+        nudgePlaybackIfStalled()
     }
 
     /// Hides full-screen player chrome, keeps AVPlayer running, and enters PiP when supported.
@@ -924,26 +1194,19 @@ public final class PlayerState {
     }
 
     public func togglePlayback() {
-        if player.timeControlStatus == .playing {
+        if isFastScanning {
+            stopFastScan()
+            return
+        }
+        if userWantsPlayback {
             pause()
         } else {
-            if isFastScanning {
-                stopFastScan()
-            }
             play()
         }
     }
 
     public func play() {
-        if playbackRate <= 0 {
-            playbackRate = 1.0
-        }
-        if streamsFromLocalTorrentServer, shouldRestartTorrentStreamFromBeginning() {
-            seek(to: 0)
-        }
-        player.play()
-        player.rate = Float(playbackRate)
-        isPlaying = true
+        beginPlaybackFromUserIntent(restartTorrentAtEdges: true)
     }
 
     public func thumbnailImage(for seconds: Double, requestID: UInt64) async -> (UInt64, NSImage?) {
@@ -958,18 +1221,23 @@ public final class PlayerState {
         if isFastScanning {
             stopFastScan()
         }
-        player.pause()
-        playbackRate = 1.0
-        player.rate = 0
+        userWantsPlayback = false
         isPlaying = false
+        isBuffering = false
+        player.pause()
+        publishNowPlayingIfNeeded(force: true)
     }
 
     public func seek(to time: Double) {
-        let clamped = max(0, min(time, duration))
+        pendingResumePosition = nil
+        isApplyingResumeSeek = false
+        let clamped = max(0, min(time, duration > 0 ? duration : time))
         player.seek(to: CMTime(seconds: clamped, preferredTimescale: 600))
         currentTime = clamped
+        peakPlaybackTime = max(peakPlaybackTime, clamped)
         lastSubtitleSyncTime = -1
         updateSubtitle(at: clamped, force: true)
+        publishNowPlayingIfNeeded(force: true)
     }
 
     public func seek(by seconds: Double) {
@@ -979,6 +1247,10 @@ public final class PlayerState {
     public func setVolume(_ value: Float) {
         volume = value
         player.volume = value
+        if value > 0.001, isMuted {
+            isMuted = false
+            player.isMuted = false
+        }
     }
 
     public func toggleMute() {
@@ -989,7 +1261,9 @@ public final class PlayerState {
     public func setPlaybackRate(_ rate: Double) {
         guard !isFastScanning else { return }
         playbackRate = rate
-        player.rate = Float(rate)
+        if userWantsPlayback {
+            player.rate = Float(rate)
+        }
         presentPlaybackRateHUDPill()
     }
 
@@ -1001,7 +1275,7 @@ public final class PlayerState {
             if fastScanIsForward == forward { return }
             fastScanBackwardTask?.cancel()
         } else {
-            wasPlayingBeforeFastScan = player.timeControlStatus == .playing
+            wasPlayingBeforeFastScan = userWantsPlayback
         }
 
         isFastScanning = true
@@ -1012,6 +1286,7 @@ public final class PlayerState {
             multiplier: 2
         ))
         fastScanBackwardTask?.cancel()
+        userWantsPlayback = false
         player.pause()
         isPlaying = false
         startBackwardSeekRepeat(forward: forward)
@@ -1026,7 +1301,7 @@ public final class PlayerState {
         fastScanBackwardTask?.cancel()
         fastScanBackwardTask = nil
         if wasPlayingBeforeFastScan {
-            play()
+            beginPlaybackFromUserIntent(restartTorrentAtEdges: false)
         }
         wasPlayingBeforeFastScan = false
     }
@@ -1068,31 +1343,36 @@ public final class PlayerState {
         ) { [weak self] time in
             guard let self else { return }
             let seconds = time.seconds
-            self.currentTime = seconds
-            if let item = self.player.currentItem {
-                self.bufferedTimeRanges = item.loadedTimeRanges.compactMap { value in
-                    let range = value.timeRangeValue
-                    let start = CMTimeGetSeconds(range.start)
-                    let end = CMTimeGetSeconds(CMTimeAdd(range.start, range.duration))
-                    guard start.isFinite, end.isFinite, end > start else { return nil }
-                    return start...end
-                }
+            let subtitleTime: Double
+            if self.isApplyingResumeSeek {
+                // Keep scrubber at the resume target while the seek is in flight.
+                subtitleTime = self.currentTime
+            } else if let pending = self.pendingResumePosition, pending > 20, seconds.isFinite, seconds < min(pending - 2, 10) {
+                // Ignore head-of-file position until resume seek completes.
+                subtitleTime = self.currentTime
+            } else if seconds.isFinite, seconds >= 0 {
+                self.currentTime = seconds
+                self.peakPlaybackTime = max(self.peakPlaybackTime, seconds)
+                subtitleTime = seconds
             } else {
-                self.bufferedTimeRanges = []
+                subtitleTime = self.currentTime
             }
-            self.updateSubtitle(at: seconds)
+            self.refreshBufferedTimeRangesFromPlayer()
+            self.updateSubtitle(at: subtitleTime)
+            self.publishNowPlayingIfNeeded()
             self.tryApplyPendingResume()
 
             guard self.movieId != 0, self.duration > 0 else { return }
+            let reportedPosition = self.currentTime
             let now = Date()
-            let positionDelta = abs(seconds - self.lastReportedPosition)
+            let positionDelta = abs(reportedPosition - self.lastReportedPosition)
             let elapsed = now.timeIntervalSince(self.lastPositionReportTime)
             guard elapsed >= Self.positionReportInterval || positionDelta >= Self.positionReportMinimumDelta else {
                 return
             }
             self.lastPositionReportTime = now
-            self.lastReportedPosition = seconds
-            self.onPositionUpdate?(self.movieId, seconds, self.duration)
+            self.lastReportedPosition = reportedPosition
+            self.onPositionUpdate?(self.movieId, reportedPosition, self.duration)
         }
 
         guard let currentItem = player.currentItem else { return }
@@ -1119,6 +1399,10 @@ public final class PlayerState {
                     PlaybackLog.log("AVPlayerItem failed: \(message)")
                     self.errorMessage = message
                     self.isBuffering = false
+                    self.userWantsPlayback = false
+                    self.isPlaying = false
+                    self.player.pause()
+                    self.publishNowPlayingIfNeeded(force: true)
                 case .readyToPlay:
                     let readyDuration = item.asset.duration.seconds
                     if readyDuration.isFinite, readyDuration > 0 {
@@ -1130,6 +1414,13 @@ public final class PlayerState {
                     self.tryApplyPendingResume()
                     self.updateBufferingState(for: item)
                     self.presentQualityBadgesHUDPillIfNeeded()
+                    self.scheduleWindowAutosizeRetries()
+                    Task { @MainActor [weak self] in
+                        guard let self, item === self.observedPlayerItem else { return }
+                        let tracks = await self.discoverEmbeddedLegibleTracks()
+                        guard !tracks.isEmpty else { return }
+                        self.onEmbeddedLegibleTracksDiscovered?(tracks)
+                    }
                 case .unknown:
                     PlaybackLog.log("AVPlayerItem status=unknown (buffering)")
                     self.updateBufferingState(for: item)
@@ -1146,13 +1437,30 @@ public final class PlayerState {
             }
         }
 
+        playbackLikelyToKeepUpObserver = currentItem.observe(\.isPlaybackLikelyToKeepUp, options: [.new]) { [weak self] item, _ in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, item === self.observedPlayerItem else { return }
+                self.updateBufferingState(for: item)
+                if item.isPlaybackLikelyToKeepUp {
+                    self.nudgePlaybackIfStalled()
+                }
+            }
+        }
+
         playbackEndObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
             object: currentItem,
             queue: .main
         ) { [weak self] _ in
             DispatchQueue.main.async { [weak self] in
-                self?.playNextEpisode()
+                guard let self else { return }
+                if let currentIndex = self.currentEpisodeIndex, currentIndex + 1 < self.episodes.count {
+                    self.playNextEpisode()
+                } else {
+                    self.userWantsPlayback = false
+                    self.isPlaying = false
+                    self.publishNowPlayingIfNeeded(force: true)
+                }
             }
         }
 
@@ -1170,14 +1478,14 @@ public final class PlayerState {
             .sink { [weak self] status in
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
-                    let playing = status == .playing
-                    if self.isPlaying != playing {
-                        PlaybackLog.log("timeControlStatus=\(status) isPlaying=\(playing)")
-                    }
-                    self.isPlaying = playing
                     if status == .waitingToPlayAtSpecifiedRate,
                        let reason = self.player.reasonForWaitingToPlay {
-                        PlaybackLog.log("waitingToPlay reason=\(reason.rawValue)")
+                        PlaybackLog.log("waitingToPlay reason=\(reason.rawValue) wantsPlay=\(self.userWantsPlayback)")
+                    } else if status == .playing {
+                        PlaybackLog.log("timeControlStatus=playing wantsPlay=\(self.userWantsPlayback)")
+                    } else if status == .paused, self.userWantsPlayback {
+                        PlaybackLog.log("timeControlStatus=paused but user wants play — nudging")
+                        self.nudgePlaybackIfStalled()
                     }
                     self.updateBufferingState()
                 }
@@ -1186,16 +1494,59 @@ public final class PlayerState {
     }
 
     private func tryApplyPendingResume() {
+        guard isPresented, userWantsPlayback else { return }
         guard let resume = pendingResumePosition, resume > 20 else { return }
-        guard observedPlayerItem?.status == .readyToPlay else { return }
-        if streamsFromLocalTorrentServer, !isPlaybackTimeBuffered(resume) { return }
+        guard !isApplyingResumeSeek else { return }
+        guard let resumeItem = observedPlayerItem, resumeItem.status == .readyToPlay else { return }
+        if (streamsFromLocalTorrentServer || isStreamingTorrent), !isResumePositionBuffered(resume) { return }
+
+        isApplyingResumeSeek = true
         pendingResumePosition = nil
-        PlaybackLog.log("resume at \(Int(resume))s")
-        seek(to: resume)
+        isBuffering = true
+        player.pause()
+
+        let target = CMTime(seconds: resume, preferredTimescale: 600)
+        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard resumeItem === self.observedPlayerItem else {
+                    self.isApplyingResumeSeek = false
+                    return
+                }
+                self.isApplyingResumeSeek = false
+                guard finished else {
+                    self.pendingResumePosition = resume
+                    self.updateBufferingState()
+                    return
+                }
+                self.currentTime = resume
+                self.peakPlaybackTime = max(self.peakPlaybackTime, resume)
+                self.lastSubtitleSyncTime = -1
+                self.updateSubtitle(at: resume, force: true)
+                PlaybackLog.log("resume at \(Int(resume))s before playback")
+                if self.userWantsPlayback {
+                    self.player.playImmediately(atRate: Float(self.playbackRate))
+                    self.isBuffering = false
+                    self.updateBufferingState()
+                    self.publishNowPlayingIfNeeded(force: true)
+                }
+            }
+        }
     }
 
     private func isPlaybackTimeBuffered(_ seconds: Double) -> Bool {
+        isResumePositionBuffered(seconds, allowPlayedThrough: true)
+    }
+
+    /// Stricter check for continue-watching seeks — requires real byte ranges, not UI-only peak time.
+    private func isResumePositionBuffered(_ seconds: Double, allowPlayedThrough: Bool = false) -> Bool {
         if seconds < 45 { return true }
+        if isStreamingTorrent || streamsFromLocalTorrentServer {
+            for range in cachedStreamBufferRanges {
+                if range.contains(seconds) { return true }
+            }
+            if allowPlayedThrough, seconds <= peakPlaybackTime + 2 { return true }
+        }
         guard let item = observedPlayerItem else { return false }
         for value in item.loadedTimeRanges {
             let range = value.timeRangeValue
@@ -1208,13 +1559,12 @@ public final class PlayerState {
     }
 
     private func shouldRestartTorrentStreamFromBeginning() -> Bool {
+        if pendingResumePosition != nil || isApplyingResumeSeek { return false }
         let t = currentTime
         if !t.isFinite || t < 1 { return true }
         if duration > 0, t >= max(0, duration - 3) { return true }
-        if pendingResumePosition != nil, !isPlaybackTimeBuffered(t) { return true }
         if observedPlayerItem?.status == .failed { return true }
-        let size = observedPlayerItem?.presentationSize ?? .zero
-        return size.width < 2 && size.height < 2
+        return false
     }
 
     private func updateBufferingState(for item: AVPlayerItem? = nil) {
@@ -1230,24 +1580,248 @@ public final class PlayerState {
             return
         }
 
-        if player.timeControlStatus == .paused {
+        guard let item else {
+            isBuffering = true
+            return
+        }
+
+        if item.status == .failed {
             isBuffering = false
             return
         }
 
-        let waiting = player.timeControlStatus == .waitingToPlayAtSpecifiedRate
-        let itemStalled = item.map { $0.isPlaybackBufferEmpty || $0.status == .unknown } ?? true
-        isBuffering = waiting || itemStalled
+        if item.status != .readyToPlay {
+            isBuffering = true
+            return
+        }
+
+        if player.timeControlStatus == .playing {
+            isBuffering = false
+            return
+        }
+
+        if player.timeControlStatus == .paused {
+            if userWantsPlayback,
+               pendingResumePosition != nil || isApplyingResumeSeek || !isPlaybackTimeBuffered(currentTime) {
+                isBuffering = true
+            } else {
+                isBuffering = false
+            }
+            return
+        }
+
+        if !userWantsPlayback {
+            isBuffering = false
+            return
+        }
+
+        // Torrent/custom streams often keep isPlaybackLikelyToKeepUp false after pause/resume
+        // even when the byte ranges we track (and AVPlayer's loaded ranges) already cover t.
+        if isPlaybackTimeBuffered(currentTime) {
+            isBuffering = false
+            return
+        }
+
+        if item.isPlaybackLikelyToKeepUp {
+            isBuffering = false
+            return
+        }
+
+        isBuffering = true
+    }
+
+    /// AVPlayer can stay `.paused` after `play()` on torrent streams — retry without fighting user intent.
+    private func nudgePlaybackIfStalled() {
+        guard userWantsPlayback else { return }
+        guard pendingResumePosition == nil, !isApplyingResumeSeek else { return }
+        guard isPresented, errorMessage == nil, !isSwitchingSource, !isFastScanning else { return }
+        guard player.timeControlStatus != .playing else { return }
+        guard let item = observedPlayerItem, item.status == .readyToPlay else { return }
+
+        let canResume = item.isPlaybackLikelyToKeepUp || isPlaybackTimeBuffered(currentTime)
+        guard canResume else { return }
+
+        let now = Date()
+        guard now.timeIntervalSince(lastPlaybackResumeAttempt) >= 0.35 else { return }
+        lastPlaybackResumeAttempt = now
+
+        if playbackRate <= 0 {
+            playbackRate = 1.0
+        }
+        player.playImmediately(atRate: Float(playbackRate))
+        PlaybackLog.log("nudgePlaybackIfStalled at \(Int(currentTime))s")
+    }
+
+    private func refreshBufferedTimeRangesFromPlayer() {
+        var ranges: [ClosedRange<Double>] = []
+        if let item = player.currentItem {
+            ranges = item.loadedTimeRanges.compactMap { value in
+                let range = value.timeRangeValue
+                let start = CMTimeGetSeconds(range.start)
+                let end = CMTimeGetSeconds(CMTimeAdd(range.start, range.duration))
+                guard start.isFinite, end.isFinite, end > start else { return nil }
+                return start...end
+            }
+        }
+        if !cachedStreamBufferRanges.isEmpty {
+            ranges.append(contentsOf: cachedStreamBufferRanges)
+        }
+        bufferedTimeRanges = Self.mergeTimeRanges(ranges)
+    }
+
+    private static func mergeTimeRanges(_ ranges: [ClosedRange<Double>]) -> [ClosedRange<Double>] {
+        guard !ranges.isEmpty else { return [] }
+        let sorted = ranges.sorted { $0.lowerBound < $1.lowerBound }
+        var merged: [ClosedRange<Double>] = []
+        var current = sorted[0]
+        for range in sorted.dropFirst() {
+            if range.lowerBound <= current.upperBound + 0.25 {
+                current = current.lowerBound...max(current.upperBound, range.upperBound)
+            } else {
+                merged.append(current)
+                current = range
+            }
+        }
+        merged.append(current)
+        return merged
+    }
+
+    private func startStreamBufferPolling() {
+        guard streamBufferTimeRangesProvider != nil else { return }
+        streamBufferPollTask?.cancel()
+        streamBufferPollTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self, let provider = self.streamBufferTimeRangesProvider else { return }
+                let ranges = await provider()
+                guard !Task.isCancelled else { return }
+                self.cachedStreamBufferRanges = ranges
+                self.refreshBufferedTimeRangesFromPlayer()
+                self.updateBufferingState()
+                self.tryApplyPendingResume()
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+        }
+    }
+
+    private func stopStreamBufferPolling() {
+        streamBufferPollTask?.cancel()
+        streamBufferPollTask = nil
+    }
+
+    private func activateMediaCommands() {
+        if mediaCommandCenter == nil {
+            mediaCommandCenter = PlayerMediaCommandCenter(state: self)
+        }
+        mediaCommandCenter?.activate()
+        if let payload = makeNowPlayingPayload() {
+            mediaCommandCenter?.publish(payload)
+        }
+    }
+
+    private func deactivateMediaCommands() {
+        mediaCommandCenter?.deactivate()
+        mediaCommandCenter = nil
+        lastNowPlayingPublishTime = .distantPast
+    }
+
+    /// Rate reported to Control Center — only `.playing` when AVPlayer is actually playing.
+    var nowPlayingPlaybackRate: Double {
+        guard userWantsPlayback else { return 0 }
+        return player.timeControlStatus == .playing ? playbackRate : 0
+    }
+
+    func makeNowPlayingPayload() -> NowPlayingPublishPayload? {
+        let label = episodeTitle ?? seriesName
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let duration = max(0, duration)
+        let position = max(0, min(currentTime, duration > 0 ? duration : currentTime))
+        let albumTitle: String? = {
+            guard let episode = episodeTitle, !episode.isEmpty else { return nil }
+            return seriesName
+        }()
+
+        return NowPlayingPublishPayload(
+            title: trimmed,
+            albumTitle: albumTitle,
+            duration: duration,
+            position: position,
+            rate: nowPlayingPlaybackRate,
+            posterURL: posterURL
+        )
+    }
+
+    private func publishNowPlayingIfNeeded(force: Bool = false) {
+        guard isPresented else { return }
+        let now = Date()
+        if !force, now.timeIntervalSince(lastNowPlayingPublishTime) < 0.9 { return }
+        lastNowPlayingPublishTime = now
+        guard let payload = makeNowPlayingPayload() else { return }
+        mediaCommandCenter?.publish(payload)
+    }
+
+    private static func playbackHostWindow() -> NSWindow? {
+        for candidate in [NSApp.keyWindow, NSApp.mainWindow] {
+            if let window = candidate, window.isVisible, !window.styleMask.contains(.fullScreen) {
+                return window
+            }
+        }
+        return NSApp.windows.first { window in
+            window.isVisible
+                && !window.styleMask.contains(.fullScreen)
+                && !(window is NSPanel)
+        }
+    }
+
+    private func scheduleWindowAutosizeRetries() {
+        guard isPresented, !hasResizedForCurrentVideo else { return }
+        windowAutosizeTask?.cancel()
+        windowAutosizeTask = Task { @MainActor [weak self] in
+            let retryDelaysMs: [UInt64] = [0, 150, 400, 900, 1_800]
+            for delay in retryDelaysMs {
+                guard let self else { return }
+                if self.hasResizedForCurrentVideo { return }
+                if delay > 0 {
+                    try? await Task.sleep(for: .milliseconds(delay))
+                }
+                guard !Task.isCancelled else { return }
+                await self.tryAutosizeWindowToCurrentVideo()
+            }
+        }
+    }
+
+    private func tryAutosizeWindowToCurrentVideo() async {
+        guard isPresented, !hasResizedForCurrentVideo else { return }
+        guard let item = observedPlayerItem else { return }
+        if let size = await preferredVideoPresentationSize(for: item) {
+            resizeWindowToMatch(aspectRatio: size)
+        }
+    }
+
+    private func preferredVideoPresentationSize(for item: AVPlayerItem) async -> CGSize? {
+        let presentationSize = item.presentationSize
+        if presentationSize.width > 1, presentationSize.height > 1 {
+            return presentationSize
+        }
+
+        guard let tracks = try? await item.asset.loadTracks(withMediaType: .video),
+              let track = tracks.first else { return nil }
+
+        guard let naturalSize = try? await track.load(.naturalSize),
+              let transform = try? await track.load(.preferredTransform) else { return nil }
+
+        let transformed = naturalSize.applying(transform)
+        let width = abs(transformed.width)
+        let height = abs(transformed.height)
+        guard width > 1, height > 1 else { return nil }
+        return CGSize(width: width, height: height)
     }
 
     private func resizeWindowToMatch(aspectRatio: CGSize) {
         guard !hasResizedForCurrentVideo else { return }
         guard aspectRatio.width > 0, aspectRatio.height > 0 else { return }
-
-        guard let window = NSApplication.shared.keyWindow ?? NSApp.windows.first(where: { $0.isVisible && $0.isKeyWindow }),
-              !window.styleMask.contains(.fullScreen) else { return }
-
-        hasResizedForCurrentVideo = true
+        guard let window = Self.playbackHostWindow() else { return }
 
         let currentFrame = window.frame
         if previousWindowFrame == nil {
@@ -1257,12 +1831,15 @@ public final class PlayerState {
         let ratio = aspectRatio.width / aspectRatio.height
         let newHeight = currentFrame.width / ratio
 
+        hasResizedForCurrentVideo = true
+
         guard abs(currentFrame.height - newHeight) > 10 else { return }
 
         var newFrame = currentFrame
         newFrame.size.height = newHeight
         newFrame.origin.y = currentFrame.origin.y + (currentFrame.height - newHeight) / 2
         window.setFrame(newFrame, display: true, animate: true)
+        PlaybackLog.log("autosized window to video aspect \(Int(aspectRatio.width))x\(Int(aspectRatio.height)) height=\(Int(newHeight))")
     }
 
     private func removeObservers() {
@@ -1274,6 +1851,8 @@ public final class PlayerState {
         itemStatusObserver = nil
         playbackBufferObserver?.invalidate()
         playbackBufferObserver = nil
+        playbackLikelyToKeepUpObserver?.invalidate()
+        playbackLikelyToKeepUpObserver = nil
         presentationSizeObserver?.invalidate()
         presentationSizeObserver = nil
         if let playbackEndObserver {
@@ -1348,6 +1927,13 @@ public struct PlayerView<
     StreamStatsAccessory: View
 >: View {
     private let surfaceCornerRadius: CGFloat = 14
+    private let hudChromeControlSize: CGFloat = 36
+    private let hudChromeIconFont: CGFloat = 15
+    private let transportIconFont: CGFloat = 17
+    private let transportIconFrame: CGFloat = 36
+    private let transportCapsuleSpacing: CGFloat = 18
+    private let transportCapsulePaddingH: CGFloat = 16
+    private let transportCapsulePaddingV: CGFloat = 10
     @Bindable private var state: PlayerState
     @ViewBuilder private var sourcesSidebar: () -> SourcesSidebar
     @ViewBuilder private var subtitlesSidebar: () -> SubtitlesSidebar
@@ -1376,50 +1962,59 @@ public struct PlayerView<
 
     public var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
-            
-            // Native AVPlayer rendering layer
+            if !state.isPlaybackChromeHidden {
+                Color.black.ignoresSafeArea()
+            }
+
+            // Native AVPlayer rendering layer — always mounted while playback is active.
             AVPlayerLayerView(player: state.player, state: state)
                 .ignoresSafeArea()
 
+            if !state.isPlaybackChromeHidden {
             // Elegant native vignetting overlay when controls are showing to elevate legibility
-            if state.showsControls {
-                ZStack {
-                    Color.black.opacity(0.18)
-                    
-                    LinearGradient(
-                        colors: [Color.black.opacity(0.45), Color.clear],
-                        startPoint: .top,
-                        endPoint: .center
-                    )
-                    .frame(height: 160)
-                    .frame(maxHeight: .infinity, alignment: .top)
-                    
-                    LinearGradient(
-                        colors: [Color.clear, Color.black.opacity(0.55)],
-                        startPoint: .center,
-                        endPoint: .bottom
-                    )
-                    .frame(height: 180)
-                    .frame(maxHeight: .infinity, alignment: .bottom)
-                }
-                .ignoresSafeArea()
-                .transition(.opacity)
-                .allowsHitTesting(false)
+            ZStack {
+                LinearGradient(
+                    stops: [
+                        .init(color: .black.opacity(0.78), location: 0),
+                        .init(color: .black.opacity(0.42), location: 0.42),
+                        .init(color: .clear, location: 1),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: 280)
+                .frame(maxHeight: .infinity, alignment: .top)
+
+                LinearGradient(
+                    stops: [
+                        .init(color: .clear, location: 0),
+                        .init(color: .black.opacity(0.48), location: 0.45),
+                        .init(color: .black.opacity(0.82), location: 1),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: 320)
+                .frame(maxHeight: .infinity, alignment: .bottom)
             }
+            .opacity(state.showsControls ? 1 : 0)
+            .animation(state.showsControls ? Self.hudShowAnimation : Self.hudHideAnimation, value: state.showsControls)
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
 
             subtitleOverlay
 
-            if state.isBuffering || state.isSwitchingSource {
+            if state.isBuffering && !state.isPlaying {
                 bufferingOverlay
                     .transition(.opacity)
+                    .zIndex(4)
             }
 
             if let pill = state.hudStatusPill {
                 PlayerHUDStatusPill(model: pill)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                     .padding(.top, 72)
-                    .transition(.playerHUDStatusPillWarp)
+                    .transition(.opacity)
             }
 
             // Beautiful, floating glassmorphic IINA top bar
@@ -1427,10 +2022,8 @@ public struct PlayerView<
                 .opacity(state.showsControls ? 1 : 0)
                 .animation(state.showsControls ? Self.hudShowAnimation : Self.hudHideAnimation, value: state.showsControls)
 
-            // Center play/pause & seek overlay (hidden while buffering)
-            if !state.isBuffering && !state.isSwitchingSource {
-                centerControls
-            }
+            centerPlaybackOverlay
+                .zIndex(3)
 
             // Stunning, floating glassmorphic IINA control pod
             bottomHUD
@@ -1442,8 +2035,10 @@ public struct PlayerView<
                     .transition(.opacity)
                     .zIndex(8)
             }
+            }
         }
         .overlay {
+            if !state.isPlaybackChromeHidden {
             PlayerKeyboardCaptureView(
                 state: state,
                 onActivity: resetControlFade,
@@ -1452,9 +2047,12 @@ public struct PlayerView<
                 onCommandHeld: { isCommandHeld = $0 },
                 onShiftHeld: { isShiftHeld = $0 }
             )
+            }
         }
         .overlay {
+            if !state.isPlaybackChromeHidden {
             MouseTrackingView(onMove: resetControlFade)
+            }
         }
         .ignoresSafeArea()
         .task {
@@ -1468,6 +2066,26 @@ public struct PlayerView<
             )
         )
         .compositingGroup()
+        .animation(.playerHUDStatusPill, value: state.hudStatusPill)
+    }
+
+    @ViewBuilder
+    private func hudChromeIcon(_ systemName: String) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: hudChromeIconFont, weight: .semibold))
+            .playerGlassSymbol()
+            .frame(width: hudChromeControlSize, height: hudChromeControlSize)
+            .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    private func transportCapsuleIcon(_ systemName: String) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: transportIconFont, weight: .semibold))
+            .symbolRenderingMode(.hierarchical)
+            .foregroundStyle(.primary)
+            .frame(width: transportIconFrame, height: transportIconFrame)
+            .contentShape(Rectangle())
     }
 
     private var bufferingOverlay: some View {
@@ -1618,7 +2236,9 @@ public struct PlayerView<
             cueID: state.currentSubtitleCueID,
             appearance: state.subtitleAppearance,
             fontSize: state.subtitleFontSize,
-            isVisible: state.activeSubtitleTrack >= 0
+            isVisible: state.showsCustomSubtitleOverlay,
+            showsControls: state.showsControls,
+            loadProgress: state.subtitleLoadProgress
         )
     }
 
@@ -1631,39 +2251,35 @@ public struct PlayerView<
                     Button {
                         state.dismiss()
                     } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(.white.opacity(0.85))
-                            .frame(width: 30, height: 30)
-                            .nativeGlassEffect()
+                        hudChromeIcon("xmark")
+                            .playerGlassChrome(.circle, strength: .thick)
+                            .contentShape(Circle())
                     }
                     .buttonStyle(.plain)
 
-                    // Utilities Capsule
-                    HStack(spacing: 16) {
+                    // Utilities Capsule — PiP + fit (fullscreen lives above the scrubber)
+                    HStack(spacing: 4) {
                         Button {
                             state.togglePictureInPicture()
                         } label: {
-                            Image(systemName: state.isPictureInPictureActive ? "pip.exit" : "pip.enter")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.white.opacity(state.isPictureInPictureActive ? 1.0 : 0.85))
+                            hudChromeIcon(state.isPictureInPictureActive ? "pip.exit" : "pip.enter")
                                 .contentTransition(.symbolEffect(.replace))
                         }
                         .buttonStyle(.plain)
                         .animation(.spring(response: 0.05, dampingFraction: 0.95), value: state.isPictureInPictureActive)
 
                         Button {
-                            state.toggleFullScreen()
+                            resetControlFade()
+                            state.cycleVideoGravity()
                         } label: {
-                            Image(systemName: "arrow.up.left.and.arrow.down.right")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.85))
+                            hudChromeIcon("aspectratio")
                         }
                         .buttonStyle(.plain)
+                        .help(state.videoGravityHUDTitle)
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .nativeGlassEffect()
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 0)
+                    .playerGlassChrome(.capsule, strength: .thick)
                 }
 
                 Spacer()
@@ -1674,11 +2290,8 @@ public struct PlayerView<
                         Button {
                             nerdStatsPresented.toggle()
                         } label: {
-                            Image(systemName: "gauge.with.dots.needle.67percent")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(.white.opacity(nerdStatsPresented ? 1.0 : 0.85))
-                                .frame(width: 30, height: 30)
-                                .nativeGlassEffect()
+                            hudChromeIcon("externaldrive.connected.to.line.below")
+                                .playerGlassChrome(.circle, strength: .thick)
                         }
                         .buttonStyle(.plain)
                         .help("Nerd stats")
@@ -1706,13 +2319,14 @@ public struct PlayerView<
                         .frame(width: 80)
 
                         Button {
-                            state.isMuted.toggle()
-                            state.player.isMuted = state.isMuted
+                            state.toggleMute()
                         } label: {
-                            Image(systemName: state.isMuted ? "speaker.slash.fill" : "speaker.wave.3.fill", variableValue: Double(state.volume))
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.85))
-                                .contentTransition(.symbolEffect(.replace))
+                            PlayerVolumeIcon(
+                                isMuted: state.isMuted,
+                                volume: state.volume,
+                                iconFont: hudChromeIconFont,
+                                frameSize: hudChromeControlSize
+                            )
                         }
                         .buttonStyle(.plain)
 
@@ -1728,26 +2342,58 @@ public struct PlayerView<
                                     state.isSubtitlesSidebarOpen = false
                                 }
                             } label: {
-                                Image(systemName: "list.bullet")
-                                    .font(.system(size: 13, weight: .semibold))
-                                    .foregroundStyle(.white.opacity(state.isEpisodesSidebarOpen ? 1.0 : 0.85))
+                                hudChromeIcon("list.bullet")
                                     .contentTransition(.symbolEffect(.replace))
                             }
                             .buttonStyle(.plain)
                             .help("Episodes")
                         }
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .nativeGlassEffect()
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 0)
+                    .playerGlassChrome(.capsule, strength: .thick)
                 }
             }
             .padding(.top, 24)
-            .padding(.horizontal, 24)
+            .padding(.horizontal, 36)
 
             Spacer()
         }
         .frame(maxWidth: .infinity, alignment: .top)
+    }
+
+    private var showsCenterBuffering: Bool {
+        state.isSwitchingSource || (state.isBuffering && state.isPlaying)
+    }
+
+    private var centerPlaybackOverlay: some View {
+        ZStack {
+            if showsCenterBuffering {
+                centerBufferingIndicator
+            } else {
+                centerControls
+            }
+        }
+        .animation(.easeInOut(duration: 0.22), value: showsCenterBuffering)
+    }
+
+    private var centerBufferingIndicator: some View {
+        VStack(spacing: 10) {
+            ProgressView()
+                .controlSize(.large)
+                .tint(.white)
+            if let detail = state.bufferingDetail?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !detail.isEmpty {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.88))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: 520)
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityLabel("Buffering")
     }
 
     private var centerControls: some View {
@@ -1766,13 +2412,14 @@ public struct PlayerView<
                 resetControlFade()
             } label: {
                 Image(systemName: state.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 26, weight: .bold))
-                    .foregroundStyle(.white)
-                    .contentTransition(.symbolEffect(.replace))
-                    .frame(width: 72, height: 72)
-                    .nativeGlassEffect()
+                    .font(.system(size: 24, weight: .bold))
+                    .playerGlassSymbol()
+                    .frame(width: 68, height: 68)
+                    .playerGlassChrome(.circle, strength: .thick)
+                    .contentShape(Circle())
             }
-            .buttonStyle(CenterHUDButtonStyle())
+            .buttonStyle(.plain)
+            .contentShape(Circle())
             .animation(.spring(response: 0.02, dampingFraction: 0.85), value: state.isPlaying)
 
             SkipSeekButton(
@@ -1797,22 +2444,6 @@ public struct PlayerView<
         .easeOut(duration: 0.06)
     }
 
-    private var scrubberTransportControls: some View {
-        Button {
-            state.togglePlayback()
-            resetControlFade()
-        } label: {
-            Image(systemName: state.isPlaying ? "pause.fill" : "play.fill")
-                .font(.system(size: 17, weight: .bold))
-                .foregroundStyle(.white)
-                .contentTransition(.symbolEffect(.replace))
-                .frame(width: 22)
-        }
-        .buttonStyle(.plain)
-        .animation(.spring(response: 0.02, dampingFraction: 0.85), value: state.isPlaying)
-        .help(state.isPlaying ? "Pause" : "Play")
-    }
-
     private var bottomHUD: some View {
         HStack(spacing: 0) {
             // Episodes Sidebar (slides in from left)
@@ -1824,111 +2455,66 @@ public struct PlayerView<
             VStack {
                 Spacer()
 
-                // TV Series & Episode Metadata overlay (left-aligned)
-                HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    if let epTitle = state.episodeTitle, !epTitle.isEmpty {
-                        Text(epTitle)
-                            .font(.system(size: 13, weight: .regular))
-                            .foregroundStyle(.white.opacity(0.70))
-                    }
-                    
-                    Text(state.seriesName)
-                        .font(.system(size: 20, weight: .bold))
-                        .foregroundStyle(.white)
-                }
-                .shadow(color: .black.opacity(0.3), radius: 4, x: 0, y: 2)
-                Spacer()
-            }
-            .padding(.horizontal, 28)
-            .padding(.bottom, 6)
+                // Title row + scrubber — shared left edge so elapsed time lines up with title
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack(alignment: .bottom, spacing: 16) {
+                        VStack(alignment: .leading, spacing: state.episodeTitle?.isEmpty == false ? 10 : 0) {
+                            if let epTitle = state.episodeTitle, !epTitle.isEmpty {
+                                Text(epTitle)
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .foregroundStyle(.white.opacity(0.72))
+                                    .lineLimit(2)
+                            }
 
-            HStack(alignment: .center, spacing: 14) {
-                // Wide floating scrubber capsule
-                HStack(alignment: .center, spacing: 12) {
-                    scrubberTransportControls
-
-                    Text(formatTime(state.currentTime))
-                        .font(.system(size: 11, weight: .medium))
-                        .monospacedDigit()
-                        .foregroundStyle(.white.opacity(0.4))
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .frame(width: 56, alignment: .trailing)
-
-                    ScrubberSlider(
-                        value: Binding(
-                            get: { state.currentTime },
-                            set: { state.seek(to: $0) }
-                        ),
-                        range: 0...max(state.duration, 0.01),
-                        bufferedRanges: state.bufferedTimeRanges,
-                        formatTime: formatTime,
-                        thumbnailProvider: { time, requestID in
-                            await state.thumbnailImage(for: time, requestID: requestID)
+                            Text(state.seriesName)
+                                .font(.system(size: 28, weight: .bold))
+                                .foregroundStyle(.white)
                         }
-                    )
-                    .frame(maxWidth: .infinity)
+                        .shadow(color: .black.opacity(0.3), radius: 4, x: 0, y: 2)
 
-                    Text(formatRemainingTime())
-                        .font(.system(size: 11, weight: .medium))
-                        .monospacedDigit()
-                        .foregroundStyle(.white.opacity(0.4))
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .frame(width: 56, alignment: .leading)
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-                .nativeGlassEffect()
-                .frame(maxWidth: .infinity)
+                        Spacer(minLength: 0)
 
-                // Quality, subtitles, rate, aspect
-                HStack(spacing: 18) {
-                    if !state.playbackSources.isEmpty {
-                        sourcesSidebarButton
-                    }
-
-                    Menu {
-                        Button("0.5x") { state.setPlaybackRate(0.5) }
-                        Button("1.0x") { state.setPlaybackRate(1.0) }
-                        Button("1.25x") { state.setPlaybackRate(1.25) }
-                        Button("1.5x") { state.setPlaybackRate(1.5) }
-                        Button("2.0x") { state.setPlaybackRate(2.0) }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "timer")
-                                .font(.system(size: 13, weight: .semibold))
-                            Text("\(state.playbackRate, specifier: "%g")x")
-                                .font(.system(size: 10, weight: .bold))
-                                .monospacedDigit()
+                        HStack(spacing: 8) {
+                            bottomPlaybackOptionsCapsule
+                            bottomFullscreenButton
                         }
-                        .foregroundStyle(.white.opacity(0.85))
                     }
-                    .buttonStyle(.plain)
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
-                    .fixedSize()
 
-                    subtitlesSidebarButton
+                    HStack(alignment: .center, spacing: 10) {
+                        Text(formatTime(state.currentTime))
+                            .font(.system(size: 11, weight: .medium))
+                            .monospacedDigit()
+                            .foregroundStyle(.white.opacity(0.55))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .frame(minWidth: 36, alignment: .leading)
 
-                    // Video Aspect / Zoom Gravity Button
-                    Button {
-                        state.cycleVideoGravity()
-                    } label: {
-                        Image(systemName: "aspectratio")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.85))
+                        ScrubberSlider(
+                            value: Binding(
+                                get: { state.currentTime },
+                                set: { state.seek(to: $0) }
+                            ),
+                            range: 0...max(state.duration, 0.01),
+                            bufferedRanges: state.bufferedTimeRanges,
+                            playedThroughTime: state.peakPlaybackTime > 0 ? state.peakPlaybackTime : nil,
+                            formatTime: formatTime,
+                            thumbnailProvider: { time, requestID in
+                                await state.thumbnailImage(for: time, requestID: requestID)
+                            }
+                        )
+                        .frame(maxWidth: .infinity)
+
+                        Text(formatRemainingTime())
+                            .font(.system(size: 11, weight: .medium))
+                            .monospacedDigit()
+                            .foregroundStyle(.white.opacity(0.55))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .frame(minWidth: 44, alignment: .trailing)
                     }
-                    .buttonStyle(.plain)
-                    .help(state.videoGravityHUDTitle)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-                .nativeGlassEffect()
-            }
-            .padding(.horizontal, 24)
-            .padding(.bottom, 24)
+                .padding(.horizontal, 36)
+                .padding(.bottom, 36)
             .onHover { hovering in
                 isHoveringHUD = hovering
             }
@@ -1950,49 +2536,71 @@ public struct PlayerView<
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: state.isSubtitlesSidebarOpen)
     }
 
-    private var subtitlesSidebarButton: some View {
-        Button {
-            resetControlFade()
-            state.isSubtitlesSidebarOpen.toggle()
-            if state.isSubtitlesSidebarOpen {
-                state.isSourcesSidebarOpen = false
-                state.isEpisodesSidebarOpen = false
+    @ViewBuilder
+    private var bottomPlaybackOptionsCapsule: some View {
+        let showsSources = !state.playbackSources.isEmpty
+        if showsSources || state.canOpenSubtitlesSidebar {
+            HStack(spacing: 4) {
+                if showsSources {
+                    Button {
+                        resetControlFade()
+                        state.isSourcesSidebarOpen.toggle()
+                        if state.isSourcesSidebarOpen {
+                            state.isEpisodesSidebarOpen = false
+                            state.isSubtitlesSidebarOpen = false
+                        }
+                    } label: {
+                        ZStack(alignment: .topTrailing) {
+                            hudChromeIcon("sharedwithyou")
+                                .symbolEffect(.pulse, isActive: state.isSwitchingSource)
+                            if state.isSwitchingSource {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                    .offset(x: 8, y: -8)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .help("Other versions")
+                    .disabled(state.isSwitchingSource || state.onSelectPlaybackSource == nil)
+                }
+
+                Button {
+                    resetControlFade()
+                    state.isSubtitlesSidebarOpen.toggle()
+                    if state.isSubtitlesSidebarOpen {
+                        state.isSourcesSidebarOpen = false
+                        state.isEpisodesSidebarOpen = false
+                    }
+                } label: {
+                    hudChromeIcon(
+                        state.isSubtitlesSidebarOpen || state.areSubtitlesEnabled
+                            ? "captions.bubble.fill"
+                            : "captions.bubble"
+                    )
+                    .contentTransition(.symbolEffect(.replace))
+                }
+                .buttonStyle(.plain)
+                .help("Subtitles")
+                .disabled(!state.canOpenSubtitlesSidebar)
             }
-        } label: {
-            Image(systemName: state.isSubtitlesSidebarOpen || state.areSubtitlesEnabled ? "captions.bubble.fill" : "captions.bubble")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white.opacity(state.isSubtitlesSidebarOpen || state.areSubtitlesEnabled ? 1.0 : 0.85))
-                .contentTransition(.symbolEffect(.replace))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 0)
+            .playerGlassChrome(.capsule, strength: .thick)
         }
-        .buttonStyle(.plain)
-        .help("Subtitles")
-        .disabled(state.onSelectSubtitle == nil && state.onRefreshSubtitles == nil)
     }
 
-    private var sourcesSidebarButton: some View {
+    private var bottomFullscreenButton: some View {
         Button {
             resetControlFade()
-            state.isSourcesSidebarOpen.toggle()
-            if state.isSourcesSidebarOpen {
-                state.isEpisodesSidebarOpen = false
-                state.isSubtitlesSidebarOpen = false
-            }
+            state.toggleFullScreen()
         } label: {
-            ZStack(alignment: .topTrailing) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white.opacity(state.isSourcesSidebarOpen || state.isSwitchingSource ? 1.0 : 0.9))
-                    .symbolEffect(.pulse, isActive: state.isSwitchingSource)
-                if state.isSwitchingSource {
-                    ProgressView()
-                        .controlSize(.mini)
-                        .offset(x: 6, y: -6)
-                }
-            }
+            hudChromeIcon("arrow.up.left.and.arrow.down.right")
+                .playerGlassChrome(.circle, strength: .thick)
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .help("Versions & quality")
-        .disabled(state.isSwitchingSource || state.onSelectPlaybackSource == nil)
+        .help("Full screen")
     }
 
     private var episodesSidebar: some View {
@@ -2203,11 +2811,13 @@ public struct PlayerView<
 
     private func fourCCString(_ code: FourCharCode) -> String {
         let n = Int(code)
-        let c1 = Character(UnicodeScalar((n >> 24) & 255)!)
-        let c2 = Character(UnicodeScalar((n >> 16) & 255)!)
-        let c3 = Character(UnicodeScalar((n >> 8) & 255)!)
-        let c4 = Character(UnicodeScalar(n & 255)!)
-        return String([c1, c2, c3, c4])
+        let bytes: [UInt8] = [
+            UInt8((n >> 24) & 255),
+            UInt8((n >> 16) & 255),
+            UInt8((n >> 8) & 255),
+            UInt8(n & 255),
+        ]
+        return String(bytes.compactMap { UnicodeScalar($0) }.map(Character.init))
     }
 
     private func probeHlsStats(from manifestURL: URL) async -> HLSStatsProbe? {
@@ -2493,6 +3103,38 @@ struct VolumeSlider: View {
     }
 }
 
+private struct PlayerVolumeIcon: View {
+    let isMuted: Bool
+    let volume: Float
+    let iconFont: CGFloat
+    let frameSize: CGFloat
+
+    private var isSilent: Bool {
+        isMuted || volume <= 0.001
+    }
+
+    private var clampedVolume: Double {
+        Double(min(max(volume, 0), 1))
+    }
+
+    var body: some View {
+        Group {
+            if isSilent {
+                Image(systemName: "speaker.slash.fill")
+            } else {
+                Image(systemName: "speaker.wave.3.fill", variableValue: clampedVolume)
+            }
+        }
+        .font(.system(size: iconFont, weight: .semibold))
+        .playerGlassSymbol()
+        .frame(width: frameSize, height: frameSize)
+        .contentShape(Rectangle())
+        .contentTransition(.symbolEffect(.replace))
+        .animation(.spring(response: 0.34, dampingFraction: 0.78), value: isSilent)
+        .animation(.interactiveSpring(response: 0.16, dampingFraction: 0.88), value: clampedVolume)
+    }
+}
+
 extension Notification.Name {
     static let playerReclaimKeyboardFocus = Notification.Name("playerReclaimKeyboardFocus")
 }
@@ -2760,19 +3402,22 @@ public final class PlayerPiPDelegate: NSObject, AVPictureInPictureControllerDele
     }
 
     public func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-        print("[DEBUG] PiP will start")
         let activeState = self.state
         Task { @MainActor in
             activeState.isPictureInPictureActive = true
+            activeState.keepPlaybackAliveForPiP()
         }
     }
 
     public func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-        print("[DEBUG] PiP did start")
+        let activeState = self.state
+        Task { @MainActor in
+            activeState.keepPlaybackAliveForPiP()
+        }
     }
 
     public func pictureInPictureControllerFailedToStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController, error: Error) {
-        print("[ERROR] PiP failed to start: \(error.localizedDescription)")
+        PlaybackLog.log("PiP failed to start: \(error.localizedDescription)")
         let activeState = self.state
         Task { @MainActor in
             activeState.isPictureInPictureActive = false
@@ -2780,11 +3425,9 @@ public final class PlayerPiPDelegate: NSObject, AVPictureInPictureControllerDele
     }
 
     public func pictureInPictureControllerWillStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-        print("[DEBUG] PiP will stop")
     }
 
     public func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-        print("[DEBUG] PiP did stop")
         let activeState = self.state
         Task { @MainActor in
             activeState.isPictureInPictureActive = false
@@ -2877,28 +3520,6 @@ struct CustomSlider: View {
             )
         }
         .frame(height: 12)
-    }
-}
-
-// Native glass effect modifier
-public struct NativeGlassEffectModifier: ViewModifier {
-    public init() {}
-
-    public func body(content: Content) -> some View {
-        if #available(macOS 26.0, *) {
-            content.glassEffect()
-        } else {
-            content
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.12), lineWidth: 1))
-        }
-    }
-}
-
-public extension View {
-    @ViewBuilder
-    func nativeGlassEffect() -> some View {
-        modifier(NativeGlassEffectModifier())
     }
 }
 

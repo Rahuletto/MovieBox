@@ -33,16 +33,16 @@ public enum PlayerQualityBadgeKind: String, Sendable, Equatable, Hashable {
 
     func displayWidth() -> CGFloat {
         switch self {
-        case .hdr: 30
-        case .dolbyVision: 38
-        case .dolbyAtmos: 34
+        case .hdr: 36
+        case .dolbyVision: 46
+        case .dolbyAtmos: 42
         }
     }
 
     func displayHeight() -> CGFloat {
         switch self {
-        case .hdr: 13
-        case .dolbyVision, .dolbyAtmos: 15
+        case .hdr: 16
+        case .dolbyVision, .dolbyAtmos: 18
         }
     }
 }

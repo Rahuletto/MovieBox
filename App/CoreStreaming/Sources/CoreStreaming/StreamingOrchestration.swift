@@ -23,8 +23,11 @@ public protocol StreamingOrchestration: AnyObject, Sendable {
     func hasMinimumPlaybackHead() async -> Bool
     func allStreamPiecesVerified() async -> Bool
     func downloadSpeed() async -> Double
+    func uploadSpeed() async -> Double
+    func mediaFileURLForSubtitleProbe() async -> URL?
     func peerCount() async -> Int
     func transferringPeerCount() async -> Int
+    func readableMediaTimeRanges(durationSeconds: Double) async -> [ClosedRange<Double>]
 }
 
 extension StreamingOrchestrator: StreamingOrchestration {}

@@ -40,7 +40,7 @@ public final class DownloadPersistenceService: DownloadPersistenceDelegate {
 
         for record in records {
             let state = DownloadState(rawValue: record.state) ?? .queued
-            guard state != .completed, state != .failed else { continue }
+            guard state != .failed else { continue }
 
             let storageDir = URL(fileURLWithPath: record.storageDirectory ?? defaultStoragePath(for: record), isDirectory: true)
             guard !downloadManager.tasks.contains(where: { $0.infoHash == record.infoHash }) else { continue }

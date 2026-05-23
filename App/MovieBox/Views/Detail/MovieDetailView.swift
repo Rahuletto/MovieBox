@@ -38,6 +38,7 @@ struct MovieDetailView: View {
     @State private var isLoadingTVEpisodes = false
     @State private var isLoadingTorrents = false
     @State private var torrentSearchTask: Task<Void, Never>?
+    @State private var torrentSearchGeneration = 0
     @State private var tvSeasonsLoadFailed = false
     private let movieId: Int
     private let kind: MediaKind
@@ -101,10 +102,6 @@ struct MovieDetailView: View {
                     onPlayNow: playBestTorrent,
                     onPlayTrailer: { playTrailer() },
                     onPlayVideo: { videoURL in
-                        if detail?.trailerRTStreamURL != nil {
-                            playTrailerRTFallback()
-                            return
-                        }
                         playYouTubeVideo(videoURL, fallbackToRT: false)
                     },
                     onSelectCastMember: { member in
@@ -114,7 +111,8 @@ struct MovieDetailView: View {
                         )
                     },
                     onSearchSubtitles: { searchSubtitles(for: detail!.movie) },
-                    onDownloadSubtitle: downloadSubtitle
+                    onDownloadSubtitle: downloadSubtitle,
+                    subtitleSearchContext: subtitleSearchContext
                 )
             }
             .frame(maxWidth: .infinity)
@@ -220,7 +218,7 @@ struct MovieDetailView: View {
                 defer { isLoadingTVEpisodes = false }
                 let episodes = try await client.tvSeasonEpisodes(showId: movieId, season: selectedTVSeason)
                 tvEpisodes = episodes
-                selectedTVEpisode = episodes.first
+                selectedTVEpisode = latestReleasedEpisode(from: episodes) ?? episodes.first
 
                 torrents = []
                 torrentSearchDiagnostics = nil
@@ -304,6 +302,22 @@ struct MovieDetailView: View {
         return "Play Now"
     }
 
+    private var subtitleSearchContext: SubtitleSearchContext? {
+        guard let mode = MovieDetailLoader.subtitleServiceMode(from: settings.first),
+              let movie = detail?.movie else { return nil }
+        return SubtitleSearchContext(
+            title: movie.title,
+            year: Int(movie.releaseDate.prefix(4)),
+            imdbId: detail?.imdbId,
+            tmdbId: movieId,
+            seasonNumber: kind == .tv ? selectedTVEpisode?.seasonNumber : nil,
+            episodeNumber: kind == .tv ? selectedTVEpisode?.episodeNumber : nil,
+            mediaKind: kind,
+            preferredLanguage: settings.first?.preferredSubtitleLang ?? "en",
+            metadataMode: mode
+        )
+    }
+
     private var heroPlayButtonDisabled: Bool {
         // PlayNowButton observes persistent playback internally; avoid tying
         // the whole detail scroll view to uiTick updates here.
@@ -326,43 +340,90 @@ struct MovieDetailView: View {
 
     private func startTorrentSearch(episode: TVEpisode? = nil) {
         torrentSearchTask?.cancel()
+        torrentSearchGeneration += 1
+        let generation = torrentSearchGeneration
         torrentSearchTask = Task {
-            await searchTorrents(episode: episode)
+            await searchTorrents(episode: episode, generation: generation)
         }
     }
 
-    private func searchTorrents(episode: TVEpisode? = nil) async {
-        guard let detail else { return }
+    private func searchTorrents(episode: TVEpisode? = nil, generation: Int) async {
+        guard let resolvedDetail = detail else { return }
         guard !Task.isCancelled else { return }
 
-        isLoadingTorrents = true
-        torrents = []
-        torrentSearchDiagnostics = nil
+        let searchDetail = await MovieDetailLoader.freshDetailForTorrentSearch(
+            movieId: movieId,
+            kind: kind,
+            settings: settings.first,
+            fallback: resolvedDetail
+        )
+
+        await MainActor.run {
+            guard generation == torrentSearchGeneration else { return }
+            self.detail = searchDetail
+            isLoadingTorrents = true
+            torrents = []
+            torrentSearchDiagnostics = nil
+        }
 
         for await update in MovieDetailTorrentSearch.searchStream(
-            detail: detail,
+            detail: searchDetail,
             kind: kind,
             settings: settings.first,
             episode: episode
         ) {
             guard !Task.isCancelled else { break }
-            torrents = update.torrents
-            if let diagnostics = update.diagnostics {
-                torrentSearchDiagnostics = diagnostics
-            }
-            if update.isComplete {
-                isLoadingTorrents = false
-                appServices.prewarmStreamingMetadata(for: torrents)
+            await MainActor.run {
+                guard generation == torrentSearchGeneration else { return }
+                logTorrentSearchUpdate(update)
+                torrents = update.torrents
+                if let diagnostics = update.diagnostics {
+                    torrentSearchDiagnostics = diagnostics
+                }
+                if update.isComplete {
+                    isLoadingTorrents = false
+                    appServices.prewarmStreamingMetadata(for: torrents)
+                }
             }
         }
 
         if Task.isCancelled { return }
-        isLoadingTorrents = false
+        await MainActor.run {
+            guard generation == torrentSearchGeneration else { return }
+            isLoadingTorrents = false
+        }
+    }
+
+    private func logTorrentSearchUpdate(_ update: MovieDetailTorrentSearch.ProgressUpdate) {
+        let sourceCounts = Dictionary(grouping: update.torrents, by: { $0.trackerSource.label })
+            .mapValues(\.count)
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: ", ")
+        let nativeCounts = update.diagnostics?.nativeCounts
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: ", ") ?? "nil"
+        let nativeErrors = update.diagnostics?.nativeErrors
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: ", ") ?? "nil"
+        let backendURL = settings.first.map { BackendProxyURL.resolved(from: $0) } ?? "unknown"
+        NSLog(
+            "Torrent search update — backend=\(backendURL) complete=\(update.isComplete) visible=\(update.torrents.count) sources=[\(sourceCounts)] nativeCounts=[\(nativeCounts)] nativeErrors=[\(nativeErrors)]"
+        )
     }
 
     private func addToMyList(_ movie: Movie) {
         if let existing = storedMovies.first(where: { $0.tmdbId == movie.id }) {
-            modelContext.delete(existing)
+            if existing.watchlistAddedAt != nil {
+                existing.watchlistAddedAt = nil
+            } else {
+                existing.watchlistAddedAt = Date()
+                if existing.title.isEmpty { existing.title = movie.title }
+                if existing.posterPath == nil { existing.posterPath = movie.posterPath }
+                if existing.genres.isEmpty { existing.genres = movie.genreIds }
+            }
             try? modelContext.save()
             return
         }
@@ -414,11 +475,11 @@ struct MovieDetailView: View {
                     year: year,
                     language: "all",
                     type: kind == .tv ? "tv" : "movie",
-                    imdbId: detail?.imdbId
+                    imdbId: detail?.imdbId,
+                    tmdbId: movieId
                 )
                 if !subtitles.isEmpty { subtitleLoadHint = nil }
             } catch {
-                errorMessage = error.localizedDescription
                 subtitleLoadHint = error.localizedDescription
             }
             isLoadingSubtitles = false
@@ -491,6 +552,12 @@ struct MovieDetailView: View {
                     isPreparingStream = false
                     preparingVideoURL = nil
                     LogStore.shared.log(.info, category: "playback", "Trailer resolved — playing in AVPlayer")
+                    let posterURL = detail.map {
+                        MetadataClient().posterDisplayURL(
+                            posterPath: $0.movie.posterPath,
+                            backdropPath: $0.movie.backdropPath
+                        )
+                    } ?? nil
                     playerState.load(
                         url: resolvedURL,
                         title: detail?.movie.title ?? "",
@@ -499,7 +566,8 @@ struct MovieDetailView: View {
                         subtitleAppearance: settings.first?.subtitleAppearance ?? .cinematic,
                         subtitleFontSize: settings.first?.subtitleFontSizePoints ?? 20,
                         episodeTitle: "Trailer",
-                        displayTitle: detail?.movie.title
+                        displayTitle: detail?.movie.title,
+                        posterURL: posterURL
                     )
                 }
             } catch {
@@ -561,6 +629,12 @@ struct MovieDetailView: View {
         isPreparingStream = false
         preparingVideoURL = nil
         LogStore.shared.log(.info, category: "playback", "Playing RT trailer fallback in AVPlayer")
+        let posterURL = detail.map {
+            MetadataClient().posterDisplayURL(
+                posterPath: $0.movie.posterPath,
+                backdropPath: $0.movie.backdropPath
+            )
+        } ?? nil
         playerState.load(
             url: rtURL,
             title: detail?.movie.title ?? "",
@@ -569,7 +643,8 @@ struct MovieDetailView: View {
             subtitleAppearance: settings.first?.subtitleAppearance ?? .cinematic,
             subtitleFontSize: settings.first?.subtitleFontSizePoints ?? 20,
             episodeTitle: "Trailer",
-            displayTitle: detail?.movie.title
+            displayTitle: detail?.movie.title,
+            posterURL: posterURL
         )
     }
 
@@ -605,7 +680,11 @@ struct MovieDetailView: View {
 
             let playback = PlaybackSettings.from(settings.first)
             let episodeTitle = selectedTVEpisode.map {
-                "S\($0.seasonNumber)E\($0.episodeNumber) · \($0.name)"
+                PlayerTVEpisodeLabel.subtitle(
+                    season: $0.seasonNumber,
+                    episode: $0.episodeNumber,
+                    name: $0.name
+                )
             }
 
             if let movie = detail?.movie {
@@ -643,19 +722,6 @@ struct MovieDetailView: View {
                 "Play — \(hasContinue ? "resume" : "fresh") torrent \"\(chosen.title)\" seeders=\(chosen.seeders) quality=\(chosen.quality.rawValue)"
             )
 
-            let subtitleContext: SubtitleSearchContext? = {
-                guard let mode = MovieDetailLoader.subtitleServiceMode(from: settings.first),
-                      let movie = detail?.movie else { return nil }
-                return SubtitleSearchContext(
-                    title: movie.title,
-                    year: Int(movie.releaseDate.prefix(4)),
-                    imdbId: detail?.imdbId,
-                    mediaKind: kind,
-                    preferredLanguage: settings.first?.preferredSubtitleLang ?? "en",
-                    metadataMode: mode
-                )
-            }()
-
             let request = PersistentPlaybackStartRequest(
                 mode: .single(chosen),
                 movieId: movieId,
@@ -668,7 +734,7 @@ struct MovieDetailView: View {
                 subtitleURL: subtitleFileURL,
                 subtitleCatalog: subtitles,
                 selectedSubtitleID: selectedSubtitle?.id,
-                subtitleSearchContext: subtitleContext,
+                subtitleSearchContext: subtitleSearchContext,
                 playback: playback,
                 resumePosition: resumePosition,
                 knownDurationSeconds: detail?.movie.runtime.map { Double($0) * 60 },
@@ -719,7 +785,7 @@ struct MovieDetailView: View {
 }
 
 private enum MovieDetailDateFormatter {
-    nonisolated(unsafe) static let parser: DateFormatter = {
+    static let parser: DateFormatter = {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -727,11 +793,10 @@ private enum MovieDetailDateFormatter {
         return formatter
     }()
     
-    nonisolated(unsafe) static let display: DateFormatter = {
+    static let display: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
         formatter.timeStyle = .none
         return formatter
     }()
 }
-

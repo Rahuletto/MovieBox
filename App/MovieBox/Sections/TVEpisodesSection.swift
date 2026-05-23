@@ -293,7 +293,7 @@ private extension TVEpisode {
 }
 
 private enum TVEpisodeDateFormatter {
-    nonisolated(unsafe) static let parser: DateFormatter = {
+    static let parser: DateFormatter = {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -301,11 +301,10 @@ private enum TVEpisodeDateFormatter {
         return formatter
     }()
     
-    nonisolated(unsafe) static let display: DateFormatter = {
+    static let display: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
         formatter.timeStyle = .none
         return formatter
     }()
 }
-

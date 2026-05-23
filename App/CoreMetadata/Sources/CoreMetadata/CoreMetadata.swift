@@ -537,8 +537,8 @@ public actor MetadataClient {
         return PersonDetailMapper.map(bundle: bundle)
     }
 
-    public func movieDetail(id: Int, kind: MediaKind = .movie) async throws -> MovieDetail {
-        if let cached = await MovieDetailCache.shared.detail(id: id, kind: kind) {
+    public func movieDetail(id: Int, kind: MediaKind = .movie, fresh: Bool = false) async throws -> MovieDetail {
+        if !fresh, let cached = await MovieDetailCache.shared.detail(id: id, kind: kind) {
             return cached
         }
         guard let mode else { throw MetadataError.missingConfiguration }
@@ -547,9 +547,18 @@ public actor MetadataClient {
         // Backend mode: use the bundle endpoint (1 RTT, server resolves credits +
         // similar + external_ids + videos + fanart logo from KV).
         if case .backend(let baseURL, let appToken) = mode {
-            let url = baseURL.appending(path: "api/title/\(kind.rawValue)/\(id)")
+            var components = URLComponents(
+                url: baseURL.appending(path: "api/title/\(kind.rawValue)/\(id)"),
+                resolvingAgainstBaseURL: false
+            )
+            if fresh {
+                components?.queryItems = [URLQueryItem(name: "fresh", value: "1")]
+            }
+            guard let url = components?.url else { throw MetadataError.missingConfiguration }
             var request = URLRequest(url: url)
             request.setValue(appToken, forHTTPHeaderField: "X-MovieBox-Token")
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
             request.timeoutInterval = 20
             let (data, response) = try await session.data(for: request)
             if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
@@ -1449,20 +1458,51 @@ public struct SubtitleSearchResponse: Sendable, Codable {
 public enum SubtitleError: Error, Sendable, LocalizedError {
     case missingConfiguration
     case invalidURL
-    case upstream(Int)
+    case upstream(status: Int, message: String?)
     case noSubtitlesFound
+    case invalidPayload
+    case resolveFailed
 
     public var errorDescription: String? {
         switch self {
-        case .missingConfiguration: "Missing subtitle service configuration."
-        case .invalidURL: "Could not build subtitle request URL."
-        case .upstream(let status): "Subtitle service returned HTTP \(status)."
-        case .noSubtitlesFound: "No subtitles found."
+        case .missingConfiguration:
+            return "Missing subtitle service configuration."
+        case .invalidURL:
+            return "Could not build subtitle request URL."
+        case .upstream(let status, let message):
+            if status == 429 {
+                return "Subtitle search is temporarily rate-limited. Wait a minute and try again."
+            }
+            if let message, !message.isEmpty {
+                return message
+            }
+            return "Subtitle service returned HTTP \(status)."
+        case .noSubtitlesFound:
+            return "No subtitles found."
+        case .invalidPayload:
+            return "Downloaded file is not a valid subtitle."
+        case .resolveFailed:
+            return "Could not resolve subtitle download URL."
         }
     }
 }
 
 public actor SubtitleClient {
+    private struct SearchCacheKey: Hashable {
+        let title: String
+        let year: Int?
+        let language: String
+        let type: String
+        let imdbId: String?
+        let tmdbId: Int?
+        let seasonNumber: Int?
+        let episodeNumber: Int?
+    }
+
+    private var searchCache: [SearchCacheKey: [SubtitleInfo]] = [:]
+    private var searchCacheOrder: [SearchCacheKey] = []
+    /// In-memory dedupe for the app session — SubDL quota is enforced on the worker + KV.
+    private let searchCacheLimit = 64
     private let mode: MetadataEndpointMode?
     private let session: URLSession
     private let responseDecoder: JSONDecoder
@@ -1473,34 +1513,61 @@ public actor SubtitleClient {
         self.responseDecoder = JSONDecoder()
     }
 
-    public func searchSubtitles(title: String, year: Int? = nil, language: String = "all", type: String = "movie", imdbId: String? = nil) async throws -> [SubtitleInfo] {
+    public func searchSubtitles(
+        title: String,
+        year: Int? = nil,
+        language: String = "all",
+        type: String = "movie",
+        imdbId: String? = nil,
+        tmdbId: Int? = nil,
+        seasonNumber: Int? = nil,
+        episodeNumber: Int? = nil
+    ) async throws -> [SubtitleInfo] {
         guard let mode else { throw SubtitleError.missingConfiguration }
+
+        let cacheKey = SearchCacheKey(
+            title: title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+            year: year,
+            language: language.lowercased(),
+            type: type.lowercased(),
+            imdbId: imdbId?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+            tmdbId: tmdbId,
+            seasonNumber: seasonNumber,
+            episodeNumber: episodeNumber
+        )
+        if let cached = searchCache[cacheKey] {
+            return cached
+        }
 
         switch mode {
         case .direct:
             throw SubtitleError.missingConfiguration
         case .backend(let baseURL, let appToken):
-            let withYear = try await performSubtitleSearch(
+            // Worker already retries without year when the year filter yields no matches.
+            let results = try await performSubtitleSearch(
                 baseURL: baseURL,
                 appToken: appToken,
                 title: title,
                 year: year,
                 language: language,
                 type: type,
-                imdbId: imdbId
+                imdbId: imdbId,
+                tmdbId: tmdbId,
+                seasonNumber: seasonNumber,
+                episodeNumber: episodeNumber
             )
-            if !withYear.isEmpty || year == nil {
-                return withYear
-            }
-            return try await performSubtitleSearch(
-                baseURL: baseURL,
-                appToken: appToken,
-                title: title,
-                year: nil,
-                language: language,
-                type: type,
-                imdbId: imdbId
-            )
+            storeSearchCache(key: cacheKey, results: results)
+            return results
+        }
+    }
+
+    private func storeSearchCache(key: SearchCacheKey, results: [SubtitleInfo]) {
+        searchCache[key] = results
+        searchCacheOrder.removeAll { $0 == key }
+        searchCacheOrder.append(key)
+        while searchCacheOrder.count > searchCacheLimit, let evicted = searchCacheOrder.first {
+            searchCacheOrder.removeFirst()
+            searchCache.removeValue(forKey: evicted)
         }
     }
 
@@ -1511,7 +1578,10 @@ public actor SubtitleClient {
         year: Int?,
         language: String,
         type: String,
-        imdbId: String?
+        imdbId: String?,
+        tmdbId: Int?,
+        seasonNumber: Int?,
+        episodeNumber: Int?
     ) async throws -> [SubtitleInfo] {
         var queryItems: [URLQueryItem] = [
             URLQueryItem(name: "title", value: title),
@@ -1523,6 +1593,13 @@ public actor SubtitleClient {
             let normalized = imdbId.hasPrefix("tt") ? String(imdbId.dropFirst(2)) : imdbId
             queryItems.append(URLQueryItem(name: "imdb_id", value: normalized))
         }
+        if let tmdbId, tmdbId > 0 {
+            queryItems.append(URLQueryItem(name: "tmdb_id", value: String(tmdbId)))
+        }
+        if type == "tv" {
+            if let seasonNumber { queryItems.append(URLQueryItem(name: "season_number", value: String(seasonNumber))) }
+            if let episodeNumber { queryItems.append(URLQueryItem(name: "episode_number", value: String(episodeNumber))) }
+        }
 
         var components = URLComponents(url: baseURL.appending(path: "api/subtitles/search"), resolvingAgainstBaseURL: false)
         components?.queryItems = queryItems
@@ -1533,33 +1610,71 @@ public actor SubtitleClient {
         request.timeoutInterval = 45
         let (data, response) = try await session.data(for: request)
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-            throw SubtitleError.upstream(http.statusCode)
+            throw SubtitleError.upstream(
+                status: http.statusCode,
+                message: Self.parseBackendErrorMessage(from: data)
+            )
         }
         let decoded = try responseDecoder.decode(SubtitleSearchResponse.self, from: data)
         return decoded.subtitles
     }
 
+    private static func parseBackendErrorMessage(from data: Data) -> String? {
+        struct ErrorBody: Decodable {
+            let message: String?
+            let error: String?
+        }
+        guard let body = try? JSONDecoder().decode(ErrorBody.self, from: data) else { return nil }
+        let message = body.message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !message.isEmpty { return message }
+        let code = body.error?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return code.isEmpty ? nil : code
+    }
+
     public func downloadSubtitle(url: String) async throws -> Data {
         guard let mode else { throw SubtitleError.missingConfiguration }
 
-        let requestURL: URL
         switch mode {
         case .direct:
             throw SubtitleError.missingConfiguration
         case .backend(let baseURL, let appToken):
-            var components = URLComponents(url: baseURL.appending(path: "api/subtitles/download"), resolvingAgainstBaseURL: false)
-            components?.queryItems = [URLQueryItem(name: "url", value: url)]
-            guard let builtURL = components?.url else { throw SubtitleError.invalidURL }
-            requestURL = builtURL
-            var request = URLRequest(url: requestURL)
-            request.setValue(appToken, forHTTPHeaderField: "X-MovieBox-Token")
-            request.timeoutInterval = 30
-            let (data, response) = try await session.data(for: request)
-            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-                throw SubtitleError.upstream(http.statusCode)
+            if SubtitleDirectDownloader.shouldDownloadDirectly(url) {
+                return try await SubtitleDirectDownloader.download(path: url, session: session)
             }
-            return data
+            return try await downloadSubtitleViaBackend(
+                baseURL: baseURL,
+                appToken: appToken,
+                subtitlePath: url
+            )
         }
+    }
+
+    private func downloadSubtitleViaBackend(
+        baseURL: URL,
+        appToken: String,
+        subtitlePath: String
+    ) async throws -> Data {
+        var components = URLComponents(
+            url: baseURL.appending(path: "api/subtitles/download"),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = [URLQueryItem(name: "url", value: subtitlePath)]
+        guard let builtURL = components?.url else { throw SubtitleError.invalidURL }
+
+        var request = URLRequest(url: builtURL)
+        request.setValue(appToken, forHTTPHeaderField: "X-MovieBox-Token")
+        request.timeoutInterval = 45
+        let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw SubtitleError.upstream(
+                status: http.statusCode,
+                message: Self.parseBackendErrorMessage(from: data)
+            )
+        }
+        guard SubtitlePayloadValidator.looksLikeSRT(data) else {
+            throw SubtitleError.invalidPayload
+        }
+        return data
     }
 }
 
@@ -1644,6 +1759,11 @@ public actor MovieDetailCache {
     public func insertDetail(_ detail: MovieDetail, id: Int, kind: MediaKind) {
         let key = "\(kind.rawValue):\(id)"
         detailCache[key] = detail
+    }
+
+    public func removeDetail(id: Int, kind: MediaKind) {
+        let key = "\(kind.rawValue):\(id)"
+        detailCache.removeValue(forKey: key)
     }
     
     public func tvSeasons(showId: Int) -> [TVSeasonSummary]? {

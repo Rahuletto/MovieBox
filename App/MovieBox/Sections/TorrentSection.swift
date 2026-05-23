@@ -24,12 +24,16 @@ struct TorrentSection: View {
     let isTV: Bool
     var episodeLabel: String? = nil
     let subtitleURL: URL?
+    var subtitleCatalog: [SubtitleInfo] = []
+    var selectedSubtitleID: String? = nil
+    var subtitleSearchContext: SubtitleSearchContext? = nil
     var subtitleAppearance: SubtitleAppearance = .cinematic
     var subtitleFontSize: CGFloat = 20
 
     private var orchestrator: StreamingOrchestrator { appServices.streamingOrchestrator }
     private var downloadManager: DownloadManager { appServices.downloadManager }
     @State private var currentPage = 0
+    @State private var sortMode: TorrentSortMode = .seeders
     @State private var streamBusyTorrentID: UUID?
     @State private var rowBufferingByID: [UUID: TorrentRowBufferingSnapshot] = [:]
     @State private var downloadBusyTorrentID: UUID?
@@ -40,17 +44,48 @@ struct TorrentSection: View {
 
     private let pageSize = 10
 
-    private var seededTorrents: [TorrentResult] { torrents.filter { $0.seeders > 0 } }
-    private var unseededTorrents: [TorrentResult] { torrents.filter { $0.seeders <= 0 } }
-    /// Seeded releases only; if none exist, show everything so the section is not empty.
-    /// Always sorted by seeders descending so the healthiest releases come first.
+    private enum TorrentSortMode: String, CaseIterable, Identifiable {
+        case seeders
+        case quality
+        case fileSize
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .seeders: "Seeders"
+            case .quality: "Quality"
+            case .fileSize: "File Size"
+            }
+        }
+    }
+
+    /// Streamable releases only — hide dead swarms; keep completed local downloads.
+    private var watchableTorrents: [TorrentResult] {
+        torrents.filter { $0.seeders > 0 || isDownloaded($0) }
+    }
+
+    /// Downloaded copies stay pinned to the top, then user-selected sort.
     private var displayedTorrents: [TorrentResult] {
-        let pool = seededTorrents.isEmpty ? torrents : seededTorrents
-        return pool.sorted {
-            let aDownloaded = isDownloaded($0)
-            let bDownloaded = isDownloaded($1)
-            if aDownloaded != bDownloaded { return aDownloaded }
-            return $0.seeders > $1.seeders
+        watchableTorrents.sorted { lhs, rhs in
+            let lhsDownloaded = isDownloaded(lhs)
+            let rhsDownloaded = isDownloaded(rhs)
+            if lhsDownloaded != rhsDownloaded { return lhsDownloaded }
+
+            switch sortMode {
+            case .seeders:
+                if lhs.seeders != rhs.seeders { return lhs.seeders > rhs.seeders }
+                if lhs.quality != rhs.quality { return lhs.quality > rhs.quality }
+                return lhs.sizeBytes > rhs.sizeBytes
+            case .quality:
+                if lhs.quality != rhs.quality { return lhs.quality > rhs.quality }
+                if lhs.seeders != rhs.seeders { return lhs.seeders > rhs.seeders }
+                return lhs.sizeBytes > rhs.sizeBytes
+            case .fileSize:
+                if lhs.sizeBytes != rhs.sizeBytes { return lhs.sizeBytes > rhs.sizeBytes }
+                if lhs.seeders != rhs.seeders { return lhs.seeders > rhs.seeders }
+                return lhs.quality > rhs.quality
+            }
         }
     }
 
@@ -79,13 +114,6 @@ struct TorrentSection: View {
         return Array(displayedTorrents[start..<min(start + pageSize, displayedTorrents.count)])
     }
 
-    private var pageRangeLabel: String {
-        guard !displayedTorrents.isEmpty else { return "" }
-        let start = clampedPage * pageSize + 1
-        let end = min((clampedPage + 1) * pageSize, displayedTorrents.count)
-        return "\(start)–\(end) of \(displayedTorrents.count)"
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
@@ -99,13 +127,28 @@ struct TorrentSection: View {
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, minHeight: 160, alignment: .leading)
-            } else if torrents.isEmpty {
-                ContentUnavailableView(
-                    "No Versions Found",
-                    systemImage: "magnifyingglass",
-                    description: Text(emptyDescription)
-                )
-                .frame(maxWidth: .infinity, minHeight: 160)
+            } else if displayedTorrents.isEmpty {
+                if isLoading {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Still searching for more…")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 160, alignment: .leading)
+                } else {
+                    ContentUnavailableView(
+                        torrents.isEmpty ? "No Versions Found" : "No Active Seeders",
+                        systemImage: torrents.isEmpty ? "magnifyingglass" : "arrow.up.circle",
+                        description: Text(
+                            torrents.isEmpty
+                                ? emptyDescription
+                                : "Nothing is seeding right now. Check back later."
+                        )
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 160)
+                }
             } else {
                 if isLoading {
                     HStack(spacing: 8) {
@@ -115,12 +158,6 @@ struct TorrentSection: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                }
-
-                if seededTorrents.isEmpty && !unseededTorrents.isEmpty {
-                    Text("No seeded releases right now. Unseeded copies may not stream.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
 
                 TorrentVersionList(
@@ -153,6 +190,10 @@ struct TorrentSection: View {
             rebuildVisibleCardModels()
         }
         .onChange(of: clampedPage) { _, _ in rebuildVisibleCardModels() }
+        .onChange(of: sortMode) { _, _ in
+            currentPage = 0
+            rebuildVisibleCardModels()
+        }
         .onChange(of: downloads.count) { _, _ in rebuildVisibleCardModels() }
         .onChange(of: settings.first?.proxyBaseURL) { _, _ in
             TorrentBackendSync.apply(from: settings.first)
@@ -165,6 +206,9 @@ struct TorrentSection: View {
         }
         .onChange(of: appServices.persistentPlayback.uiTick) { _, tick in
             syncStreamRowState(from: tick)
+            if tick.movieId == movie.id {
+                rebuildVisibleCardModels()
+            }
             guard tick.movieId == movie.id,
                   let torrentID = tick.torrentId,
                   tick.phaseLabel == "Failed"
@@ -190,9 +234,24 @@ struct TorrentSection: View {
         rowBufferingByID = [torrentID: snapshot]
     }
 
+    private var lastStreamedTorrentID: UUID? {
+        guard WatchProgressStore.resumePosition(for: movie.id, in: storedMovies) != nil,
+              let hash = storedMovies.first(where: { $0.tmdbId == movie.id })?
+                  .lastStreamInfoHash?
+                  .lowercased(),
+              !hash.isEmpty
+        else { return nil }
+        return torrents.first(where: { ($0.resolvedInfoHash ?? "").lowercased() == hash })?.id
+    }
+
     private func rebuildVisibleCardModels() {
+        let resumeID = lastStreamedTorrentID
         visibleCardModels = visibleTorrents.map { torrent in
-            TorrentCardModel(torrent: torrent, isDownloaded: isDownloaded(torrent))
+            TorrentCardModel(
+                torrent: torrent,
+                isDownloaded: isDownloaded(torrent),
+                showsResumePlay: torrent.id == resumeID
+            )
         }
     }
 
@@ -213,9 +272,7 @@ struct TorrentSection: View {
                     .font(.headline)
                 Spacer()
                 if !displayedTorrents.isEmpty {
-                    Text(pageRangeLabel)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                    sortMenu
                 }
             }
             if let episodeLabel {
@@ -224,6 +281,24 @@ struct TorrentSection: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private var sortMenu: some View {
+        Menu {
+            Picker("Sort by", selection: $sortMode) {
+                ForEach(TorrentSortMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+        } label: {
+            Image(systemName: "arrow.up.arrow.down")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .help("Sort by \(sortMode.title)")
     }
 
     private var paginationBar: some View {
@@ -299,6 +374,9 @@ struct TorrentSection: View {
             episodeTitle: episodeLabel,
             displayTitle: movie.title,
             subtitleURL: subtitleURL,
+            subtitleCatalog: subtitleCatalog,
+            selectedSubtitleID: selectedSubtitleID,
+            subtitleSearchContext: subtitleSearchContext,
             playback: playback,
             resumePosition: WatchProgressStore.resumePosition(for: movie.id, in: storedMovies),
             knownDurationSeconds: movie.runtime.map { Double($0) * 60 },

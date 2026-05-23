@@ -9,19 +9,19 @@ public enum PlayerHUDStatusPillModel: Equatable, Sendable {
 }
 
 extension Animation {
-    /// Scale warp for the top-center status pill (fast scan, fit mode, etc.).
+    /// Fade for the top-center status pill (fit mode, quality badges, fast scan).
     static var playerHUDStatusPill: Animation {
-        .spring(response: 0.34, dampingFraction: 0.74)
+        .easeInOut(duration: 0.22)
     }
 }
 
 extension AnyTransition {
     static var playerHUDStatusPillWarp: AnyTransition {
-        .scale(scale: 0.52, anchor: .center)
+        .opacity
     }
 }
 
-/// IINA / QuickTime–style status capsule: scale “warp” for show/hide and content changes (no soft fade).
+/// IINA / QuickTime–style status capsule at top center — fades in/out on show and content change.
 public struct PlayerHUDStatusPill: View {
     public let model: PlayerHUDStatusPillModel
 
@@ -34,28 +34,31 @@ public struct PlayerHUDStatusPill: View {
             switch model {
             case .fastScan(let icon, let multiplier):
                 Image(systemName: icon)
-                    .font(.system(size: 12, weight: .bold))
+                    .font(.system(size: 14, weight: .bold))
+                    .playerGlassSymbol()
                     .contentTransition(.symbolEffect(.replace))
                 Text("\(multiplier)x")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 14, weight: .semibold))
                     .monospacedDigit()
                     .contentTransition(.numericText())
             case .playbackRate(let rate):
                 Image(systemName: "timer")
-                    .font(.system(size: 12, weight: .bold))
+                    .font(.system(size: 14, weight: .bold))
+                    .playerGlassSymbol()
                     .contentTransition(.symbolEffect(.replace))
                 Text("\(rate, specifier: "%g")x")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 14, weight: .semibold))
                     .monospacedDigit()
                     .contentTransition(.numericText())
             case .videoGravity(let title, let icon):
                 Image(systemName: icon)
-                    .font(.system(size: 12, weight: .bold))
+                    .font(.system(size: 14, weight: .bold))
+                    .playerGlassSymbol()
                     .contentTransition(.symbolEffect(.replace))
                 Text(title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 14, weight: .semibold))
             case .qualityBadges(let kinds):
-                HStack(spacing: 10) {
+                HStack(spacing: 12) {
                     ForEach(kinds, id: \.self) { kind in
                         PlayerQualityBadgeImage(kind: kind)
                             .accessibilityLabel(kind.accessibilityLabel)
@@ -63,10 +66,9 @@ public struct PlayerHUDStatusPill: View {
                 }
             }
         }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 7)
-        .nativeGlassEffect()
-        .animation(.playerHUDStatusPill, value: model)
+        .foregroundStyle(.primary)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 9)
+        .playerGlassChrome(.capsule)
     }
 }

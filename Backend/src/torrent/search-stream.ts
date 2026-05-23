@@ -29,24 +29,7 @@ function parseSeasonEpisode(query: string, kind: TorrentKind) {
 }
 
 function mergeHits(...groups: TorrentSearchHit[][]): TorrentSearchHit[] {
-  const byHash = new Map<string, TorrentSearchHit>()
-  const unhashed: TorrentSearchHit[] = []
-
-  for (const rows of groups) {
-    for (const row of rows) {
-      const key = row.infoHash?.toLowerCase()
-      if (!key) {
-        unhashed.push(row)
-        continue
-      }
-      const existing = byHash.get(key)
-      if (!existing || (row.seeders ?? 0) > (existing.seeders ?? 0)) {
-        byHash.set(key, row)
-      }
-    }
-  }
-
-  return [...byHash.values(), ...unhashed].toSorted(
+  return groups.flat().toSorted(
     (a, b) => (b.seeders ?? 0) - (a.seeders ?? 0)
   )
 }

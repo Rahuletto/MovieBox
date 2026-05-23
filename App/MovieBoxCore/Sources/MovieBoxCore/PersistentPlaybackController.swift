@@ -323,6 +323,9 @@ public final class PersistentPlaybackController {
         activeTorrentID = torrent.id
         item = PersistentPlaybackItem.make(request: request, torrent: torrent)
         phase = .preparing
+        if let posterURL = request.posterURL {
+            playerState.posterURL = posterURL
+        }
         publishUITick(
             PersistentPlaybackUITick(
                 movieId: request.movieId,
@@ -396,9 +399,14 @@ public final class PersistentPlaybackController {
                 episodeTitle: request.episodeTitle,
                 displayTitle: request.displayTitle,
                 resumePosition: request.resumePosition,
-                knownDurationSeconds: request.knownDurationSeconds
+                knownDurationSeconds: request.knownDurationSeconds,
+                posterURL: request.posterURL
             )
-            applySubtitlePlayback(request: request, playerState: playerState)
+            applySubtitlePlayback(
+                request: request,
+                playerState: playerState,
+                localMediaPath: localPath
+            )
             playerState.isStreamingTorrent = true
             request.onPlaybackOpened?(torrent)
             resetToIdleAfterPlayerOpen()
@@ -474,7 +482,13 @@ public final class PersistentPlaybackController {
                     episodeTitle: request.episodeTitle,
                     displayTitle: request.displayTitle,
                     resumePosition: request.resumePosition,
-                    knownDurationSeconds: request.knownDurationSeconds
+                    knownDurationSeconds: request.knownDurationSeconds,
+                    posterURL: request.posterURL
+                )
+                applySubtitlePlayback(
+                    request: request,
+                    playerState: playerState,
+                    localMediaPath: localPath
                 )
                 playerState.isStreamingTorrent = true
                 request.onPlaybackOpened?(torrent)
@@ -541,9 +555,14 @@ public final class PersistentPlaybackController {
                 episodeTitle: request.episodeTitle,
                 displayTitle: request.displayTitle,
                 resumePosition: request.resumePosition,
-                knownDurationSeconds: request.knownDurationSeconds
+                knownDurationSeconds: request.knownDurationSeconds,
+                posterURL: request.posterURL
             )
-            applySubtitlePlayback(request: request, playerState: playerState)
+            applySubtitlePlayback(
+                request: request,
+                playerState: playerState,
+                session: session
+            )
             playerState.isStreamingTorrent = true
             request.onPlaybackOpened?(torrent)
             resetToIdleAfterPlayerOpen()
@@ -555,14 +574,58 @@ public final class PersistentPlaybackController {
 
     private func applySubtitlePlayback(
         request: PersistentPlaybackStartRequest,
-        playerState: PlayerState
+        playerState: PlayerState,
+        session: TorrentStreamSession? = nil,
+        localMediaPath: String? = nil
     ) {
         SubtitlePlaybackSupport.configure(
             playerState: playerState,
             catalog: request.subtitleCatalog,
             searchContext: request.subtitleSearchContext,
-            selectedSubtitleID: request.selectedSubtitleID ?? request.subtitleCatalog.first?.id
+            selectedSubtitleID: request.selectedSubtitleID,
+            autoSelectRemote: false
         )
+
+        let preferredLanguage = request.subtitleSearchContext?.preferredLanguage ?? "en"
+        playerState.onEmbeddedLegibleTracksDiscovered = { tracks in
+            SubtitlePlaybackSupport.mergeEmbeddedLegibleTracks(
+                playerState: playerState,
+                tracks: tracks,
+                preferredLanguage: preferredLanguage
+            )
+        }
+
+        if let session {
+            playerState.resolveEmbeddedMediaURL = {
+                await session.mediaFileURLForSubtitleProbe()
+            }
+        } else if let localMediaPath {
+            let fileURL = URL(fileURLWithPath: localMediaPath)
+            playerState.resolveEmbeddedMediaURL = { fileURL }
+        }
+
+        Task {
+            if let localMediaPath {
+                await SubtitlePlaybackSupport.attachEmbeddedSubtitles(
+                    playerState: playerState,
+                    mediaFileURL: URL(fileURLWithPath: localMediaPath),
+                    preferredLanguage: preferredLanguage,
+                    isCompleteFile: true
+                )
+            } else if let session {
+                await SubtitlePlaybackSupport.attachEmbeddedFromSession(
+                    playerState: playerState,
+                    session: session,
+                    preferredLanguage: preferredLanguage
+                )
+            }
+            if let context = request.subtitleSearchContext {
+                _ = await SubtitlePlaybackSupport.ensurePreferredSubtitleSelected(
+                    playerState: playerState,
+                    mode: context.metadataMode
+                )
+            }
+        }
     }
 
     private func resetToIdleAfterPlayerOpen() {

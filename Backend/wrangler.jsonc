@@ -10,7 +10,8 @@
 		"APP_ENV": "production",
 		"CORS_ORIGIN": "*",
 		"RATE_LIMIT_WINDOW_MS": "60000",
-		"RATE_LIMIT_MAX_REQUESTS": "100"
+		"RATE_LIMIT_MAX_REQUESTS": "180",
+		"RATE_LIMIT_SUBTITLE_MAX_REQUESTS": "40"
 	},
 	"kv_namespaces": [
 		{

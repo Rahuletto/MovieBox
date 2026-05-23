@@ -1,4 +1,4 @@
-import type { SearchContext, TorrentIndexer, TorrentSearchHit } from '../types'
+import type { TorrentIndexer, TorrentSearchHit } from '../types'
 import { fetchJSON, magnetFor, resolveQualityLabel } from '../utils'
 
 /** apibay.org JSON API (Torrents-Api also scrapes TPB HTML; API is lighter on Workers). */
@@ -11,10 +11,15 @@ export const pirateBayIndexer: TorrentIndexer = {
   },
 
   async search(ctx) {
-    const url = `https://apibay.org/q.php?q=${encodeURIComponent(ctx.query)}&cat=200`
-    const rows = await fetchJSON<Array<Record<string, string>>>(url)
+    const hosts = ['apibay.org', 'apibay.party', 'apibay.rocks']
+    let rows: Array<Record<string, string>> | null = null
+    for (const host of hosts) {
+      const url = `https://${host}/q.php?q=${encodeURIComponent(ctx.query)}&cat=200`
+      rows = await fetchJSON<Array<Record<string, string>>>(url)
+      if (rows !== null) break
+    }
     if (rows === null) {
-      throw new Error('Pirate Bay API (apibay.org) unreachable from backend')
+      throw new Error('Pirate Bay API unreachable from backend')
     }
     if (!rows.length) return []
 

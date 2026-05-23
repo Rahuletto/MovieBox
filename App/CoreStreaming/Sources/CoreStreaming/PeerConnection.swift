@@ -180,6 +180,7 @@ public final class PeerConnection: ObservableObject {
     private var pieceManager: PieceManager?
     private var onPieceReceived: ((UInt32, UInt32, Data) async -> Void)?
     private var onPeersDiscovered: (@Sendable ([PeerInfo]) async -> Void)?
+    public var onOutboundBytes: ((Int) -> Void)?
     private var peerSupportsExtensions = false
     private var peerSupportsPex = false
     private var peerPexID: UInt8?
@@ -283,6 +284,7 @@ public final class PeerConnection: ObservableObject {
         // Release closure captures (they hold strong refs to TorrentEngine callbacks).
         onPieceReceived = nil
         onPeersDiscovered = nil
+        onOutboundBytes = nil
         pieceManager = nil
         connection?.cancel()
         connection = nil
@@ -366,6 +368,12 @@ public final class PeerConnection: ObservableObject {
         }
     }
 
+    private func sendOutbound(_ data: Data) {
+        guard !data.isEmpty else { return }
+        onOutboundBytes?(data.count)
+        connection?.send(content: data, completion: .contentProcessed { _ in })
+    }
+
     private func sendHandshake(infoHash: String) async {
         var handshake = Data()
         handshake.append(19)
@@ -375,7 +383,7 @@ public final class PeerConnection: ObservableObject {
         handshake.append(contentsOf: reserved)
         handshake.append(contentsOf: HexEncoding.data(fromHex: infoHash))
         handshake.append(BitTorrentPeerID.data(for: peerId))
-        connection?.send(content: handshake, completion: .contentProcessed { _ in })
+        sendOutbound(handshake)
     }
 
     private static let handshakeLength = 68
@@ -458,11 +466,11 @@ public final class PeerConnection: ObservableObject {
         guard pieceCount > 0 else { return }
         let length = (pieceCount + 7) / 8
         let field = Data(repeating: 0, count: length)
-        connection?.send(content: WireMessage.bitfield(field).encode(), completion: .contentProcessed { _ in })
+        sendOutbound(WireMessage.bitfield(field).encode())
     }
 
     private func sendInterested() async {
-        connection?.send(content: WireMessage.interested.encode(), completion: .contentProcessed { _ in })
+        sendOutbound(WireMessage.interested.encode())
         if !isChoked {
             await requestPieces()
         }
@@ -474,10 +482,7 @@ public final class PeerConnection: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(120))
                 guard let self, isActive else { return }
-                self.connection?.send(
-                    content: WireMessage.keepAlive.encode(),
-                    completion: .contentProcessed { _ in }
-                )
+                self.sendOutbound(WireMessage.keepAlive.encode())
             }
         }
     }
@@ -624,7 +629,7 @@ public final class PeerConnection: ObservableObject {
 
     private func sendExtendedMessage(extendedID: UInt8, payload: Data) async {
         let msg = WireMessage.extended(extendedID: extendedID, payload: payload)
-        connection?.send(content: msg.encode(), completion: .contentProcessed { _ in })
+        sendOutbound(msg.encode())
     }
 
     private func handleExtendedMessage(extID: UInt8, payload: Data) async {
@@ -694,7 +699,7 @@ public final class PeerConnection: ObservableObject {
                 offset: request.offset,
                 length: request.length
             )
-            connection?.send(content: message.encode(), completion: .contentProcessed { _ in })
+            sendOutbound(message.encode())
         }
     }
 

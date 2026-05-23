@@ -25,7 +25,7 @@ struct DetailHeroHeader: View {
       var playButtonDisabled: Bool = false
       
       private var isInList: Bool {
-          storedMovies.contains { $0.tmdbId == detail.movie.id }
+          storedMovies.contains { $0.tmdbId == detail.movie.id && $0.watchlistAddedAt != nil }
       }
 
       private var releaseYear: String? {

@@ -6,6 +6,8 @@ struct ScrubberSlider: View {
     @Binding var value: Double
     let range: ClosedRange<Double>
     let bufferedRanges: [ClosedRange<Double>]
+    /// Timeline reached earlier this session (dim bar); playhead uses `value`.
+    let playedThroughTime: Double?
     let formatTime: (Double) -> String
     let thumbnailProvider: (Double, UInt64) async -> (UInt64, NSImage?)
 
@@ -33,9 +35,18 @@ struct ScrubberSlider: View {
 
                 ForEach(bufferedSegments(trackWidth: trackWidth), id: \.self.lowerBound) { segment in
                     Capsule()
-                        .fill(Color.white.opacity(0.16))
+                        .fill(Color.white.opacity(0.22))
                         .frame(width: max(0, segment.upperBound - segment.lowerBound), height: trackHeight)
                         .offset(x: segment.lowerBound)
+                }
+
+                if let playedThroughTime, playedThroughTime > value {
+                    Capsule()
+                        .fill(.white.opacity(0.28))
+                        .frame(
+                            width: max(0, trackWidth * progressFraction(for: playedThroughTime, trackWidth: trackWidth)),
+                            height: trackHeight
+                        )
                 }
 
                 Capsule()
@@ -137,23 +148,30 @@ struct ScrubberSlider: View {
     }
 
     private func progressFraction(for trackWidth: CGFloat) -> CGFloat {
+        progressFraction(for: value, trackWidth: trackWidth)
+    }
+
+    private func progressFraction(for time: Double, trackWidth: CGFloat) -> CGFloat {
         guard trackWidth > 0 else { return 0 }
         let span = range.upperBound - range.lowerBound
         guard span > 0 else { return 0 }
-        return CGFloat((value - range.lowerBound) / span)
+        return CGFloat((time - range.lowerBound) / span)
     }
 
     private func bufferedSegments(trackWidth: CGFloat) -> [ClosedRange<CGFloat>] {
         guard trackWidth > 0 else { return [] }
         let span = range.upperBound - range.lowerBound
         guard span > 0 else { return [] }
+        let playheadX = trackWidth * progressFraction(for: value, trackWidth: trackWidth)
         return bufferedRanges.compactMap { buffered in
-            let lower = max(range.lowerBound, buffered.lowerBound)
+            let lower = max(range.lowerBound, buffered.lowerBound, value)
             let upper = min(range.upperBound, buffered.upperBound)
             guard upper > lower else { return nil }
             let lowerX = CGFloat((lower - range.lowerBound) / span) * trackWidth
             let upperX = CGFloat((upper - range.lowerBound) / span) * trackWidth
-            return lowerX...upperX
+            guard upperX > max(playheadX, lowerX) else { return nil }
+            let clippedLowerX = max(lowerX, playheadX)
+            return clippedLowerX...upperX
         }
     }
 

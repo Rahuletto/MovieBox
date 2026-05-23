@@ -3,10 +3,12 @@ import Foundation
 public enum TorrentFileAssembler {
     private static let chunkSize = 1024 * 1024
 
+    /// Exports the primary video file (or first `maxBytes` when streaming) for ffprobe / subtitle extraction.
     public static func exportPrimaryFile(
         metadata: TorrentMetadata,
         pieceStorePath: URL,
-        outputDirectory: URL
+        outputDirectory: URL,
+        maxBytes: Int64? = nil
     ) throws -> URL {
         let target = TorrentStreamTarget.selectPrimary(from: metadata)
         let sourceURL = pieceStorePath
@@ -40,7 +42,7 @@ public enum TorrentFileAssembler {
         }
 
         var offset = target.byteOffset
-        var remaining = target.byteLength
+        var remaining = min(target.byteLength, maxBytes ?? target.byteLength)
         while remaining > 0 {
             let toRead = Int(min(Int64(chunkSize), remaining))
             try readHandle.seek(toOffset: UInt64(offset))

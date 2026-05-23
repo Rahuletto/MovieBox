@@ -91,24 +91,10 @@ export async function searchAllTorrents(opts: {
 
   const [mainRes, seasonRes] = await Promise.all([mainPromise, seasonPromise])
 
-  // Merge the results, deduping by infoHash and taking the one with highest seeders
+  // Merge the results without cross-provider dedupe so duplicate releases still show
+  // their original provider (YTS, Pirate Bay, 1337x, etc.).
   const allResults = [...mainRes.results, ...seasonRes.results]
-  const byHash = new Map<string, (typeof allResults)[0]>()
-  const unhashed: (typeof allResults)[0][] = []
-
-  for (const row of allResults) {
-    const key = row.infoHash?.toLowerCase()
-    if (!key) {
-      unhashed.push(row)
-      continue
-    }
-    const existing = byHash.get(key)
-    if (!existing || (row.seeders ?? 0) > (existing.seeders ?? 0)) {
-      byHash.set(key, row)
-    }
-  }
-
-  const mergedResults = [...byHash.values(), ...unhashed].toSorted(
+  const mergedResults = allResults.toSorted(
     (a, b) => (b.seeders ?? 0) - (a.seeders ?? 0)
   )
 

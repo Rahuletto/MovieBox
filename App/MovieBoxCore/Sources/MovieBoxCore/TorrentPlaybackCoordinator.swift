@@ -55,9 +55,11 @@ public final class TorrentPlaybackCoordinator {
         episodeTitle: String? = nil,
         displayTitle: String? = nil,
         resumePosition: Double? = nil,
-        knownDurationSeconds: Double? = nil
+        knownDurationSeconds: Double? = nil,
+        posterURL: URL? = nil
     ) throws {
         configureSources(on: playerState, torrents: allTorrents, selected: torrent)
+        installStreamBufferProvider(on: playerState)
 
         guard case .ready(let url) = session.state else {
             if case .failed(let message) = session.state {
@@ -96,6 +98,7 @@ public final class TorrentPlaybackCoordinator {
             hudTitle: hudTitle,
             resume: resumePosition,
             knownDuration: knownDurationSeconds,
+            posterURL: posterURL,
             resourceLoader: resourceLoader
         )
         Task { @MainActor in
@@ -113,6 +116,7 @@ public final class TorrentPlaybackCoordinator {
                 displayTitle: loadPayload.hudTitle,
                 resumePosition: loadPayload.resume,
                 knownDurationSeconds: loadPayload.knownDuration,
+                posterURL: loadPayload.posterURL,
                 resourceLoaderDelegate: loadPayload.resourceLoader,
                 resourceLoaderQueue: DispatchQueue(label: "com.marban.moviebox.torrent-resource-loader")
             )
@@ -131,7 +135,8 @@ public final class TorrentPlaybackCoordinator {
         episodeTitle: String? = nil,
         displayTitle: String? = nil,
         resumePosition: Double? = nil,
-        knownDurationSeconds: Double? = nil
+        knownDurationSeconds: Double? = nil,
+        posterURL: URL? = nil
     ) {
         configureSources(on: playerState, torrents: allTorrents, selected: torrent)
 
@@ -150,7 +155,8 @@ public final class TorrentPlaybackCoordinator {
             episodeTitle: episodeTitle,
             hudTitle: hudTitle,
             resume: resumePosition,
-            knownDuration: knownDurationSeconds
+            knownDuration: knownDurationSeconds,
+            posterURL: posterURL
         )
         Task { @MainActor in
             await Task.yield()
@@ -166,7 +172,8 @@ public final class TorrentPlaybackCoordinator {
                 episodeTitle: loadPayload.episodeTitle,
                 displayTitle: loadPayload.hudTitle,
                 resumePosition: loadPayload.resume,
-                knownDurationSeconds: loadPayload.knownDuration
+                knownDurationSeconds: loadPayload.knownDuration,
+                posterURL: loadPayload.posterURL
             )
         }
     }
@@ -269,6 +276,15 @@ public final class TorrentPlaybackCoordinator {
                     seeders: torrent.seeders
                 )
             }
+        }
+    }
+
+    private func installStreamBufferProvider(on playerState: PlayerState) {
+        let orchestrator = orchestrator
+        playerState.streamBufferTimeRangesProvider = {
+            let duration = await MainActor.run { playerState.duration }
+            guard duration.isFinite, duration > 0 else { return [] }
+            return await orchestrator.readableMediaTimeRanges(durationSeconds: duration)
         }
     }
 

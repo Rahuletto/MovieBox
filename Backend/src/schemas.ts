@@ -65,16 +65,28 @@ export const TorrentSearchQuerySchema = z.object({
   indexers: z.string().optional(),
 })
 
+const optionalIntQuery = z
+  .string()
+  .optional()
+  .transform((v) => {
+    if (v === undefined || v === '') return null
+    const n = Number.parseInt(v, 10)
+    return Number.isFinite(n) ? n : null
+  })
+
 export const SubtitleSearchQuerySchema = z
   .object({
     title: z.string().optional(),
-    year: z.string().optional(),
-    language: z.string().optional().default('english'),
+    year: optionalIntQuery,
+    language: z.string().optional().default('all'),
     type: z.enum(['movie', 'tv']).optional().default('movie'),
     imdb_id: z.string().optional(),
+    tmdb_id: optionalIntQuery,
+    season_number: optionalIntQuery,
+    episode_number: optionalIntQuery,
   })
-  .refine((q) => Boolean(q.title?.trim() || q.imdb_id?.trim()), {
-    message: 'title or imdb_id is required',
+  .refine((q) => Boolean(q.title?.trim() || q.imdb_id?.trim() || q.tmdb_id), {
+    message: 'title, imdb_id, or tmdb_id is required',
   })
 
 export const SubtitleDownloadQuerySchema = z.object({

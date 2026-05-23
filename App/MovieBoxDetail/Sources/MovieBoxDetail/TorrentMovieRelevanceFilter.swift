@@ -48,11 +48,30 @@ public enum TorrentMovieRelevanceFilter {
         }
 
         if !scored.isEmpty {
-            return scored.sorted { lhs, rhs in
+            let ranked = scored.sorted { lhs, rhs in
                 if lhs.score != rhs.score { return lhs.score > rhs.score }
                 if lhs.torrent.seeders != rhs.torrent.seeders { return lhs.torrent.seeders > rhs.torrent.seeders }
                 return lhs.torrent.sizeBytes > rhs.torrent.sizeBytes
             }.map(\.torrent)
+
+            var seen = Set(ranked.map(\.id))
+            let extras = results.filter { torrent in
+                guard !seen.contains(torrent.id) else { return false }
+                guard !isHardExcluded(
+                    title: torrent.title,
+                    movieTokens: movieTokens,
+                    sizeBytes: torrent.sizeBytes,
+                    runtimeMinutes: runtimeMinutes
+                ) else { return false }
+                return containsAllTokens(normalize(torrent.title), tokens: movieTokens)
+            }.sorted { lhs, rhs in
+                if lhs.seeders != rhs.seeders { return lhs.seeders > rhs.seeders }
+                return lhs.sizeBytes > rhs.sizeBytes
+            }
+            for torrent in extras {
+                seen.insert(torrent.id)
+            }
+            return ranked + extras
         }
 
         let soft = results.filter { torrent in
@@ -63,7 +82,7 @@ public enum TorrentMovieRelevanceFilter {
                 runtimeMinutes: runtimeMinutes
             )
         }
-        return soft.isEmpty ? results : soft
+        return soft
     }
 
     // MARK: - Scoring
@@ -105,8 +124,6 @@ public enum TorrentMovieRelevanceFilter {
             runtimeMinutes: runtimeMinutes
         ) {
             score += 20
-        } else if runtimeMinutes != nil, sizeBytes > 0 {
-            return 0
         } else if looksLikeFeatureFilm(sizeBytes: sizeBytes, normalized: normalized) {
             score += 10
         }
@@ -114,7 +131,11 @@ public enum TorrentMovieRelevanceFilter {
         if normalized.contains("webrip") || normalized.contains("bluray") || normalized.contains("remux") {
             score += 8
         }
-        if normalized.contains("hdts") || normalized.contains("telesync") || normalized.contains(" cam ") {
+        if normalized.contains("hdts") || normalized.contains("telesync")
+            || normalized.contains("camrip") || normalized.contains("hdcam")
+            || normalized.contains(" ts ") || normalized.hasSuffix(" ts")
+            || normalized.contains(" cam ") || normalized.hasPrefix("cam ")
+        {
             score -= 20
         }
 
@@ -163,11 +184,20 @@ public enum TorrentMovieRelevanceFilter {
         if isUnrelatedSubject(normalized, movieTokens: movieTokens) { return true }
         if let runtimeMinutes,
            sizeBytes > 0,
+           !skipsRuntimeSizeCheck(normalized),
            isImplausibleDuration(sizeBytes: sizeBytes, normalized: normalized, runtimeMinutes: runtimeMinutes) {
             return true
         }
 
         return false
+    }
+
+    /// REMUX / full-disc releases are valid even when TMDB runtime × bitrate heuristics disagree.
+    private static func skipsRuntimeSizeCheck(_ normalized: String) -> Bool {
+        normalized.contains("remux")
+            || normalized.contains("complete bluray")
+            || normalized.contains("full bluray")
+            || normalized.contains("bluray disc")
     }
 
     // MARK: - Runtime vs file size
@@ -184,8 +214,11 @@ public enum TorrentMovieRelevanceFilter {
         let windowMin = max(60, expectedSeconds - buffer)
         let windowMax = expectedSeconds + buffer
 
-        let estMinSeconds = Double(sizeBytes * 8) / bounds.high
-        let estMaxSeconds = Double(sizeBytes * 8) / bounds.low
+        // Use floating-point bit math — bogus indexer sizes can exceed Int64 when multiplied by 8.
+        let bits = Double(sizeBytes) * 8.0
+        guard bounds.low > 0, bounds.high > 0 else { return true }
+        let estMinSeconds = bits / bounds.high
+        let estMaxSeconds = bits / bounds.low
         return estMaxSeconds >= windowMin && estMinSeconds <= windowMax
     }
 

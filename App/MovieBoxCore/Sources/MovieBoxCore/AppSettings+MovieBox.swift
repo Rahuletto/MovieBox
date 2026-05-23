@@ -49,7 +49,8 @@ public extension AppSettings {
     }
 
     var enabledTorrentIndexerSet: Set<String> {
-        return TorrentIndexerPreferences.parseCSV(enabledTorrentIndexers)
+        let parsed = TorrentIndexerPreferences.parseCSV(enabledTorrentIndexers)
+        return parsed.isEmpty ? TorrentIndexerPreferences.defaultIDs : parsed
     }
 
     var cacheKey: String {

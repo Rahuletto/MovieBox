@@ -416,6 +416,40 @@ public actor PieceStore {
         recomputeStreamHeadContiguousEnd()
     }
 
+    /// Readable media-byte spans on disk (verified pieces plus the streaming head).
+    public func accumulatedReadableMediaByteRanges() -> [ClosedRange<Int64>] {
+        var ranges: [ClosedRange<Int64>] = []
+        if streamHeadContiguousEnd > 0 {
+            ranges.append(0...(streamHeadContiguousEnd - 1))
+        }
+        for index in 0..<pieceCount where hasPiece(index) {
+            let pieceStart = Int64(index) * pieceSize
+            let pieceEnd = pieceStart + pieceSize(for: index)
+            let mediaStart = max(0, pieceStart - streamMediaByteOffset)
+            let mediaEnd = max(0, pieceEnd - streamMediaByteOffset)
+            guard mediaEnd > mediaStart else { continue }
+            ranges.append(mediaStart...(mediaEnd - 1))
+        }
+        return Self.mergeByteRanges(ranges)
+    }
+
+    private static func mergeByteRanges(_ ranges: [ClosedRange<Int64>]) -> [ClosedRange<Int64>] {
+        guard !ranges.isEmpty else { return [] }
+        let sorted = ranges.sorted { $0.lowerBound < $1.lowerBound }
+        var merged: [ClosedRange<Int64>] = []
+        var current = sorted[0]
+        for range in sorted.dropFirst() {
+            if range.lowerBound <= current.upperBound + 1 {
+                current = current.lowerBound...max(current.upperBound, range.upperBound)
+            } else {
+                merged.append(current)
+                current = range
+            }
+        }
+        merged.append(current)
+        return merged
+    }
+
     private func recomputeStreamHeadContiguousEnd() {
         var end: Int64 = 0
         for index in streamFirstPiece..<pieceCount {

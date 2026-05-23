@@ -2,6 +2,7 @@ import CoreMetadata
 import CorePlayer
 import CoreStreaming
 import CoreTorrent
+import MovieBoxCore
 import SwiftUI
 
 struct MovieDetailContentView: View {
@@ -41,6 +42,7 @@ struct MovieDetailContentView: View {
     let onSelectCastMember: (CastMember) -> Void
     let onSearchSubtitles: () -> Void
     let onDownloadSubtitle: (SubtitleInfo) -> Void
+    let subtitleSearchContext: SubtitleSearchContext?
 
     private var accessibilityTags: [String] {
         var tags: [String] = []
@@ -117,11 +119,19 @@ struct MovieDetailContentView: View {
                             searchDiagnostics: torrentSearchDiagnostics,
                             isLoading: isLoadingTorrents,
                             isTV: true,
-                            episodeLabel: "Season \(episode.seasonNumber) · Episode \(episode.episodeNumber)",
+                            episodeLabel: PlayerTVEpisodeLabel.subtitle(
+                                season: episode.seasonNumber,
+                                episode: episode.episodeNumber,
+                                name: episode.name
+                            ),
                             subtitleURL: subtitleFileURL,
+                            subtitleCatalog: subtitles,
+                            selectedSubtitleID: selectedSubtitle?.id,
+                            subtitleSearchContext: subtitleSearchContext,
                             subtitleAppearance: subtitleAppearance,
                             subtitleFontSize: subtitleFontSize
                         )
+                        .id(episode.id)
                         .frame(maxWidth: .infinity)
                     } else if kind != .tv {
                         TorrentSection(
@@ -131,6 +141,9 @@ struct MovieDetailContentView: View {
                             isLoading: isLoadingTorrents || (isLoading && torrents.isEmpty),
                             isTV: false,
                             subtitleURL: subtitleFileURL,
+                            subtitleCatalog: subtitles,
+                            selectedSubtitleID: selectedSubtitle?.id,
+                            subtitleSearchContext: subtitleSearchContext,
                             subtitleAppearance: subtitleAppearance,
                             subtitleFontSize: subtitleFontSize
                         )

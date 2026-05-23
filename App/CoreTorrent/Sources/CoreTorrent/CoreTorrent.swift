@@ -335,14 +335,17 @@ public struct TorrentSearchProgress: Sendable {
 public actor TorrentSearchAggregator {
     private let backendSearcher: BackendTorrentSearcher?
     private let torrentioFallback: TorrentioClient
+    private let pirateBayClient: PirateBayClient
     public private(set) var lastDiagnostics = TorrentSearchDiagnostics()
 
     public init(
         backendBaseURL: URL? = nil,
         backendAppToken: String? = nil,
-        torrentioFallback: TorrentioClient = TorrentioClient()
+        torrentioFallback: TorrentioClient = TorrentioClient(),
+        pirateBayClient: PirateBayClient = PirateBayClient()
     ) {
         self.torrentioFallback = torrentioFallback
+        self.pirateBayClient = pirateBayClient
         if let backendBaseURL, let backendAppToken, !backendAppToken.isEmpty {
             self.backendSearcher = BackendTorrentSearcher(baseURL: backendBaseURL, appToken: backendAppToken)
         } else {
@@ -358,7 +361,7 @@ public actor TorrentSearchAggregator {
         enabledIndexerIDs: Set<String> = TorrentIndexerPreferences.defaultIDs,
         queryOverride: String? = nil
     ) -> AsyncStream<TorrentSearchProgress> {
-        AsyncStream { continuation in
+        return AsyncStream { continuation in
             Task {
                 let query = queryOverride ?? TorrentSearchQuery.make(title: movieTitle, year: year)
 
@@ -382,14 +385,23 @@ public actor TorrentSearchAggregator {
                                 imdbId: imdbId,
                                 kind: kind
                             )
-                            lastDiagnostics = response.diagnostics
+                            var diagnostics = response.diagnostics
+                            let supplemented = await supplementNativeIndexers(
+                                results: response.results,
+                                query: query,
+                                imdbId: imdbId,
+                                kind: kind,
+                                diagnostics: &diagnostics,
+                                enabledIDs: enabledIndexerIDs
+                            )
+                            lastDiagnostics = diagnostics
                             let filtered = Self.filterByEnabledIndexers(
-                                Self.sorted(response.results),
+                                Self.sorted(supplemented),
                                 enabledIDs: enabledIndexerIDs
                             )
                             continuation.yield(TorrentSearchProgress(
                                 torrents: filtered,
-                                diagnostics: response.diagnostics,
+                                diagnostics: diagnostics,
                                 isComplete: true
                             ))
                         } catch {
@@ -464,11 +476,22 @@ public actor TorrentSearchAggregator {
                         diagnostics: nil,
                         isComplete: false
                     ))
-                case .done(let diagnostics, _):
+                case .done(var diagnostics, _):
+                    let supplemented = await supplementNativeIndexers(
+                        results: Self.merged(batches),
+                        query: query,
+                        imdbId: imdbId,
+                        kind: kind,
+                        diagnostics: &diagnostics,
+                        enabledIDs: enabledIndexerIDs
+                    )
                     self.lastDiagnostics = diagnostics
-                    let merged = Self.sorted(Self.merged(batches))
+                    let filtered = Self.filterByEnabledIndexers(
+                        Self.sorted(supplemented),
+                        enabledIDs: enabledIndexerIDs
+                    )
                     continuation.yield(TorrentSearchProgress(
-                        torrents: merged,
+                        torrents: filtered,
                         diagnostics: diagnostics,
                         isComplete: true
                     ))
@@ -477,10 +500,21 @@ public actor TorrentSearchAggregator {
                     var diagnostics = TorrentSearchDiagnostics()
                     diagnostics.queryUsed = query
                     diagnostics.nativeErrors["backend"] = message
+                    let supplemented = await supplementNativeIndexers(
+                        results: Self.merged(batches),
+                        query: query,
+                        imdbId: imdbId,
+                        kind: kind,
+                        diagnostics: &diagnostics,
+                        enabledIDs: enabledIndexerIDs
+                    )
                     self.lastDiagnostics = diagnostics
-                    let merged = Self.sorted(Self.merged(batches))
+                    let filtered = Self.filterByEnabledIndexers(
+                        Self.sorted(supplemented),
+                        enabledIDs: enabledIndexerIDs
+                    )
                     continuation.yield(TorrentSearchProgress(
-                        torrents: merged,
+                        torrents: filtered,
                         diagnostics: diagnostics,
                         isComplete: true
                     ))
@@ -494,22 +528,80 @@ public actor TorrentSearchAggregator {
         }
     }
 
+    /// Cloudflare Workers often cannot reach apibay/Torrentio; fill gaps from the Mac directly.
+    private func supplementNativeIndexers(
+        results: [TorrentResult],
+        query: String,
+        imdbId: String?,
+        kind: TorrentioClient.MediaKind,
+        diagnostics: inout TorrentSearchDiagnostics,
+        enabledIDs: Set<String>
+    ) async -> [TorrentResult] {
+        var merged = Self.mergedUnique(results)
+
+        if enabledIDs.contains("piratebay") {
+            let backendCount = diagnostics.nativeCounts["piratebay"] ?? 0
+            let backendFailed = diagnostics.nativeErrors["piratebay"] != nil
+            if backendCount == 0 || backendFailed {
+                do {
+                    let rows = try await pirateBayClient.search(query: query)
+                    if !rows.isEmpty {
+                        merged = Self.mergedUnique(merged + rows)
+                        diagnostics.nativeCounts["piratebay"] = backendCount + rows.count
+                        diagnostics.nativeErrors.removeValue(forKey: "piratebay")
+                        NSLog("Native Pirate Bay supplement added \(rows.count) rows")
+                    }
+                } catch {
+                    if diagnostics.nativeErrors["piratebay"] == nil {
+                        diagnostics.nativeErrors["piratebay"] = error.localizedDescription
+                    }
+                    NSLog("Native Pirate Bay supplement failed: \(error.localizedDescription)")
+                }
+            }
+        }
+
+        if enabledIDs.contains("torrentio"), let imdbId, !imdbId.isEmpty {
+            let backendFailed = diagnostics.torrentioError != nil
+            if diagnostics.torrentioCount == 0 || backendFailed {
+                diagnostics.torrentioAttempted = true
+                do {
+                    let rows = try await torrentioFallback.search(imdbId: imdbId, kind: kind)
+                    if !rows.isEmpty {
+                        merged = Self.mergedUnique(merged + rows)
+                        diagnostics.torrentioCount += rows.count
+                        diagnostics.torrentioError = nil
+                        NSLog("Native Torrentio supplement added \(rows.count) rows")
+                    }
+                } catch {
+                    if diagnostics.torrentioError == nil {
+                        diagnostics.torrentioError = error.localizedDescription
+                    }
+                    NSLog("Native Torrentio supplement failed: \(error.localizedDescription)")
+                }
+            }
+        }
+
+        return merged
+    }
+
     private static func merged(_ batches: [[TorrentResult]]) -> [TorrentResult] {
+        mergedUnique(batches.flatMap { $0 })
+    }
+
+    private static func mergedUnique(_ results: [TorrentResult]) -> [TorrentResult] {
         var byHash: [String: TorrentResult] = [:]
         var unhashed: [TorrentResult] = []
-        for batch in batches {
-            for result in batch {
-                if let hash = result.infoHash?.lowercased() {
-                    if let existing = byHash[hash] {
-                        if result.seeders > existing.seeders {
-                            byHash[hash] = result
-                        }
-                    } else {
+        for result in results {
+            if let hash = result.resolvedInfoHash {
+                if let existing = byHash[hash] {
+                    if result.seeders > existing.seeders {
                         byHash[hash] = result
                     }
                 } else {
-                    unhashed.append(result)
+                    byHash[hash] = result
                 }
+            } else {
+                unhashed.append(result)
             }
         }
         return Array(byHash.values) + unhashed
