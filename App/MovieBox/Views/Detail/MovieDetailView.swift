@@ -39,6 +39,8 @@ struct MovieDetailView: View {
     @State private var isLoadingTorrents = false
     @State private var torrentSearchTask: Task<Void, Never>?
     @State private var torrentSearchGeneration = 0
+    @State private var subtitleSearchTask: Task<Void, Never>?
+    @State private var subtitleSearchGeneration = 0
     @State private var tvSeasonsLoadFailed = false
     private let movieId: Int
     private let kind: MediaKind
@@ -182,26 +184,30 @@ struct MovieDetailView: View {
             let loadedDetail = try await client.movieDetail(id: movieId, kind: kind)
             detail = loadedDetail
 
-            isLoadingSubtitles = true
-            Task {
-                let subs = await MovieDetailLoader.loadSubtitles(
-                    detail: loadedDetail,
-                    kind: kind,
-                    settings: settings.first
-                )
-                await MainActor.run {
-                    subtitles = subs
-                    isLoadingSubtitles = false
-                    if subs.isEmpty {
-                        if MovieDetailLoader.subtitleServiceMode(from: settings.first) == nil {
-                            subtitleLoadHint = "Add your MovieBox backend URL and app token in Settings."
+            if kind != .tv {
+                isLoadingSubtitles = true
+                Task {
+                    let subs = await MovieDetailLoader.loadSubtitles(
+                        detail: loadedDetail,
+                        kind: kind,
+                        settings: settings.first
+                    )
+                    await MainActor.run {
+                        subtitles = subs
+                        isLoadingSubtitles = false
+                        if subs.isEmpty {
+                            if MovieDetailLoader.subtitleServiceMode(from: settings.first) == nil {
+                                subtitleLoadHint = "Add your MovieBox backend URL and app token in Settings."
+                            } else {
+                                subtitleLoadHint = nil
+                            }
                         } else {
                             subtitleLoadHint = nil
                         }
-                    } else {
-                        subtitleLoadHint = nil
                     }
                 }
+            } else {
+                isLoadingSubtitles = false
             }
 
             if kind == .tv {
@@ -332,10 +338,17 @@ struct MovieDetailView: View {
         selectedTVEpisode = episode
         if isUpcomingEpisode(episode) {
             torrentSearchTask?.cancel()
+            subtitleSearchTask?.cancel()
             torrents = []
+            subtitles = []
+            subtitleFileURL = nil
+            selectedSubtitle = nil
             return
         }
         startTorrentSearch(episode: episode)
+        if let movie = detail?.movie {
+            searchSubtitles(for: movie, episode: episode)
+        }
     }
 
     private func startTorrentSearch(episode: TVEpisode? = nil) {
@@ -459,30 +472,55 @@ struct MovieDetailView: View {
         try? modelContext.save()
     }
 
-    private func searchSubtitles(for movie: Movie) {
-        Task {
-            isLoadingSubtitles = true
+    private func searchSubtitles(for movie: Movie, episode: TVEpisode? = nil) {
+        subtitleSearchTask?.cancel()
+        subtitleSearchGeneration += 1
+        let generation = subtitleSearchGeneration
+        subtitleSearchTask = Task {
+            await MainActor.run {
+                isLoadingSubtitles = true
+                subtitles = []
+                subtitleFileURL = nil
+                selectedSubtitle = nil
+            }
             do {
                 guard let mode = MovieDetailLoader.subtitleServiceMode(from: settings.first) else {
-                    subtitleLoadHint = "Add your MovieBox backend URL and app token in Settings."
-                    errorMessage = "Configure the MovieBox backend in Settings to search subtitles."
+                    await MainActor.run {
+                        guard generation == subtitleSearchGeneration else { return }
+                        subtitleLoadHint = "Add your MovieBox backend URL and app token in Settings."
+                        errorMessage = "Configure the MovieBox backend in Settings to search subtitles."
+                        isLoadingSubtitles = false
+                    }
                     return
                 }
                 let year = Int(movie.releaseDate.prefix(4))
                 let client = SubtitleClient(mode: mode)
-                subtitles = try await client.searchSubtitles(
+                let activeEpisode = episode ?? selectedTVEpisode
+                let results = try await client.searchSubtitles(
                     title: movie.title,
                     year: year,
                     language: "all",
                     type: kind == .tv ? "tv" : "movie",
                     imdbId: detail?.imdbId,
-                    tmdbId: movieId
+                    tmdbId: movieId,
+                    seasonNumber: kind == .tv ? activeEpisode?.seasonNumber : nil,
+                    episodeNumber: kind == .tv ? activeEpisode?.episodeNumber : nil
                 )
-                if !subtitles.isEmpty { subtitleLoadHint = nil }
+                await MainActor.run {
+                    guard generation == subtitleSearchGeneration else { return }
+                    subtitles = results
+                    if !results.isEmpty { subtitleLoadHint = nil }
+                }
             } catch {
-                subtitleLoadHint = error.localizedDescription
+                await MainActor.run {
+                    guard generation == subtitleSearchGeneration else { return }
+                    subtitleLoadHint = error.localizedDescription
+                }
             }
-            isLoadingSubtitles = false
+            await MainActor.run {
+                guard generation == subtitleSearchGeneration else { return }
+                isLoadingSubtitles = false
+            }
         }
     }
 

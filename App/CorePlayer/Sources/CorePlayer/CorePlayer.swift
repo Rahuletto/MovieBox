@@ -122,6 +122,7 @@ public final class PlayerState {
     /// Seek here once the item is `readyToPlay` (continue watching).
     public var pendingResumePosition: Double?
     private var isApplyingResumeSeek = false
+    private var initialSeekApplied = false
 
     var legibleSelectionGroup: AVMediaSelectionGroup?
 
@@ -1063,6 +1064,7 @@ public final class PlayerState {
         presentationTransitionTask?.cancel()
         presentationTransitionTask = nil
         isApplyingResumeSeek = false
+        initialSeekApplied = false
         stopFastScan()
         stopStreamBufferPolling()
         deactivateMediaCommands()
@@ -1502,40 +1504,70 @@ public final class PlayerState {
 
     private func tryApplyPendingResume() {
         guard isPresented, userWantsPlayback else { return }
-        guard let resume = pendingResumePosition, resume > 20 else { return }
-        guard !isApplyingResumeSeek else { return }
         guard let resumeItem = observedPlayerItem, resumeItem.status == .readyToPlay else { return }
-        if (streamsFromLocalTorrentServer || isStreamingTorrent), !isResumePositionBuffered(resume) { return }
+        guard !isApplyingResumeSeek else { return }
 
-        isApplyingResumeSeek = true
-        pendingResumePosition = nil
-        isBuffering = true
-        player.pause()
+        if let resume = pendingResumePosition, resume > 20 {
+            if (streamsFromLocalTorrentServer || isStreamingTorrent), !isResumePositionBuffered(resume) { return }
 
-        let target = CMTime(seconds: resume, preferredTimescale: 600)
-        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                guard resumeItem === self.observedPlayerItem else {
+            isApplyingResumeSeek = true
+            pendingResumePosition = nil
+            isBuffering = true
+            player.pause()
+
+            let target = CMTime(seconds: resume, preferredTimescale: 600)
+            player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    guard resumeItem === self.observedPlayerItem else {
+                        self.isApplyingResumeSeek = false
+                        return
+                    }
                     self.isApplyingResumeSeek = false
-                    return
+                    guard finished else {
+                        self.pendingResumePosition = resume
+                        self.updateBufferingState()
+                        return
+                    }
+                    self.currentTime = resume
+                    self.peakPlaybackTime = max(self.peakPlaybackTime, resume)
+                    self.lastSubtitleSyncTime = -1
+                    self.updateSubtitle(at: resume, force: true)
+                    PlaybackLog.log("resume at \(Int(resume))s before playback")
+                    if self.userWantsPlayback {
+                        self.player.playImmediately(atRate: Float(self.playbackRate))
+                        self.isBuffering = false
+                        self.updateBufferingState()
+                        self.publishNowPlayingIfNeeded(force: true)
+                    }
                 }
-                self.isApplyingResumeSeek = false
-                guard finished else {
-                    self.pendingResumePosition = resume
-                    self.updateBufferingState()
-                    return
-                }
-                self.currentTime = resume
-                self.peakPlaybackTime = max(self.peakPlaybackTime, resume)
-                self.lastSubtitleSyncTime = -1
-                self.updateSubtitle(at: resume, force: true)
-                PlaybackLog.log("resume at \(Int(resume))s before playback")
-                if self.userWantsPlayback {
-                    self.player.playImmediately(atRate: Float(self.playbackRate))
-                    self.isBuffering = false
-                    self.updateBufferingState()
-                    self.publishNowPlayingIfNeeded(force: true)
+            }
+        } else if (streamsFromLocalTorrentServer || isStreamingTorrent), !initialSeekApplied {
+            initialSeekApplied = true
+            isApplyingResumeSeek = true
+            isBuffering = true
+            player.pause()
+
+            let target = CMTime.zero
+            player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    guard resumeItem === self.observedPlayerItem else {
+                        self.isApplyingResumeSeek = false
+                        return
+                    }
+                    self.isApplyingResumeSeek = false
+                    self.currentTime = 0
+                    self.peakPlaybackTime = 0
+                    self.lastSubtitleSyncTime = -1
+                    self.updateSubtitle(at: 0, force: true)
+                    PlaybackLog.log("force initial seek to 0s to prevent HLS live-edge offset")
+                    if self.userWantsPlayback {
+                        self.player.playImmediately(atRate: Float(self.playbackRate))
+                        self.isBuffering = false
+                        self.updateBufferingState()
+                        self.publishNowPlayingIfNeeded(force: true)
+                    }
                 }
             }
         }
