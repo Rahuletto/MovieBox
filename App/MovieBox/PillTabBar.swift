@@ -287,7 +287,8 @@ struct PillTabBar: View {
     }
 
     private var currentTopLevelRoute: AppRouter.Route? {
-        router.selectedRoute.isTopLevelTab ? router.selectedRoute : nil
+        guard !router.isShowingDetail else { return nil }
+        return router.activeTab
     }
 
     private func commitSearchQueryIfNeeded() {

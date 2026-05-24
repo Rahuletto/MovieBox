@@ -15,6 +15,7 @@ struct AppShellView: View {
     @Query private var settings: [AppSettings]
     @State private var didAttachPersistence = false
     @State private var showsReplaceStreamConfirmation = false
+    @State private var didApplyLaunchTab = false
     @Namespace private var streamPillNamespace
 
     private var persistentPlayback: PersistentPlaybackController {
@@ -101,6 +102,7 @@ struct AppShellView: View {
         .watchHistoryTracking()
         .onAppear {
             TorrentBackendSync.apply(from: settings.first)
+            applyLaunchTabIfNeeded()
         }
         .task {
             AppBootstrap.runInitialSetup(
@@ -118,6 +120,7 @@ struct AppShellView: View {
                 }
                 TorrentBackendSync.apply(from: settings)
             }
+            applyLaunchTabIfNeeded()
         }
         .overlay(alignment: .top) {
             AppErrorBanner()
@@ -173,6 +176,14 @@ struct AppShellView: View {
         Task {
             await appServices.cancelActiveStream()
         }
+    }
+
+    /// macOS window restoration can reopen the last tab (e.g. Library); always land on Home for a fresh session.
+    private func applyLaunchTabIfNeeded() {
+        guard !didApplyLaunchTab else { return }
+        didApplyLaunchTab = true
+        guard !router.isShowingDetail else { return }
+        router.show(.home)
     }
 }
 

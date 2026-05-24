@@ -591,9 +591,7 @@ public final class PlayerState {
     }
 
     private func setHUDStatusPill(_ pill: PlayerHUDStatusPillModel?) {
-        withAnimation(.playerHUDStatusPill) {
-            hudStatusPill = pill
-        }
+        hudStatusPill = pill
     }
 
     private func presentVideoGravityHUDPill() {
@@ -1321,9 +1319,7 @@ public final class PlayerState {
                 let multiplier = ticks >= 7 ? 4 : 2
                 await MainActor.run {
                     let icon = forward ? "forward.fill" : "backward.fill"
-                    withAnimation(.playerHUDStatusPill) {
-                        self.hudStatusPill = .fastScan(icon: icon, multiplier: multiplier)
-                    }
+                    self.hudStatusPill = .fastScan(icon: icon, multiplier: multiplier)
                     let delta = Double(multiplier * 6) * (forward ? 1 : -1)
                     self.seek(by: delta)
                 }
@@ -2017,13 +2013,6 @@ public struct PlayerView<
                     .zIndex(5)
             }
 
-            if let pill = state.hudStatusPill {
-                PlayerHUDStatusPill(model: pill)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    .padding(.top, 72)
-                    .transition(.opacity)
-            }
-
             // Beautiful, floating glassmorphic IINA top bar
             topHUD
                 .opacity(state.showsControls ? 1 : 0)
@@ -2079,7 +2068,11 @@ public struct PlayerView<
             )
         )
         .compositingGroup()
-        .animation(.playerHUDStatusPill, value: state.hudStatusPill)
+        .overlay(alignment: .top) {
+            if !state.isPlaybackChromeHidden {
+                PlayerHUDStatusPillOverlay(pill: state.hudStatusPill)
+            }
+        }
     }
 
     @ViewBuilder
