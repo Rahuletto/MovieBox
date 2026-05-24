@@ -27,10 +27,12 @@ public actor PieceManager {
     private var receivedBlockOffsets: [UInt32: Set<UInt32>] = [:]
     /// Pieces AVPlayer recently requested via range reads (newest first).
     private var playerHotPieces: [UInt32] = []
+    private var playbackAnchorPiece: UInt32?
     private var indexBootstrapCompleted = false
 
-    private static let maxHotPieces = 32
-    private static let readAheadPieceCount = 3
+    private static let criticalReadAheadPieceCount = 4
+    private static let warmReadAheadPieceCount = 16
+    private static let maxHotPieces = criticalReadAheadPieceCount + warmReadAheadPieceCount + 8
 
     public init(
         pieceCount: Int,
@@ -184,11 +186,19 @@ public actor PieceManager {
         let indices = pieceIndicesCovering(mediaOffset: mediaOffset, length: length)
         guard !indices.isEmpty else { return }
 
-        var expanded = indices
+        playbackAnchorPiece = indices.first
+
+        var expanded: [UInt32] = []
+        for index in indices {
+            if !expanded.contains(index) {
+                expanded.append(index)
+            }
+        }
         if let last = indices.last {
-            for ahead in 1...Self.readAheadPieceCount {
+            for ahead in 1...Self.warmReadAheadPieceCount {
                 let next = last + UInt32(ahead)
                 guard Int(next) < pieceCount else { break }
+                guard next <= UInt32(streamLastPiece) else { break }
                 expanded.append(next)
             }
         }
@@ -206,24 +216,66 @@ public actor PieceManager {
         playerHotPieces.count
     }
 
-    /// Until head + tail index pieces are verified, never fall back to middle-of-file pieces
-    /// (peers without end-of-file in bitfield would otherwise pull piece 1, 2, … forever).
+    /// Pick per-peer work from the player's sliding window first, then bootstrap metadata,
+    /// then a bounded sequential fallback so peers keep contributing without racing far ahead.
     private func earliestIncompletePiece(peerBitfield: Data) -> UInt32? {
-        // 1. Try bootstrap priority list constrained to this peer's bitfield
+        if let p = firstIncompletePiece(in: buildPlaybackPriorityOrder(), peerBitfield: peerBitfield) {
+            return p
+        }
+
         if needsIndexBootstrap() {
             if let p = firstIncompletePiece(in: buildBootstrapPriorityOrder(), peerBitfield: peerBitfield) {
                 return p
             }
-            // 2. Fall through: pick the lowest-index missing piece this peer has
-            return firstSequentialMissing(peerBitfield: peerBitfield)
+            return firstWarmSequentialMissing(peerBitfield: peerBitfield)
+                ?? firstSequentialMissing(peerBitfield: peerBitfield)
         }
 
         return firstIncompletePiece(in: buildFullPriorityOrder(), peerBitfield: peerBitfield)
             ?? firstSequentialMissing(peerBitfield: peerBitfield)
     }
 
+    private func buildPlaybackPriorityOrder() -> [UInt32] {
+        guard let playbackAnchorPiece else { return playerHotPieces }
+        var priority: [UInt32] = []
+        func append(_ index: UInt32) {
+            guard Int(index) >= streamFirstPiece, Int(index) <= streamLastPiece else { return }
+            guard !priority.contains(index) else { return }
+            priority.append(index)
+        }
+
+        for index in playerHotPieces.prefix(Self.criticalReadAheadPieceCount + 1) {
+            append(index)
+        }
+
+        for offset in 0...Self.criticalReadAheadPieceCount {
+            append(playbackAnchorPiece + UInt32(offset))
+        }
+
+        for index in playerHotPieces.dropFirst(Self.criticalReadAheadPieceCount + 1) {
+            append(index)
+        }
+        return priority
+    }
+
+    private func firstWarmSequentialMissing(peerBitfield: Data) -> UInt32? {
+        guard let playbackAnchorPiece else { return nil }
+        let start = max(streamFirstPiece, Int(playbackAnchorPiece))
+        let end = min(streamLastPiece, start + Self.warmReadAheadPieceCount)
+        guard start <= end else { return nil }
+        for i in start...end {
+            let idx = UInt32(i)
+            if downloadedPieces.contains(idx) { continue }
+            if !peerBitfield.isEmpty, !peerHasPiece(idx, in: peerBitfield) { continue }
+            return idx
+        }
+        return nil
+    }
+
     private func firstSequentialMissing(peerBitfield: Data) -> UInt32? {
-        for i in streamFirstPiece..<pieceCount {
+        let end = min(streamLastPiece, pieceCount - 1)
+        guard streamFirstPiece <= end else { return nil }
+        for i in streamFirstPiece...end {
             let idx = UInt32(i)
             if downloadedPieces.contains(idx) { continue }
             if !peerBitfield.isEmpty, !peerHasPiece(idx, in: peerBitfield) { continue }

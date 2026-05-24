@@ -260,34 +260,8 @@ public final class StreamingOrchestrator: @unchecked Sendable {
 
     public func hasMinimumPlaybackHead() async -> Bool {
         guard let pieceStore, let target = streamTarget else { return false }
-        let ext = (target.file.relativePath as NSString).pathExtension.lowercased()
-        let isMKV = ext == "mkv" || ext == "webm" || target.contentType.contains("matroska")
-
-        if isMKV {
-            await boostMKVIndexRegionsIfNeeded()
-        }
-
-        let headReady: Bool
-        if isMKV {
-            let contiguousHead = await pieceStore.streamHeadContiguousBytes()
-            let verifiedHead = await pieceStore.verifiedMediaBytesFromStart()
-            headReady = contiguousHead >= StreamPlaybackThreshold.minimumContiguousHeadBytesForMKV
-                && verifiedHead >= StreamPlaybackThreshold.minimumHeadBytesForMKV
-        } else {
-            let contiguousHead = await pieceStore.streamHeadContiguousBytes()
-            let verifiedHead = await pieceStore.verifiedMediaBytesFromStart()
-            headReady = contiguousHead >= StreamPlaybackThreshold.minimumContiguousHeadBytesForMP4
-                || verifiedHead >= StreamPlaybackThreshold.minimumContiguousHeadBytesForMP4
-        }
-
-        guard headReady else { return false }
-
-        if isMKV {
-            guard await hasReadableStreamTailIndex() else { return false }
-        } else if target.needsMP4MoovTailProbe, await !headLikelyContainsMP4Moov() {
-            guard await hasReadableStreamTailIndex() else { return false }
-        }
-
+        let headBytes = await pieceStore.verifiedMediaBytesFromStart()
+        guard headBytes >= minimumHeadBytes(for: target) else { return false }
         await pieceManager?.setIndexBootstrapCompleted()
         return true
     }

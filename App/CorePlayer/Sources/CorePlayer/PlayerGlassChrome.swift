@@ -18,20 +18,31 @@ struct PlayerGlassChromeModifier: ViewModifier {
     let shape: PlayerGlassShape
     let strength: PlayerGlassStrength
     let interactive: Bool
+    let isActive: Bool
 
     func body(content: Content) -> some View {
+        let styledContent = content
+            .foregroundStyle(isActive ? .black : .primary)
+
         if #available(macOS 26.0, *) {
             let glass: Glass = interactive ? .regular.interactive() : .regular
             switch shape {
             case .circle:
-                content.glassEffect(glass, in: .circle)
+                styledContent
+                    .background(isActive ? Color.white : Color.clear, in: Circle())
+                    .glassEffect(glass, in: .circle)
             case .capsule:
-                content.glassEffect(glass, in: .capsule)
+                styledContent
+                    .background(isActive ? Color.white : Color.clear, in: Capsule(style: .continuous))
+                    .glassEffect(glass, in: .capsule)
             case .roundedRect(let cornerRadius):
-                content.glassEffect(glass, in: .rect(cornerRadius: cornerRadius, style: .continuous))
+                let rect = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                styledContent
+                    .background(isActive ? Color.white : Color.clear, in: rect)
+                    .glassEffect(glass, in: .rect(cornerRadius: cornerRadius, style: .continuous))
             }
         } else {
-            playerGlassFallback(content: content)
+            playerGlassFallback(content: styledContent)
         }
     }
 
@@ -47,20 +58,17 @@ struct PlayerGlassChromeModifier: ViewModifier {
         switch shape {
         case .circle:
             content
-                .foregroundStyle(.primary)
-                .background(fallbackMaterial, in: Circle())
-                .overlay(Circle().strokeBorder(.primary.opacity(0.15), lineWidth: 0.6))
+                .background(isActive ? AnyShapeStyle(Color.white) : AnyShapeStyle(fallbackMaterial), in: Circle())
+                .overlay(Circle().strokeBorder((isActive ? Color.white : Color.primary.opacity(0.15)), lineWidth: 0.6))
         case .capsule:
             content
-                .foregroundStyle(.primary)
-                .background(fallbackMaterial, in: Capsule(style: .continuous))
-                .overlay(Capsule(style: .continuous).strokeBorder(.primary.opacity(0.15), lineWidth: 0.6))
+                .background(isActive ? AnyShapeStyle(Color.white) : AnyShapeStyle(fallbackMaterial), in: Capsule(style: .continuous))
+                .overlay(Capsule(style: .continuous).strokeBorder((isActive ? Color.white : Color.primary.opacity(0.15)), lineWidth: 0.6))
         case .roundedRect(let cornerRadius):
             let rect = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
             content
-                .foregroundStyle(.primary)
-                .background(fallbackMaterial, in: rect)
-                .overlay(rect.strokeBorder(.primary.opacity(0.15), lineWidth: 0.6))
+                .background(isActive ? AnyShapeStyle(Color.white) : AnyShapeStyle(fallbackMaterial), in: rect)
+                .overlay(rect.strokeBorder((isActive ? Color.white : Color.primary.opacity(0.15)), lineWidth: 0.6))
         }
     }
 }
@@ -70,9 +78,10 @@ public extension View {
     func playerGlassChrome(
         _ shape: PlayerGlassShape = .roundedRect(cornerRadius: 12),
         strength: PlayerGlassStrength = .thick,
-        interactive: Bool = true
+        interactive: Bool = true,
+        isActive: Bool = false
     ) -> some View {
-        modifier(PlayerGlassChromeModifier(shape: shape, strength: strength, interactive: interactive))
+        modifier(PlayerGlassChromeModifier(shape: shape, strength: strength, interactive: interactive, isActive: isActive))
     }
 
     /// SF Symbols on glass — hierarchical rendering adapts to light/dark glass foreground.
