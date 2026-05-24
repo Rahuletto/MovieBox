@@ -9,6 +9,9 @@ public actor RemuxService {
 
     public init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
+        Task {
+            await pruneGlobalHLSCache()
+        }
     }
 
     public func probe(inputURL: URL) async throws -> MediaProbe {
@@ -245,18 +248,57 @@ public actor RemuxService {
         return outputData
     }
 
-    private func hlsOutputDirectory(cacheKey: String) throws -> URL {
+    private func hlsParentDirectory() throws -> URL {
         let baseURL = try fileManager.url(
             for: .cachesDirectory,
             in: .userDomainMask,
             appropriateFor: nil,
             create: true
         )
-        let safeKey = Self.sanitizeCacheKey(cacheKey)
         return baseURL
             .appendingPathComponent("com.marban.MovieBox", isDirectory: true)
             .appendingPathComponent("HLS", isDirectory: true)
-            .appendingPathComponent(safeKey, isDirectory: true)
+    }
+
+    private func hlsOutputDirectory(cacheKey: String) throws -> URL {
+        let parent = try hlsParentDirectory()
+        let safeKey = Self.sanitizeCacheKey(cacheKey)
+        return parent.appendingPathComponent(safeKey, isDirectory: true)
+    }
+
+    private func pruneGlobalHLSCache() {
+        do {
+            let parent = try hlsParentDirectory()
+            guard fileManager.fileExists(atPath: parent.path) else { return }
+            let contents = try fileManager.contentsOfDirectory(
+                at: parent,
+                includingPropertiesForKeys: [.contentModificationDateKey]
+            )
+            let now = Date()
+            var prunedCount = 0
+            for url in contents {
+                var isDirectory: ObjCBool = false
+                guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else { continue }
+                
+                if let resourceValues = try? url.resourceValues(forKeys: [.contentModificationDateKey]),
+                   let modDate = resourceValues.contentModificationDate {
+                    let age = now.timeIntervalSince(modDate)
+                    // Clean directories older than 24 hours (86,400 seconds)
+                    if age > 86400 {
+                        try? fileManager.removeItem(at: url)
+                        prunedCount += 1
+                    }
+                } else {
+                    try? fileManager.removeItem(at: url)
+                    prunedCount += 1
+                }
+            }
+            if prunedCount > 0 {
+                TorrentLog.info("[Remux] Cleaned up \(prunedCount) stale HLS cache directories from previous sessions.")
+            }
+        } catch {
+            TorrentLog.warn("[Remux] Global HLS cache pruning failed: \(error.localizedDescription)")
+        }
     }
 
     private func removeStaleHLSFiles(in directory: URL) throws {
