@@ -63,6 +63,10 @@ struct SettingsView: View {
             draft.apply(to: newSettings)
             modelContext.insert(newSettings)
         }
+        if let first = settingsRows.first {
+            MovieBoxFileLogger.isDebugLoggingEnabled = first.debugLogging
+            PlaybackLog.isEnabled = first.debugLogging
+        }
         do {
             try modelContext.save()
         } catch {

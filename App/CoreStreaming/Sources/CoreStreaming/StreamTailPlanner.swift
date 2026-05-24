@@ -1,6 +1,6 @@
 import Foundation
 
-/// Piece prioritisation for streaming (first + last 1% per FINDINGS / qBittorrent-style).
+/// Piece prioritisation for streaming (first + last 1% per qBittorrent-style).
 public enum StreamTailPlanner {
     private static let tailPercent: Double = 0.01
 
@@ -12,7 +12,7 @@ public enum StreamTailPlanner {
         let ext = (target.file.relativePath as NSString).pathExtension.lowercased()
         let isMatroska = ext == "mkv" || ext == "webm" || target.contentType.contains("matroska")
         if isMatroska {
-            // MKV Cues often span the last 8–16 MB (FINDINGS; Interstellar/Off Campus -11828 at play).
+            // MKV Cues often span the last 8–16 MB (Interstellar/Off Campus -11828 at play).
             return min(target.byteLength, max(16 * 1024 * 1024, Int64(Double(target.byteLength) * 0.02)))
         }
         return max(pieceLength * 2, Int64(Double(target.byteLength) * percent))

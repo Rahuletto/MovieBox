@@ -2,7 +2,7 @@ import Foundation
 
 /// AVPlayer / stream URL diagnostics — always written to `~/Library/Logs/MovieBox/moviebox.log`.
 public enum PlaybackLog {
-    public static let isEnabled = true
+    nonisolated(unsafe) public static var isEnabled = false
 
     public static func log(_ message: String) {
         guard isEnabled else { return }

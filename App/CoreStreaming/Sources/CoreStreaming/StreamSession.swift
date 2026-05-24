@@ -314,7 +314,7 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
 
         let verifiedHeadBytes = await orchestrator.verifiedMediaBytesFromStart()
         let inFlightHeadBytes = await orchestrator.streamHeadContiguousBytes()
-        // FINDINGS Tier 1 #3: no moov-on-disk gate — piece 0 verified (MP4) or MKV head threshold.
+        // No moov-on-disk gate — piece 0 verified (MP4) or MKV head threshold.
         let hasEnoughHead = await orchestrator.hasMinimumPlaybackHead()
 
         if hasEnoughHead {
