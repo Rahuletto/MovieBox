@@ -1,5 +1,5 @@
 import type { SearchContext, TorrentIndexer, TorrentSearchHit } from '../types'
-import { decodeHtml, fetchHTML, fetchJSON, magnetFor } from '../utils'
+import { decodeHtml, fetchHTML, fetchJSON, magnetFor, searchWithQueryVariants } from '../utils'
 
 interface YTSWebResult {
   id: number
@@ -188,15 +188,16 @@ export const ytsIndexer: TorrentIndexer = {
   },
 
   async search(ctx) {
-    const q = ctx.query
-    try {
-      const web = await searchYTSWeb(q, ctx.year)
-      if (web.length) return web
-    } catch {
-      /* fall through */
-    }
-    const browse = await searchYTSBrowse(q)
-    if (browse.length) return browse
-    return searchYTSListMovies(q)
+    return searchWithQueryVariants(ctx.query, ctx.year, async (query) => {
+      try {
+        const web = await searchYTSWeb(query, ctx.year)
+        if (web.length) return web
+      } catch {
+        /* fall through */
+      }
+      const browse = await searchYTSBrowse(query)
+      if (browse.length) return browse
+      return searchYTSListMovies(query)
+    })
   },
 }

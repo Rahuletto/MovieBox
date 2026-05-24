@@ -64,7 +64,7 @@ export const torrentioIndexer: TorrentIndexer = {
           })
       }
       if (data === null) {
-        lastError = `Torrentio fetch failed for ${url}`
+        lastError = 'Torrentio unreachable'
       }
     }
 

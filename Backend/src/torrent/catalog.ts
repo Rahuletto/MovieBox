@@ -127,14 +127,14 @@ export const INDEXER_CATALOG: IndexerCatalogEntry[] = [
     name: 'Torrent Download',
     description: 'Clean search interface, good coverage',
     kinds: ['movie', 'tv'],
-    defaultEnabled: false,
+    defaultEnabled: true,
   },
   {
     id: 'bitsearch',
     name: 'Bitsearch',
     description: 'Modern aggregator with high seeders',
     kinds: ['movie', 'tv'],
-    defaultEnabled: false,
+    defaultEnabled: true,
   },
 ]
 

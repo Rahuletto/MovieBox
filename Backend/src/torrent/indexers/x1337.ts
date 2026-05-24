@@ -5,6 +5,7 @@ import {
   hashFromMagnet,
   parseSizeBytes,
   resolveQualityLabel,
+  searchWithQueryVariants,
 } from '../utils'
 
 export interface Row1337x {
@@ -137,12 +138,14 @@ export const x1337Indexer: TorrentIndexer = {
     const category = ctx.kind === 'tv' ? 'TV' : 'Movies'
     const hosts = ['https://1337xx.to', 'https://1337x.to', 'https://1337x.st', 'https://x1337x.ws']
 
-    for (const base of hosts) {
-      const rows = await search1337xHost(base, ctx.query, category)
-      if (rows.length) return rows
-      const generic = await search1337xHost(base, ctx.query)
-      if (generic.length) return generic
-    }
-    return []
+    return searchWithQueryVariants(ctx.query, ctx.year, async (query) => {
+      for (const base of hosts) {
+        const rows = await search1337xHost(base, query, category)
+        if (rows.length) return rows
+        const generic = await search1337xHost(base, query)
+        if (generic.length) return generic
+      }
+      return []
+    })
   },
 }

@@ -44,6 +44,93 @@ export function sanitizeQuery(title: string, year?: number | null): string {
   return cleaned
 }
 
+const SEARCH_STOP_WORDS = new Set([
+  'the',
+  'a',
+  'an',
+  'and',
+  'or',
+  'of',
+  'in',
+  'to',
+  'for',
+  'with',
+  'at',
+  'from',
+  'by',
+  'on',
+  'as',
+  'is',
+  'it',
+  'vs',
+])
+
+/** Alternate text queries — long franchise titles often index under shorter names. */
+export function searchQueryVariants(query: string, year?: number | null): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  const add = (value: string) => {
+    const trimmed = value.replace(/\s+/g, ' ').trim()
+    const key = trimmed.toLowerCase()
+    if (trimmed.length >= 4 && !seen.has(key)) {
+      seen.add(key)
+      out.push(trimmed)
+    }
+  }
+
+  add(query)
+
+  let base = query.replace(/\s(19|20)\d{2}$/, '').trim()
+  const trailingYear = query.match(/\s((19|20)\d{2})$/)
+  const resolvedYear =
+    year ??
+    (trailingYear ? parseInt(trailingYear[1], 10) : null)
+
+  const colonIdx = base.indexOf(':')
+  if (colonIdx > 0) {
+    const afterColon = base.slice(colonIdx + 1).trim()
+    if (afterColon.length >= 4) {
+      add(sanitizeQuery(afterColon, resolvedYear))
+      add(
+        afterColon
+          .replace(/\b(the|a|an|and|of|in|for|with)\b/gi, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+      )
+    }
+  }
+
+  const deStop = base
+    .replace(/\b(the|a|an|and|of|in|for|with)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (deStop.length >= 6) add(deStop)
+
+  const words = base
+    .split(/\s+/)
+    .map((w) => w.replace(/[^a-zA-Z0-9]/g, ''))
+    .filter((w) => w.length > 2 && !SEARCH_STOP_WORDS.has(w.toLowerCase()))
+
+  if (words.length >= 2) add(words.slice(-2).join(' '))
+  if (words.length >= 3) add(words.slice(-3).join(' '))
+
+  return out
+}
+
+/** Try several query strings until one returns rows (used by text indexers). */
+export async function searchWithQueryVariants(
+  query: string,
+  year: number | null | undefined,
+  searchOne: (q: string) => Promise<TorrentSearchHit[]>
+): Promise<TorrentSearchHit[]> {
+  for (const variant of searchQueryVariants(query, year)) {
+    // eslint-disable-next-line no-await-in-loop
+    const rows = await searchOne(variant)
+    if (rows.length) return rows
+  }
+  return []
+}
+
 export function normalizeImdb(raw?: string | null): string | null {
   if (!raw) return null
   let value = raw.trim()

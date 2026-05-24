@@ -26,7 +26,9 @@ public struct BackendTorrentConfig: Sendable {
 
 public enum TorrentIndexerPreferences {
     /// Legacy fallback when the backend catalog is unavailable.
-    public static let defaultIDs: Set<String> = ["torrentio", "yts", "eztv", "piratebay", "1337x"]
+    public static let defaultIDs: Set<String> = [
+        "torrentio", "yts", "eztv", "piratebay", "1337x", "bitsearch", "torrentdownload",
+    ]
 
     /// Parses a comma-separated indexer list. An empty string means all disabled.
     /// When `knownIDs` is provided, unknown ids are dropped (stale entries after catalog changes).

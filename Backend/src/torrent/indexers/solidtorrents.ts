@@ -1,5 +1,5 @@
 import type { SearchContext, TorrentIndexer, TorrentSearchHit } from '../types'
-import { fetchJSON, magnetFor, resolveQualityLabel } from '../utils'
+import { fetchJSON, magnetFor, resolveQualityLabel, searchWithQueryVariants } from '../utils'
 
 interface SolidTorrent {
   name: string
@@ -21,33 +21,35 @@ export const solidTorrentsIndexer: TorrentIndexer = {
   },
 
   async search(ctx: SearchContext): Promise<TorrentSearchHit[]> {
-    const url = `https://api.solidtorrents.to/search?q=${encodeURIComponent(ctx.query)}&limit=50`
+    return searchWithQueryVariants(ctx.query, ctx.year, async (query) => {
+      const url = `https://api.solidtorrents.to/search?q=${encodeURIComponent(query)}&limit=50`
 
-    try {
-      const data = await fetchJSON<{ results: SolidTorrent[] }>(url)
+      try {
+        const data = await fetchJSON<{ results: SolidTorrent[] }>(url)
 
-      if (!data?.results?.length) return []
+        if (!data?.results?.length) return []
 
-      return data.results
-        .slice(0, 25)
-        .map((item) => {
-          const hash = item.infohash?.toLowerCase() || ''
-          if (hash.length !== 40) return null
+        return data.results
+          .slice(0, 25)
+          .map((item) => {
+            const hash = item.infohash?.toLowerCase() || ''
+            if (hash.length !== 40) return null
 
-          return {
-            title: item.name,
-            magnetURI: magnetFor(hash, item.name),
-            infoHash: hash,
-            quality: resolveQualityLabel(undefined, item.name),
-            sizeBytes: item.size || 0,
-            seeders: item.swarm?.seeders || 0,
-            leechers: item.swarm?.leechers || 0,
-            trackerSource: 'Solid Torrents',
-          } satisfies TorrentSearchHit
-        })
-        .filter((r): r is TorrentSearchHit => r !== null)
-    } catch {
-      return []
-    }
+            return {
+              title: item.name,
+              magnetURI: magnetFor(hash, item.name),
+              infoHash: hash,
+              quality: resolveQualityLabel(undefined, item.name),
+              sizeBytes: item.size || 0,
+              seeders: item.swarm?.seeders || 0,
+              leechers: item.swarm?.leechers || 0,
+              trackerSource: 'Solid Torrents',
+            } satisfies TorrentSearchHit
+          })
+          .filter((r): r is TorrentSearchHit => r !== null)
+      } catch {
+        return []
+      }
+    })
   },
 }
