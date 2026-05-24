@@ -220,6 +220,7 @@ public final class PeerConnection: ObservableObject {
         let host = NWEndpoint.Host(peerInfo.ip)
 
         let parameters = NWParameters.tcp
+        parameters.serviceClass = .responsiveData
         let tcpOptions = NWProtocolTCP.Options()
         tcpOptions.connectionTimeout = 8
         parameters.defaultProtocolStack.transportProtocol = tcpOptions
@@ -670,7 +671,29 @@ public final class PeerConnection: ObservableObject {
     /// Request more blocks using current `PieceManager` priority (e.g. after AVPlayer seek).
     public func scheduleAdditionalRequests() {
         guard isActive else { return }
-        Task { await requestPieces() }
+        Task { await reprioritizeAndRequestPieces() }
+    }
+
+    private func reprioritizeAndRequestPieces() async {
+        guard let pieceManager else { return }
+        var cancelled: [BlockRequest] = []
+        for request in outstandingRequests {
+            if await !pieceManager.isRequestStillInPlaybackWindow(request) {
+                cancelled.append(request)
+                outstandingRequests.remove(request)
+                requestSentAt.removeValue(forKey: request)
+                let cancel = WireMessage.cancel(
+                    pieceIndex: request.pieceIndex,
+                    offset: request.offset,
+                    length: request.length
+                )
+                sendOutbound(cancel.encode())
+            }
+        }
+        if !cancelled.isEmpty {
+            await pieceManager.recycleRequests(cancelled)
+        }
+        await requestPieces()
     }
 
     private func requestPieces() async {

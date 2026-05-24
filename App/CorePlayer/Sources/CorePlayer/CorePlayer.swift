@@ -1934,6 +1934,7 @@ public struct PlayerView<
     private let transportCapsuleSpacing: CGFloat = 18
     private let transportCapsulePaddingH: CGFloat = 16
     private let transportCapsulePaddingV: CGFloat = 10
+    private let playerTopHUDHorizontalInset: CGFloat = 24
     @Bindable private var state: PlayerState
     @ViewBuilder private var sourcesSidebar: () -> SourcesSidebar
     @ViewBuilder private var subtitlesSidebar: () -> SubtitlesSidebar
@@ -2085,6 +2086,17 @@ public struct PlayerView<
     }
 
     @ViewBuilder
+    private func hudCapsuleSegmentIcon(_ systemName: String, isActive: Bool = false) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: hudChromeIconFont, weight: .semibold))
+            .playerGlassSymbol()
+            .foregroundStyle(isActive ? .black : .primary)
+            .frame(width: 46, height: hudChromeControlSize)
+            .background(isActive ? Color.white : Color.clear, in: Capsule(style: .continuous))
+            .contentShape(Capsule(style: .continuous))
+    }
+
+    @ViewBuilder
     private func transportCapsuleIcon(_ systemName: String) -> some View {
         Image(systemName: systemName)
             .font(.system(size: transportIconFont, weight: .semibold))
@@ -2207,9 +2219,11 @@ public struct PlayerView<
                         Button {
                             state.togglePictureInPicture()
                         } label: {
-                            hudChromeIcon(state.isPictureInPictureActive ? "pip.exit" : "pip.enter")
+                            hudCapsuleSegmentIcon(
+                                state.isPictureInPictureActive ? "pip.exit" : "pip.enter",
+                                isActive: state.isPictureInPictureActive
+                            )
                                 .contentTransition(.symbolEffect(.replace))
-                                .playerGlassChrome(.circle, strength: .thick, isActive: state.isPictureInPictureActive)
                         }
                         .buttonStyle(.plain)
                         .animation(.spring(response: 0.05, dampingFraction: 0.95), value: state.isPictureInPictureActive)
@@ -2218,12 +2232,12 @@ public struct PlayerView<
                             resetControlFade()
                             state.cycleVideoGravity()
                         } label: {
-                            hudChromeIcon("aspectratio")
+                            hudCapsuleSegmentIcon("aspectratio")
                         }
                         .buttonStyle(.plain)
                         .help(state.videoGravityHUDTitle)
                     }
-                    .padding(.horizontal, 6)
+                    .padding(.horizontal, 0)
                     .padding(.vertical, 0)
                     .playerGlassChrome(.capsule, strength: .thick)
                 }
@@ -2257,12 +2271,13 @@ public struct PlayerView<
                         streamStatsAccessory()
                     }
 
-                    HStack(spacing: 12) {
+                    HStack(spacing: 6) {
                         CustomSlider(value: Binding(
                             get: { Double(state.volume) },
                             set: { state.setVolume(Float($0)) }
                         ), range: 0...1)
-                        .frame(width: 80)
+                        .frame(width: 130)
+                        .padding(.leading, 14)
 
                         Button {
                             state.toggleMute()
@@ -2273,7 +2288,10 @@ public struct PlayerView<
                                 iconFont: hudChromeIconFont,
                                 frameSize: hudChromeControlSize
                             )
-                            .playerGlassChrome(.circle, strength: .thick, isActive: state.isMuted)
+                            .foregroundStyle(state.isMuted ? .black : .primary)
+                            .frame(width: 54, height: hudChromeControlSize)
+                            .background(state.isMuted ? Color.white : Color.clear, in: Capsule(style: .continuous))
+                            .contentShape(Capsule(style: .continuous))
                         }
                         .buttonStyle(.plain)
 
@@ -2289,21 +2307,20 @@ public struct PlayerView<
                                     state.isSubtitlesSidebarOpen = false
                                 }
                             } label: {
-                                hudChromeIcon("list.bullet")
+                                hudCapsuleSegmentIcon("list.bullet", isActive: state.isEpisodesSidebarOpen)
                                     .contentTransition(.symbolEffect(.replace))
-                                    .playerGlassChrome(.circle, strength: .thick, isActive: state.isEpisodesSidebarOpen)
                             }
                             .buttonStyle(.plain)
                             .help("Episodes")
                         }
                     }
-                    .padding(.horizontal, 10)
+                    .padding(.horizontal, 0)
                     .padding(.vertical, 0)
                     .playerGlassChrome(.capsule, strength: .thick)
                 }
             }
             .padding(.top, 24)
-            .padding(.horizontal, 36)
+            .padding(.horizontal, playerTopHUDHorizontalInset)
 
             Spacer()
         }
@@ -2538,7 +2555,7 @@ public struct PlayerView<
                         }
                     } label: {
                         ZStack(alignment: .topTrailing) {
-                            hudChromeIcon("sharedwithyou")
+                            hudCapsuleSegmentIcon("sharedwithyou", isActive: state.isSourcesSidebarOpen)
                                 .symbolEffect(.pulse, isActive: state.isSwitchingSource)
                             if state.isSwitchingSource {
                                 ProgressView()
@@ -2546,7 +2563,6 @@ public struct PlayerView<
                                     .offset(x: 8, y: -8)
                             }
                         }
-                        .playerGlassChrome(.circle, strength: .thick, isActive: state.isSourcesSidebarOpen)
                     }
                     .buttonStyle(.plain)
                     .help("Other versions")
@@ -2561,19 +2577,19 @@ public struct PlayerView<
                         state.isEpisodesSidebarOpen = false
                     }
                 } label: {
-                    hudChromeIcon(
+                    hudCapsuleSegmentIcon(
                         state.isSubtitlesSidebarOpen || state.areSubtitlesEnabled
                             ? "captions.bubble.fill"
-                            : "captions.bubble"
+                            : "captions.bubble",
+                        isActive: state.isSubtitlesSidebarOpen || state.areSubtitlesEnabled
                     )
                     .contentTransition(.symbolEffect(.replace))
-                    .playerGlassChrome(.circle, strength: .thick, isActive: state.isSubtitlesSidebarOpen || state.areSubtitlesEnabled)
                 }
                 .buttonStyle(.plain)
                 .help("Subtitles")
                 .disabled(!state.canOpenSubtitlesSidebar)
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, 0)
             .padding(.vertical, 0)
             .playerGlassChrome(.capsule, strength: .thick)
         }
