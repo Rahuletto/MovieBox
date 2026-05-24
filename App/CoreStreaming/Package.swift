@@ -9,7 +9,7 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../CoreTorrent"),
-        .package(path: "../CoreStorage")
+        .package(path: "../CoreStorage"),
     ],
     targets: [
         .target(name: "CoreStreaming", dependencies: ["CoreTorrent", "CoreStorage"]),

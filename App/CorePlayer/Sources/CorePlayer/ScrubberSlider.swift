@@ -6,8 +6,6 @@ struct ScrubberSlider: View {
     @Binding var value: Double
     let range: ClosedRange<Double>
     let bufferedRanges: [ClosedRange<Double>]
-    /// Timeline reached earlier this session (dim bar); playhead uses `value`.
-    let playedThroughTime: Double?
     let formatTime: (Double) -> String
     let thumbnailProvider: (Double, UInt64) async -> (UInt64, NSImage?)
 
@@ -38,15 +36,6 @@ struct ScrubberSlider: View {
                         .fill(Color.white.opacity(0.22))
                         .frame(width: max(0, segment.upperBound - segment.lowerBound), height: trackHeight)
                         .offset(x: segment.lowerBound)
-                }
-
-                if let playedThroughTime, playedThroughTime > value {
-                    Capsule()
-                        .fill(.white.opacity(0.28))
-                        .frame(
-                            width: max(0, trackWidth * progressFraction(for: playedThroughTime, trackWidth: trackWidth)),
-                            height: trackHeight
-                        )
                 }
 
                 Capsule()
@@ -163,7 +152,7 @@ struct ScrubberSlider: View {
         let span = range.upperBound - range.lowerBound
         guard span > 0 else { return [] }
         let playheadX = trackWidth * progressFraction(for: value, trackWidth: trackWidth)
-        return bufferedRanges.compactMap { buffered in
+        let raw = bufferedRanges.compactMap { buffered -> ClosedRange<CGFloat>? in
             let lower = max(range.lowerBound, buffered.lowerBound, value)
             let upper = min(range.upperBound, buffered.upperBound)
             guard upper > lower else { return nil }
@@ -173,6 +162,24 @@ struct ScrubberSlider: View {
             let clippedLowerX = max(lowerX, playheadX)
             return clippedLowerX...upperX
         }
+        return mergeSegmentRanges(raw)
+    }
+
+    private func mergeSegmentRanges(_ segments: [ClosedRange<CGFloat>]) -> [ClosedRange<CGFloat>] {
+        guard !segments.isEmpty else { return [] }
+        let sorted = segments.sorted { $0.lowerBound < $1.lowerBound }
+        var merged: [ClosedRange<CGFloat>] = []
+        var current = sorted[0]
+        for segment in sorted.dropFirst() {
+            if segment.lowerBound <= current.upperBound + 1 {
+                current = current.lowerBound...max(current.upperBound, segment.upperBound)
+            } else {
+                merged.append(current)
+                current = segment
+            }
+        }
+        merged.append(current)
+        return merged
     }
 
     private func time(at locationX: CGFloat, trackWidth: CGFloat) -> Double {

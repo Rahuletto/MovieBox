@@ -11,6 +11,10 @@ struct MyListView: View {
     @Query(filter: #Predicate<MovieRecord> { $0.watchlistAddedAt != nil }, sort: \MovieRecord.watchlistAddedAt, order: .reverse)
     private var movies: [MovieRecord]
 
+    private let columns = [
+        GridItem(.adaptive(minimum: MoviePosterCard.posterWidth, maximum: 186), spacing: 16)
+    ]
+
     var body: some View {
         ScrollView {
             if movies.isEmpty {
@@ -21,45 +25,15 @@ struct MyListView: View {
                 )
                 .frame(maxWidth: .infinity, minHeight: 260)
             } else {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 130, maximum: 160), spacing: 14)], spacing: 18) {
+                LazyVGrid(columns: columns, spacing: 18) {
                     ForEach(movies, id: \.tmdbId) { movie in
-                        Button {
+                        MoviePosterCard(
+                            title: movie.title,
+                            posterURL: MetadataClient().posterDisplayURL(posterPath: movie.posterPath),
+                            progress: watchProgress(for: movie)
+                        ) {
                             router.showDetail(id: movie.tmdbId, kind: movie.mediaKindEnum)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 6) {
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .fill(Color(nsColor: .controlBackgroundColor))
-                                    .aspectRatio(2/3, contentMode: .fit)
-                                    .overlay {
-                                        CachedImageView(url: MetadataClient().imageURL(path: movie.posterPath)) {
-                                            Image(systemName: "film.stack")
-                                                .font(.system(size: 28))
-                                                .foregroundStyle(.secondary)
-                                        } content: { image in
-                                            image.resizable().scaledToFill()
-                                        }
-                                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                                    }
-                                    .overlay(alignment: .bottomTrailing) {
-                                        if movie.watchedFraction > 0.05 && movie.watchedFraction < 0.95 {
-                                            GlassBadge("\(Int(movie.watchedFraction * 100))%", color: .blue)
-                                                .padding(4)
-                                        }
-                                    }
-
-                                Text(movie.title)
-                                    .font(.caption)
-                                    .fontWeight(.medium)
-                                    .lineLimit(1)
-
-                                if let lastWatched = movie.lastWatchedAt {
-                                    Text(lastWatched, style: .relative)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
                         }
-                        .buttonStyle(.plain)
                         .contextMenu {
                             Button(role: .destructive) {
                                 movie.watchlistAddedAt = nil
@@ -75,5 +49,11 @@ struct MyListView: View {
             }
         }
         .navigationTitle("My List")
+    }
+
+    private func watchProgress(for record: MovieRecord) -> Double? {
+        let progress = WatchProgressStore.progressFraction(for: record)
+        guard progress > 0.05, progress < 0.95 else { return nil }
+        return progress
     }
 }

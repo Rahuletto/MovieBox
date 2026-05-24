@@ -385,7 +385,9 @@ public final class PersistentPlaybackController {
 
         if let infoHash = torrent.resolvedInfoHash,
            let localPath = appServices.downloadPersistence?.completedFilePath(for: infoHash) {
+            let localURL = URL(fileURLWithPath: localPath)
             PlaybackLog.log("runSingleAttempt -> playing local downloaded file: \(localPath)")
+            PlaybackLog.log("[MKVHLS] persistent single completed file hash=\(infoHash) ext=\(localURL.pathExtension.lowercased()) exists=\(FileManager.default.fileExists(atPath: localURL.path))")
             phase = .openingPlayer
             coordinator.playLocalFile(
                 localFilePath: localPath,
@@ -468,7 +470,9 @@ public final class PersistentPlaybackController {
 
             if let infoHash = torrent.resolvedInfoHash,
                let localPath = appServices.downloadPersistence?.completedFilePath(for: infoHash) {
+                let localURL = URL(fileURLWithPath: localPath)
                 PlaybackLog.log("runBestAvailableAttempts -> playing local downloaded file: \(localPath)")
+                PlaybackLog.log("[MKVHLS] persistent best completed file hash=\(infoHash) ext=\(localURL.pathExtension.lowercased()) exists=\(FileManager.default.fileExists(atPath: localURL.path)) attempt=\(attempt)")
                 phase = .openingPlayer
                 coordinator.playLocalFile(
                     localFilePath: localPath,
@@ -543,7 +547,7 @@ public final class PersistentPlaybackController {
     ) async {
         phase = .openingPlayer
         do {
-            try coordinator.finishPlayback(
+            try await coordinator.finishPlayback(
                 torrent: torrent,
                 allTorrents: request.allTorrents,
                 session: session,
@@ -567,6 +571,7 @@ public final class PersistentPlaybackController {
             request.onPlaybackOpened?(torrent)
             resetToIdleAfterPlayerOpen()
         } catch {
+            PlaybackLog.log("[MKVHLS] openPlayer failed: \(error.localizedDescription)")
             phase = .failed(error.localizedDescription)
             await session.cancel()
         }

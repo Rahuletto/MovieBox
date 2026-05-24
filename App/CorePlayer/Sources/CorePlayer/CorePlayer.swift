@@ -169,6 +169,8 @@ public final class PlayerState {
     private var presentationTransitionTask: Task<Void, Never>?
     private var lastPlaybackLoad: StoredPlaybackLoad?
     private var streamsFromLocalTorrentServer = false
+    /// Remuxed HLS loopback — AVPlayer reports buffer; torrent byte ranges duplicate the scrubber bar.
+    private var isHLSTorrentPlayback = false
 
     private struct StoredPlaybackLoad: Sendable {
         let url: URL
@@ -282,6 +284,8 @@ public final class PlayerState {
         streamsFromLocalTorrentServer =
             Self.isTorrentResourceLoaderURL(url)
             || url.host.map { $0 == "127.0.0.1" || $0 == "localhost" } == true
+        isHLSTorrentPlayback = url.pathExtension.lowercased() == "m3u8"
+            || url.absoluteString.lowercased().contains(".m3u8")
 
         self.title = title
         self.movieId = movieId
@@ -377,6 +381,7 @@ public final class PlayerState {
         thumbnailService = ThumbnailService(asset: asset)
 
         PlaybackLog.log("load url=\(PlaybackLog.redactURL(url)) title=\(title) movieId=\(movieId)")
+        PlaybackLog.log("[MKVHLS] PlayerState.load scheme=\(url.scheme ?? "none") host=\(url.host ?? "none") port=\(url.port ?? -1) ext=\(url.pathExtension.lowercased()) isFile=\(url.isFileURL) title=\"\(title)\"")
 
         lastPlaybackLoad = StoredPlaybackLoad(
             url: url,
@@ -438,7 +443,7 @@ public final class PlayerState {
         setupObservers()
         activateMediaCommands()
         scheduleWindowAutosizeRetries()
-        if isStreamingTorrent {
+        if isStreamingTorrent, !isHLSTorrentPlayback {
             startStreamBufferPolling()
         }
         if let subtitleURL {
@@ -1041,6 +1046,7 @@ public final class PlayerState {
         onSelectPlaybackSource = nil
         lastPlaybackLoad = nil
         streamsFromLocalTorrentServer = false
+        isHLSTorrentPlayback = false
         if let existing = thumbnailService {
             Task { await existing.clearCache() }
         }
@@ -1663,7 +1669,7 @@ public final class PlayerState {
                 return start...end
             }
         }
-        if !cachedStreamBufferRanges.isEmpty {
+        if !isHLSTorrentPlayback, !cachedStreamBufferRanges.isEmpty {
             ranges.append(contentsOf: cachedStreamBufferRanges)
         }
         bufferedTimeRanges = Self.mergeTimeRanges(ranges)
@@ -2500,7 +2506,6 @@ public struct PlayerView<
                             ),
                             range: 0...max(state.duration, 0.01),
                             bufferedRanges: state.bufferedTimeRanges,
-                            playedThroughTime: state.peakPlaybackTime > 0 ? state.peakPlaybackTime : nil,
                             formatTime: formatTime,
                             thumbnailProvider: { time, requestID in
                                 await state.thumbnailImage(for: time, requestID: requestID)

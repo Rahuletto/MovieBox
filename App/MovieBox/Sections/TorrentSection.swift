@@ -290,15 +290,23 @@ struct TorrentSection: View {
                     Text(mode.title).tag(mode)
                 }
             }
+            .pickerStyle(.inline)
         } label: {
-            Image(systemName: "arrow.up.arrow.down")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 28, height: 28)
-                .contentShape(Rectangle())
+            HStack(spacing: 6) {
+                Text("Sort by")
+                    .foregroundStyle(.secondary)
+                Text(sortMode.title)
+                    .fontWeight(.medium)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .font(.subheadline)
         }
         .menuStyle(.borderlessButton)
-        .help("Sort by \(sortMode.title)")
+        .fixedSize(horizontal: true, vertical: false)
+        .accessibilityLabel("Sort by")
+        .accessibilityValue(sortMode.title)
     }
 
     private var paginationBar: some View {

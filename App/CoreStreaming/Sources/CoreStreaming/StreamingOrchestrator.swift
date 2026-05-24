@@ -74,6 +74,8 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         let target = TorrentStreamTarget.selectPrimary(from: metadata)
         streamTarget = target
         mkvIndexBoostApplied = false
+        let targetExtension = (target.file.relativePath as NSString).pathExtension.lowercased()
+        let targetIsMKV = targetExtension == "mkv" || targetExtension == "webm" || target.contentType.contains("matroska")
         let tailPieces = StreamTailPlanner.bootstrapPieceIndices(
             target: target,
             pieceLength: metadata.pieceLength,
@@ -81,6 +83,9 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         )
         TorrentLog.info(
             "[Streaming] Target file: \(target.file.relativePath) (\(target.byteLength) bytes, piece \(target.firstPieceIndex)+, bootstrap pieces \(tailPieces.count) first+last 1%)"
+        )
+        TorrentLog.info(
+            "[MKVHLS] streaming target selected ext=\(targetExtension) isMKV=\(targetIsMKV) contentType=\(target.contentType) completedLocal=false action=loopback_http reason=v1_hls_remux_only_for_completed_local_files"
         )
         DebugSessionLog.purge(infoHash: String(metadata.infoHash.prefix(8)))
 
@@ -161,6 +166,9 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         let url = try await streamURL
         TorrentLog.info(
             "[Streaming] HTTP range server — \(MovieBoxFileLogger.redactURL(url)) type=\(target.contentType) mediaBytes=\(target.byteLength)"
+        )
+        TorrentLog.info(
+            "[MKVHLS] playback url ready scheme=\(url.scheme ?? "none") host=\(url.host ?? "none") port=\(url.port ?? -1) targetExt=\(targetExtension) isMKV=\(targetIsMKV)"
         )
 
         // FINDINGS Tier 1 #4: speculative 2 MB tail boost before AVPlayer asks.
