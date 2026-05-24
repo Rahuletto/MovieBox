@@ -9,19 +9,97 @@ public enum PlayerHUDStatusPillModel: Equatable, Sendable {
 }
 
 extension Animation {
-    /// Fade for the top-center status pill (fit mode, quality badges, fast scan).
+    /// Liquid glass spring when the status pill appears or its content changes.
     static var playerHUDStatusPill: Animation {
-        .easeInOut(duration: 0.22)
+        .spring(response: 0.34, dampingFraction: 0.72)
+    }
+
+    /// Slightly quicker, tighter spring when the pill dismisses.
+    static var playerHUDStatusPillDismiss: Animation {
+        .spring(response: 0.28, dampingFraction: 0.84)
     }
 }
 
-extension AnyTransition {
-    static var playerHUDStatusPillWarp: AnyTransition {
-        .opacity
+/// Top-center HUD pill host — drives its own enter/exit scale so transitions survive player clipping.
+struct PlayerHUDStatusPillOverlay: View {
+    let pill: PlayerHUDStatusPillModel?
+
+    @State private var renderedPill: PlayerHUDStatusPillModel?
+    @State private var isVisible = false
+    @State private var dismissCleanupTask: Task<Void, Never>?
+
+    private static let dismissCleanupDelay: Duration = .milliseconds(340)
+
+    var body: some View {
+        ZStack {
+            if let renderedPill {
+                PlayerHUDStatusPill(model: renderedPill)
+                    .scaleEffect(isVisible ? 1 : 0.82, anchor: .center)
+                    .opacity(isVisible ? 1 : 0)
+                    .offset(y: isVisible ? 0 : 6)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 72)
+        .allowsHitTesting(false)
+        .onAppear {
+            sync(with: pill)
+        }
+        .onChange(of: pill) { _, newPill in
+            sync(with: newPill)
+        }
+        .onDisappear {
+            dismissCleanupTask?.cancel()
+            dismissCleanupTask = nil
+        }
+    }
+
+    private func sync(with newPill: PlayerHUDStatusPillModel?) {
+        dismissCleanupTask?.cancel()
+        dismissCleanupTask = nil
+
+        if let newPill {
+            if renderedPill == nil {
+                renderedPill = newPill
+                withAnimation(.playerHUDStatusPill) {
+                    isVisible = true
+                }
+                return
+            }
+
+            if !isVisible {
+                renderedPill = newPill
+                withAnimation(.playerHUDStatusPill) {
+                    isVisible = true
+                }
+                return
+            }
+
+            withAnimation(.playerHUDStatusPill) {
+                renderedPill = newPill
+            }
+            return
+        }
+
+        guard renderedPill != nil, isVisible else {
+            renderedPill = nil
+            isVisible = false
+            return
+        }
+
+        withAnimation(.playerHUDStatusPillDismiss) {
+            isVisible = false
+        }
+
+        dismissCleanupTask = Task { @MainActor in
+            try? await Task.sleep(for: Self.dismissCleanupDelay)
+            guard !Task.isCancelled, pill == nil else { return }
+            renderedPill = nil
+        }
     }
 }
 
-/// IINA / QuickTime–style status capsule at top center — fades in/out on show and content change.
+/// IINA / QuickTime–style status capsule at top center.
 public struct PlayerHUDStatusPill: View {
     public let model: PlayerHUDStatusPillModel
 
@@ -57,6 +135,7 @@ public struct PlayerHUDStatusPill: View {
                     .contentTransition(.symbolEffect(.replace))
                 Text(title)
                     .font(.system(size: 14, weight: .semibold))
+                    .contentTransition(.interpolate)
             case .qualityBadges(let kinds):
                 HStack(spacing: 12) {
                     ForEach(kinds, id: \.self) { kind in
