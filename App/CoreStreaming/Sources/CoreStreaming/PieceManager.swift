@@ -106,6 +106,14 @@ public actor PieceManager {
         }
     }
 
+    public func isRequestStillInPlaybackWindow(_ request: BlockRequest) -> Bool {
+        let piece = request.pieceIndex
+        if downloadedPieces.contains(piece) { return false }
+        if Set(buildPlaybackPriorityOrder()).contains(piece) { return true }
+        if needsIndexBootstrap(), Set(buildBootstrapPriorityOrder()).contains(piece) { return true }
+        return false
+    }
+
     public func markBlockReceived(pieceIndex: UInt32, offset: UInt32, block: Data) -> PieceReceiveOutcome {
         pendingRequests.remove(BlockRequest(pieceIndex: pieceIndex, offset: offset, length: 0))
 
