@@ -15,6 +15,7 @@ public final class HTTPRangeServer {
     private var streamByteOffset: Int64 = 0
     private var streamByteLength: Int64 = 0
     private var contentType = "application/octet-stream"
+    private var activeConnections: [NWConnection] = []
 
 
 
@@ -93,6 +94,15 @@ public final class HTTPRangeServer {
                 return
             }
             Task { @MainActor in
+                self.activeConnections.removeAll { conn in
+                    switch conn.state {
+                    case .cancelled, .failed:
+                        return true
+                    default:
+                        return false
+                    }
+                }
+                self.activeConnections.append(connection)
                 await self.handleConnection(connection)
             }
         }
@@ -120,6 +130,12 @@ public final class HTTPRangeServer {
         pieceStore = nil
         pieceManager = nil
         onPlayerRead = nil
+        
+        for connection in activeConnections {
+            connection.cancel()
+        }
+        activeConnections.removeAll()
+        
         // Fail any pending waiters so we don't leak continuations
         let pending = pendingRangeWaiters
         pendingRangeWaiters.removeAll()

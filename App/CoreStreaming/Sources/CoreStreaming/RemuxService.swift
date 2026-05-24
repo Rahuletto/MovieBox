@@ -177,6 +177,28 @@ public actor RemuxService {
         }
     }
 
+    public func stopAll() async {
+        TorrentLog.info("[Remux] stopAll requested, terminating active processes count=\(activeStreamingProcesses.count)")
+        for (cacheKey, process) in activeStreamingProcesses {
+            if process.isRunning {
+                TorrentLog.info("[Remux] terminating process pid=\(process.processIdentifier) for cacheKey=\(cacheKey)")
+                process.terminate()
+            }
+            await stopHLSServer(cacheKey: cacheKey)
+        }
+        activeStreamingProcesses.removeAll()
+    }
+
+    #if DEBUG
+    internal func injectProcess(_ process: Process, for cacheKey: String) {
+        activeStreamingProcesses[cacheKey] = process
+    }
+
+    internal func getActiveProcesses() -> [String: Process] {
+        activeStreamingProcesses
+    }
+    #endif
+
     public func detectHDR(inputURL: URL) async throws -> HDRInfo? {
         let probe = try await probe(inputURL: inputURL)
         guard let video = probe.videoStreams.first else { return nil }

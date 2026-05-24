@@ -306,6 +306,29 @@ final class RemuxServiceTests: XCTestCase {
     private func decode(_ json: String) throws -> MediaProbe {
         try RemuxService.decodeProbe(Data(json.utf8))
     }
+
+    func testStopAllTerminatesProcessesAndStopsServers() async throws {
+        let service = RemuxService()
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        process.arguments = ["10"]
+        try process.run()
+
+        let cacheKey = "test-stopall"
+        await service.injectProcess(process, for: cacheKey)
+
+        let activeBefore = await service.getActiveProcesses()
+        XCTAssertEqual(activeBefore.count, 1)
+        XCTAssertTrue(process.isRunning)
+
+        await service.stopAll()
+        process.waitUntilExit()
+
+        let activeAfter = await service.getActiveProcesses()
+        XCTAssertEqual(activeAfter.count, 0)
+        XCTAssertFalse(process.isRunning)
+    }
 }
 
 private extension Array where Element: Equatable {

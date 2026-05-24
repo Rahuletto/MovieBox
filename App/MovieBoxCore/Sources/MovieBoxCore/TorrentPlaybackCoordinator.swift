@@ -20,6 +20,7 @@ public final class TorrentPlaybackCoordinator {
     public func cancel() async {
         await session?.cancel()
         session = nil
+        await remuxService.stopAll()
     }
 
     func configureSources(on playerState: PlayerState, torrents: [TorrentResult], selected: TorrentResult) {
@@ -219,7 +220,7 @@ public final class TorrentPlaybackCoordinator {
         let subtitleURL = playerState.subtitleURL
 
         playerState.isSwitchingSource = true
-        await session?.cancel()
+        await cancel()
 
         if let infoHash = torrent.resolvedInfoHash,
            let localPath = downloadPersistence?.completedFilePath(for: infoHash) {
