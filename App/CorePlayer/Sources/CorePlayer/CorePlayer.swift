@@ -2209,6 +2209,7 @@ public struct PlayerView<
                         } label: {
                             hudChromeIcon(state.isPictureInPictureActive ? "pip.exit" : "pip.enter")
                                 .contentTransition(.symbolEffect(.replace))
+                                .playerGlassChrome(.circle, strength: .thick, isActive: state.isPictureInPictureActive)
                         }
                         .buttonStyle(.plain)
                         .animation(.spring(response: 0.05, dampingFraction: 0.95), value: state.isPictureInPictureActive)
@@ -2236,7 +2237,7 @@ public struct PlayerView<
                             nerdStatsPresented.toggle()
                         } label: {
                             hudChromeIcon("externaldrive.connected.to.line.below")
-                                .playerGlassChrome(.circle, strength: .thick)
+                                .playerGlassChrome(.circle, strength: .thick, isActive: nerdStatsPresented)
                         }
                         .buttonStyle(.plain)
                         .help("Nerd stats")
@@ -2272,6 +2273,7 @@ public struct PlayerView<
                                 iconFont: hudChromeIconFont,
                                 frameSize: hudChromeControlSize
                             )
+                            .playerGlassChrome(.circle, strength: .thick, isActive: state.isMuted)
                         }
                         .buttonStyle(.plain)
 
@@ -2289,6 +2291,7 @@ public struct PlayerView<
                             } label: {
                                 hudChromeIcon("list.bullet")
                                     .contentTransition(.symbolEffect(.replace))
+                                    .playerGlassChrome(.circle, strength: .thick, isActive: state.isEpisodesSidebarOpen)
                             }
                             .buttonStyle(.plain)
                             .help("Episodes")
@@ -2543,6 +2546,7 @@ public struct PlayerView<
                                     .offset(x: 8, y: -8)
                             }
                         }
+                        .playerGlassChrome(.circle, strength: .thick, isActive: state.isSourcesSidebarOpen)
                     }
                     .buttonStyle(.plain)
                     .help("Other versions")
@@ -2563,6 +2567,7 @@ public struct PlayerView<
                             : "captions.bubble"
                     )
                     .contentTransition(.symbolEffect(.replace))
+                    .playerGlassChrome(.circle, strength: .thick, isActive: state.isSubtitlesSidebarOpen || state.areSubtitlesEnabled)
                 }
                 .buttonStyle(.plain)
                 .help("Subtitles")
@@ -3152,8 +3157,7 @@ struct PlayerKeyboardCaptureView: NSViewRepresentable {
         nsView.onShiftHeld = onShiftHeld
         if state.isPresented {
             nsView.claimKeyboardFocus()
-            onCommandHeld(NSEvent.modifierFlags.contains(.command))
-            onShiftHeld(NSEvent.modifierFlags.contains(.shift))
+            nsView.syncModifierFlags(NSEvent.modifierFlags)
         }
     }
 
@@ -3199,6 +3203,24 @@ final class PlayerKeyboardNSView: NSView {
     func claimKeyboardFocus() {
         guard state?.isPresented == true else { return }
         window?.makeFirstResponder(self)
+    }
+
+    func syncModifierFlags(_ modifierFlags: NSEvent.ModifierFlags) {
+        let commandDown = modifierFlags.contains(.command)
+        if commandDown != isCommandKeyHeld {
+            isCommandKeyHeld = commandDown
+            DispatchQueue.main.async { [weak self] in
+                self?.onCommandHeld?(commandDown)
+            }
+        }
+
+        let shiftDown = modifierFlags.contains(.shift)
+        if shiftDown != isShiftKeyHeld {
+            isShiftKeyHeld = shiftDown
+            DispatchQueue.main.async { [weak self] in
+                self?.onShiftHeld?(shiftDown)
+            }
+        }
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
@@ -3669,6 +3691,3 @@ struct AppleSecondaryButtonStyle: ButtonStyle {
             .animation(.easeInOut(duration: 0.12), value: configuration.isPressed)
     }
 }
-
-
-
