@@ -1,5 +1,6 @@
 import CoreStorage
 import CoreStreaming
+import CorePlayer
 import SwiftData
 
 @MainActor
@@ -41,6 +42,8 @@ public enum AppBootstrap {
         }
 
         guard let first = existing.first else { return }
+        MovieBoxFileLogger.isDebugLoggingEnabled = first.debugLogging
+        PlaybackLog.isEnabled = first.debugLogging
         LogStore.shared.log("AppBootstrap: Loaded AppSettings.")
         if first.defaultDownloadPath == "~/Downloads/MovieBox" || first.defaultDownloadPath.isEmpty {
             first.defaultDownloadPath = "~/Movies/MovieBox"

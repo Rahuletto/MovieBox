@@ -1,7 +1,7 @@
 import AVFoundation
 import Foundation
 
-/// Serves torrent file bytes to AVPlayer without loopback HTTP (FINDINGS Tier 3).
+/// Serves torrent file bytes to AVPlayer without loopback HTTP.
 public final class TorrentStreamResourceLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked Sendable {
     private let pieceStore: PieceStore
     private let streamByteOffset: Int64

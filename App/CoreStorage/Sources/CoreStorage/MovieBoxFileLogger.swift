@@ -3,6 +3,8 @@ import Foundation
 /// Thread-safe append-only logger to `~/Library/Logs/MovieBox/moviebox.log`.
 /// Used by `LogStore`, torrent engine, and AVPlayer so agents can read one file.
 public enum MovieBoxFileLogger {
+    nonisolated(unsafe) public static var isDebugLoggingEnabled: Bool = false
+
     public enum Level: String, Sendable {
         case debug = "DEBUG"
         case info = "INFO"
@@ -24,6 +26,7 @@ public enum MovieBoxFileLogger {
     private nonisolated static let fileQueue = DispatchQueue(label: "moviebox.filelogger", qos: .utility)
 
     public static func log(_ level: Level, category: String, _ message: String) {
+        guard isDebugLoggingEnabled || level == .error || level == .warn else { return }
         let line = formatLine(level: level, category: category, message: sanitize(message))
         fileQueue.async {
             ensureLogDirectory()
@@ -35,6 +38,7 @@ public enum MovieBoxFileLogger {
 
     /// Session banners / multi-line blocks (no level prefix).
     public static func appendRaw(_ text: String) {
+        guard isDebugLoggingEnabled else { return }
         fileQueue.async {
             ensureLogDirectory()
             rotateIfNeeded()

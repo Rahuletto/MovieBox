@@ -22,7 +22,7 @@ public enum TorrentPlaybackURLScheme {
   }
 }
 
-/// Registered torrent byte source for `AVAssetResourceLoader` (FINDINGS Tier 3).
+/// Registered torrent byte source for `AVAssetResourceLoader`.
 @MainActor
 public final class TorrentStreamPlaybackRegistry {
     public static let shared = TorrentStreamPlaybackRegistry()

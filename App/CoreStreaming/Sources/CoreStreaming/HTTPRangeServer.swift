@@ -359,7 +359,7 @@ public final class HTTPRangeServer {
 
                     // CoreMedia -12939 (moviebox.log): AVPlayer compares body bytes to the Range header
                     // length. A 206 with Content-Length=1.9GB but only 32MB on the wire always fails.
-                    // FINDINGS §13: small exact ranges (0-1 probe, suffix moov) use buffered 206;
+                    // Small exact ranges (0-1 probe, suffix moov) use buffered 206;
                     // large scans use chunked 206 so the client can stop early without a length mismatch.
                     if requestedLength <= Self.maxBufferedRangeBytes {
                         if let response = await buildBufferedRangeResponse(
@@ -490,7 +490,7 @@ public final class HTTPRangeServer {
         return .complete(HTTPResponse(status: statusCode, data: response, retryAfterSeconds: nil))
     }
 
-    /// Buffered 206: Content-Length equals body (required for bytes=0-1 and suffix moov per FINDINGS §13).
+    /// Buffered 206: Content-Length equals body (required for bytes=0-1 and suffix moov).
     private func buildBufferedRangeResponse(
         pieceStore: PieceStore,
         plan: RangeStreamPlan
@@ -559,7 +559,7 @@ public final class HTTPRangeServer {
         let mediaLength = streamByteLength
         let contentRange = "bytes \(plan.mediaStart)-\(plan.mediaEnd)/\(mediaLength)"
 
-        // FINDINGS §13 step 2: boost tail when AVPlayer opens a whole-file scan from byte 0.
+        // Speculatively boost tail when AVPlayer opens a whole-file scan from byte 0.
         if plan.mediaStart == 0, plan.requestedLength > Self.maxBufferedRangeBytes {
             let tailLen = min(2 * 1024 * 1024, Int(mediaLength))
             let tailStart = max(0, mediaLength - Int64(tailLen))
@@ -723,7 +723,7 @@ public final class HTTPRangeServer {
             ) {
                 // AVPlayer/CoreMedia (-12939) rejects 206 when the body is shorter than the
                 // requested Range span (moviebox.log: asked length 1946450165, got 1900543).
-                // Stall until the full requested window is contiguously readable (FINDINGS Tier 1).
+                // Stall until the full requested window is contiguously readable.
                 let fulfilled: (offset: Int64, length: Int)?
                 if preferSuffix {
                     if span.length >= length {

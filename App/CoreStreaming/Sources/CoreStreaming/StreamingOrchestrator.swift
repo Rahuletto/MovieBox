@@ -171,7 +171,7 @@ public final class StreamingOrchestrator: @unchecked Sendable {
             "[MKVHLS] playback url ready scheme=\(url.scheme ?? "none") host=\(url.host ?? "none") port=\(url.port ?? -1) targetExt=\(targetExtension) isMKV=\(targetIsMKV)"
         )
 
-        // FINDINGS Tier 1 #4: speculative 2 MB tail boost before AVPlayer asks.
+        // Speculative 2 MB tail boost before AVPlayer asks.
         let tailOffset = max(0, target.byteLength - 2 * 1024 * 1024)
         await manager.notePlayerRead(mediaOffset: tailOffset, length: 2 * 1024 * 1024)
         await engine.refreshDownloadPriorities()
