@@ -91,11 +91,7 @@ struct MovieBoxApp: App {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
-        if let torrentType = UTType(filenameExtension: "torrent") {
-            panel.allowedContentTypes = [torrentType]
-        } else {
-            panel.allowedFileTypes = ["torrent"]
-        }
+        panel.allowedContentTypes = [UTType(filenameExtension: "torrent") ?? .data]
         panel.message = "Choose a .torrent file. For magnet links, paste them on the Downloads tab or open a magnet: link from your browser."
 
         guard panel.runModal() == .OK, let url = panel.url else { return }

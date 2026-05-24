@@ -21,6 +21,18 @@ struct HomeView: View {
     @State private var continueWatching: [MovieRecord] = []
     @State private var errorMessage: String?
     @State private var scrollOffset: CGFloat = 0
+    @State private var isHomeRefreshing = false
+
+    private var isHomeCatalogVisible: Bool {
+        MetadataCategory.allCases.contains { !(rows[$0]?.isEmpty ?? true) }
+            || extraSections.contains { !$0.items.isEmpty }
+    }
+
+    /// Local library rows come from SwiftData immediately; hide them until catalog shelves are ready
+    /// so launch does not flash "Your Watchlist" alone while metadata loads.
+    private var showsPersonalSections: Bool {
+        isHomeCatalogVisible || (!isHomeRefreshing && errorMessage != nil)
+    }
 
     var body: some View {
         ZStack {
@@ -38,65 +50,58 @@ struct HomeView: View {
                 ScrollView {
                     ZStack(alignment: .top) {
                         LazyVStack(alignment: .leading, spacing: 42) {
-                                 if let trending = rows[.trending], !trending.isEmpty {
-                                      HeroCarousel(
-                                          movies: Array(trending.prefix(8)),
-                                          kind: .movie,
-                                          isActive: allowsMetadataFetch,
-                                          kindForMovie: { movie in
-                                              kindByID[movie.id] ?? .movie
-                                          }
-                                      ) { movie in
-                                          router.showDetail(id: movie.id, kind: kindByID[movie.id] ?? .movie)
-                                      }
-                                      .frame(maxWidth: .infinity)
-                                  }
-
-                            if !continueWatching.isEmpty {
-                                ContinueWatchingRow(
-                                    records: continueWatching,
-                                    metadataMode: metadataMode
-                                ) { record in
-                                    router.showDetail(id: record.tmdbId, kind: record.mediaKindEnum)
-                                }
-                            }
-
-                            if !watchlistItems.isEmpty {
-                                HomeQuickAccessRow(
-                                    title: "Your Watchlist",
-                                    items: watchlistItems
-                                ) { item in
-                                    router.showDetail(id: item.tmdbId, kind: item.kind)
-                                }
-                            }
-
-                            if !downloadItems.isEmpty {
-                                HomeQuickAccessRow(
-                                    title: "Downloads",
-                                    items: downloadItems
-                                ) { item in
-                                    if item.tmdbId > 0 {
-                                        router.showDetail(id: item.tmdbId, kind: item.kind)
-                                    } else {
-                                        router.show(.downloads)
-                                    }
-                                }
-                            }
-
-                            if !recommended.isEmpty {
-                                HorizontalMovieRow(title: "Recommended For You", items: recommended) { movie in
-                                    MoviePosterCard(
-                                        title: movie.title,
-                                        posterURL: posterURL(for: movie)
-                                    ) {
+                            if isHomeRefreshing && !isHomeCatalogVisible && errorMessage == nil {
+                                HomeCatalogLoadingView()
+                            } else {
+                                if let trending = rows[.trending], !trending.isEmpty {
+                                    HeroCarousel(
+                                        movies: Array(trending.prefix(8)),
+                                        kind: .movie,
+                                        isActive: allowsMetadataFetch,
+                                        kindForMovie: { movie in
+                                            kindByID[movie.id] ?? .movie
+                                        }
+                                    ) { movie in
                                         router.showDetail(id: movie.id, kind: kindByID[movie.id] ?? .movie)
                                     }
+                                    .frame(maxWidth: .infinity)
                                 }
-                            }
 
-                            ForEach(MetadataCategory.allCases) { category in
-                                if let movies = rows[category], !movies.isEmpty {
-                                    HorizontalMovieRow(title: category.rawValue, items: movies) { movie in
+                                if showsPersonalSections {
+                                    if !continueWatching.isEmpty {
+                                        ContinueWatchingRow(
+                                            records: continueWatching,
+                                            metadataMode: metadataMode
+                                        ) { record in
+                                            router.showDetail(id: record.tmdbId, kind: record.mediaKindEnum)
+                                        }
+                                    }
+
+                                    if !watchlistItems.isEmpty {
+                                        HomeQuickAccessRow(
+                                            title: "Your Watchlist",
+                                            items: watchlistItems
+                                        ) { item in
+                                            router.showDetail(id: item.tmdbId, kind: item.kind)
+                                        }
+                                    }
+
+                                    if !downloadItems.isEmpty {
+                                        HomeQuickAccessRow(
+                                            title: "Downloads",
+                                            items: downloadItems
+                                        ) { item in
+                                            if item.tmdbId > 0 {
+                                                router.showDetail(id: item.tmdbId, kind: item.kind)
+                                            } else {
+                                                router.show(.downloads)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if !recommended.isEmpty {
+                                    HorizontalMovieRow(title: "Recommended For You", items: recommended) { movie in
                                         MoviePosterCard(
                                             title: movie.title,
                                             posterURL: posterURL(for: movie)
@@ -105,25 +110,39 @@ struct HomeView: View {
                                         }
                                     }
                                 }
-                            }
 
-                            ForEach(extraSections, id: \.id) { section in
-                                if !section.items.isEmpty {
-                                    HorizontalMovieRow(title: section.title, items: section.items) { movie in
-                                        MoviePosterCard(
-                                            title: movie.title,
-                                            posterURL: posterURL(for: movie)
-                                        ) {
-                                            router.showDetail(
-                                                id: movie.id,
-                                                kind: section.kindByID[movie.id] ?? .movie
-                                            )
+                                ForEach(MetadataCategory.allCases) { category in
+                                    if let movies = rows[category], !movies.isEmpty {
+                                        HorizontalMovieRow(title: category.rawValue, items: movies) { movie in
+                                            MoviePosterCard(
+                                                title: movie.title,
+                                                posterURL: posterURL(for: movie)
+                                            ) {
+                                                router.showDetail(id: movie.id, kind: kindByID[movie.id] ?? .movie)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                ForEach(extraSections, id: \.id) { section in
+                                    if !section.items.isEmpty {
+                                        HorizontalMovieRow(title: section.title, items: section.items) { movie in
+                                            MoviePosterCard(
+                                                title: movie.title,
+                                                posterURL: posterURL(for: movie)
+                                            ) {
+                                                router.showDetail(
+                                                    id: movie.id,
+                                                    kind: section.kindByID[movie.id] ?? .movie
+                                                )
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                         .padding(.bottom, 28)
+                        .animation(MovieBoxMotion.chrome, value: isHomeCatalogVisible)
                         
                         // Scroll offset tracker (invisible)
                         GeometryReader { geo in
@@ -218,6 +237,11 @@ struct HomeView: View {
 
     private func load(mode: MetadataEndpointMode) async {
         errorMessage = nil
+        if !isHomeCatalogVisible {
+            isHomeRefreshing = true
+        }
+        defer { isHomeRefreshing = false }
+
         do {
             var sawCorePayload = false
             for try await payload in CatalogLoader.loadHomePayloadStream(mode: mode) {
@@ -357,6 +381,46 @@ struct HomeView: View {
 
     private func posterURL(for movie: Movie) -> URL? {
         MetadataClient().posterDisplayURL(posterPath: movie.posterPath, backdropPath: movie.backdropPath)
+    }
+}
+
+private struct HomeCatalogLoadingView: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 42) {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.primary.opacity(0.06))
+                .frame(maxWidth: .infinity)
+                .frame(height: 420)
+                .padding(.horizontal, 20)
+                .redacted(reason: .placeholder)
+
+            VStack(alignment: .leading, spacing: 14) {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.primary.opacity(0.08))
+                    .frame(width: 140, height: 18)
+                    .padding(.horizontal, 20)
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 16) {
+                        ForEach(0..<6, id: \.self) { _ in
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .fill(Color.primary.opacity(0.06))
+                                .frame(width: MoviePosterCard.posterWidth, height: MoviePosterCard.posterHeight)
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                }
+            }
+            .redacted(reason: .placeholder)
+
+            ProgressView()
+                .controlSize(.regular)
+                .frame(maxWidth: .infinity)
+                .padding(.top, 8)
+        }
+        .padding(.top, 8)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Loading home")
     }
 }
 

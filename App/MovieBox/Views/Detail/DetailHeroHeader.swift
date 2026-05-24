@@ -62,15 +62,19 @@ struct DetailHeroHeader: View {
 
       @ViewBuilder
       private func directorLineView(text: String) -> some View {
-          (
-              Text("Directed by ")
-                  .foregroundStyle(.white.opacity(0.72))
-              + Text(text)
-                  .foregroundStyle(.white)
-          )
-          .font(.subheadline)
-          .multilineTextAlignment(.trailing)
-          .frame(maxWidth: 320, alignment: .trailing)
+          Text(directorLineAttributed(text))
+              .font(.subheadline)
+              .multilineTextAlignment(.trailing)
+              .frame(maxWidth: 320, alignment: .trailing)
+      }
+
+      private func directorLineAttributed(_ name: String) -> AttributedString {
+          var line = AttributedString("Directed by ")
+          line.foregroundColor = .white.opacity(0.72)
+          var credited = AttributedString(name)
+          credited.foregroundColor = .white
+          line.append(credited)
+          return line
       }
       
       var body: some View {

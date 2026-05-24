@@ -1093,6 +1093,7 @@ public final class PlayerState {
         if pipController?.isPictureInPictureActive == true {
             pipController?.stopPictureInPicture()
         }
+        pipHostView?.restoreAfterPictureInPicture()
         pipPossibleObservation?.invalidate()
         pipPossibleObservation = nil
         pipController = nil
@@ -1140,6 +1141,7 @@ public final class PlayerState {
                 PlaybackLog.log("PiP unavailable — not possible yet")
                 return
             }
+            pipHostView?.prepareForPictureInPicture()
             controller.startPictureInPicture()
         }
     }
@@ -1149,9 +1151,12 @@ public final class PlayerState {
         guard let controller = pipController else { return false }
         if controller.isPictureInPictureActive { return true }
         guard controller.isPictureInPicturePossible else { return false }
+        pipHostView?.prepareForPictureInPicture()
         controller.startPictureInPicture()
         return true
     }
+
+    fileprivate weak var pipHostView: PlayerContainerView?
 
     /// Keeps torrent/custom streams playing when entering PiP or browsing behind the player.
     fileprivate func keepPlaybackAliveForPiP() {
@@ -1876,6 +1881,7 @@ public struct AVPlayerLayerView: NSViewRepresentable {
 
     public func makeNSView(context: Context) -> PlayerContainerView {
         let view = PlayerContainerView()
+        view.bind(to: state)
         view.playerLayer.player = player
         view.playerLayer.videoGravity = state.videoGravity
         DispatchQueue.main.async {
@@ -1885,20 +1891,74 @@ public struct AVPlayerLayerView: NSViewRepresentable {
     }
 
     public func updateNSView(_ nsView: PlayerContainerView, context: Context) {
+        nsView.bind(to: state)
         nsView.playerLayer.player = player
         nsView.playerLayer.videoGravity = state.videoGravity
         if state.isPresented {
             state.setupPiP(with: nsView.playerLayer)
         }
     }
+
+    public static func dismantleNSView(_ nsView: PlayerContainerView, coordinator: ()) {
+        nsView.restoreAfterPictureInPicture()
+        nsView.bind(to: nil)
+    }
 }
 
 public final class PlayerContainerView: NSView {
+    private weak var playerState: PlayerState?
+    private weak var pipReparentSuperview: NSView?
+    private var pipReparentFrame: NSRect = .zero
+
     public var playerLayer: AVPlayerLayer {
         guard let playerLayer = layer as? AVPlayerLayer else {
             fatalError("PlayerContainerView requires AVPlayerLayer backing layer")
         }
         return playerLayer
+    }
+
+    fileprivate func bind(to state: PlayerState?) {
+        playerState?.pipHostView = nil
+        playerState = state
+        state?.pipHostView = self
+    }
+
+    /// PiP inserts `AVPictureInPicturePlayerLayerView` into the layer host's superview chain.
+    /// Reparent onto the window content view first so that does not land on `NSHostingController.view`.
+    fileprivate func prepareForPictureInPicture() {
+        guard pipReparentSuperview == nil,
+              let window,
+              let contentView = window.contentView,
+              isInsideHostingHierarchy
+        else { return }
+
+        pipReparentSuperview = superview
+        pipReparentFrame = frame
+        let frameInContent = convert(bounds, to: contentView)
+        removeFromSuperview()
+        contentView.addSubview(self)
+        frame = frameInContent
+    }
+
+    fileprivate func restoreAfterPictureInPicture() {
+        guard let superview = pipReparentSuperview else { return }
+        let frame = pipReparentFrame
+        removeFromSuperview()
+        superview.addSubview(self)
+        self.frame = frame
+        pipReparentSuperview = nil
+        pipReparentFrame = .zero
+    }
+
+    private var isInsideHostingHierarchy: Bool {
+        var view: NSView? = self
+        while let current = view {
+            if String(describing: type(of: current)).localizedCaseInsensitiveContains("hosting") {
+                return true
+            }
+            view = current.superview
+        }
+        return false
     }
 
     public override func makeBackingLayer() -> CALayer {
@@ -2287,9 +2347,8 @@ public struct PlayerView<
                                 iconFont: hudChromeIconFont,
                                 frameSize: hudChromeControlSize
                             )
-                            .foregroundStyle(state.isMuted ? .black : .primary)
+                            .foregroundStyle(.primary)
                             .frame(width: 54, height: hudChromeControlSize)
-                            .background(state.isMuted ? Color.white : Color.clear, in: Capsule(style: .continuous))
                             .contentShape(Capsule(style: .continuous))
                         }
                         .buttonStyle(.plain)
@@ -3540,6 +3599,7 @@ public final class PlayerPiPDelegate: NSObject, AVPictureInPictureControllerDele
         PlaybackLog.log("PiP failed to start: \(error.localizedDescription)")
         let activeState = self.state
         Task { @MainActor in
+            activeState.pipHostView?.restoreAfterPictureInPicture()
             activeState.isPictureInPictureActive = false
         }
     }
@@ -3550,6 +3610,7 @@ public final class PlayerPiPDelegate: NSObject, AVPictureInPictureControllerDele
     public func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         let activeState = self.state
         Task { @MainActor in
+            activeState.pipHostView?.restoreAfterPictureInPicture()
             activeState.isPictureInPictureActive = false
             guard activeState.isPlaybackChromeHidden, activeState.isPresented else { return }
             if activeState.dismissPlaybackWhenPiPCloses {
@@ -3565,6 +3626,7 @@ public final class PlayerPiPDelegate: NSObject, AVPictureInPictureControllerDele
         let completion = PiPRestoreCompletion(completionHandler)
         let activeState = self.state
         Task { @MainActor in
+            activeState.pipHostView?.restoreAfterPictureInPicture()
             activeState.dismissPlaybackWhenPiPCloses = false
             if activeState.isPresented {
                 activeState.restorePlaybackChrome()

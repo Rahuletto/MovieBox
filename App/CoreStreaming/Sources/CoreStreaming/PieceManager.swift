@@ -22,7 +22,7 @@ public actor PieceManager {
 
     private var pieceHashes: [Data] = []
     private var downloadedPieces: Set<UInt32> = []
-    private var pendingRequests: Set<BlockRequest> = []
+    private var pendingRequests: [BlockRequest: Date] = [:]
     private var pieceBuffers: [UInt32: Data] = [:]
     private var receivedBlockOffsets: [UInt32: Set<UInt32>] = [:]
     /// Pieces AVPlayer recently requested via range reads (newest first).
@@ -76,25 +76,108 @@ public actor PieceManager {
         indexBootstrapCompleted = true
     }
 
-    public func getNextRequest(peerBitfield: Data = Data()) -> BlockRequest? {
-        guard let pieceIndex = earliestIncompletePiece(peerBitfield: peerBitfield) else { return nil }
+    private static let duplicateRequestTimeout: TimeInterval = 2.0
 
-        let pieceSize = pieceSize(for: pieceIndex)
-        let blockCount = Int((pieceSize + Int64(blockSize) - 1) / Int64(blockSize))
+    private func isPieceCritical(_ pieceIndex: UInt32) -> Bool {
+        guard let anchor = playbackAnchorPiece else {
+            return playerHotPieces.prefix(Self.criticalReadAheadPieceCount).contains(pieceIndex)
+        }
+        if pieceIndex >= anchor && pieceIndex <= anchor + UInt32(Self.criticalReadAheadPieceCount) {
+            return true
+        }
+        return playerHotPieces.prefix(Self.criticalReadAheadPieceCount).contains(pieceIndex)
+    }
 
-        for blockIndex in 0..<blockCount {
-            let offset = UInt32(blockIndex) * blockSize
-            if receivedBlockOffsets[pieceIndex]?.contains(offset) == true {
-                continue
+    private func prioritizedPiecesForPeer(peerBitfield: Data) -> [UInt32] {
+        var result: [UInt32] = []
+        var seen = Set<UInt32>()
+        
+        func appendFrom(_ list: [UInt32]) {
+            for idx in list {
+                guard !downloadedPieces.contains(idx) else { continue }
+                guard !seen.contains(idx) else { continue }
+                if !peerBitfield.isEmpty, !peerHasPiece(idx, in: peerBitfield) { continue }
+                result.append(idx)
+                seen.insert(idx)
             }
+        }
+        
+        appendFrom(buildPlaybackPriorityOrder())
+        
+        if needsIndexBootstrap() {
+            appendFrom(buildBootstrapPriorityOrder())
+        }
+        
+        let start = playbackAnchorPiece.map { Int($0) } ?? streamFirstPiece
+        let end = min(streamLastPiece, pieceCount - 1)
+        if start <= end {
+            let sequentialForward = (start...end).map { UInt32($0) }
+            appendFrom(sequentialForward)
+        }
+        
+        if start > streamFirstPiece {
+            let sequentialBackward = (streamFirstPiece..<start).map { UInt32($0) }
+            appendFrom(sequentialBackward)
+        }
+        
+        return result
+    }
 
-            let length = min(blockSize, UInt32(pieceSize) - offset)
-            let request = BlockRequest(pieceIndex: pieceIndex, offset: offset, length: length)
+    public func getNextRequest(
+        peerBitfield: Data = Data(),
+        connectionOutstanding: Set<BlockRequest> = []
+    ) -> BlockRequest? {
+        let candidates = prioritizedPiecesForPeer(peerBitfield: peerBitfield)
+        let now = Date.now
 
-            guard !pendingRequests.contains(request) else { continue }
+        // Loop 1: Find first non-pending block
+        for pieceIndex in candidates {
+            let pieceSize = pieceSize(for: pieceIndex)
+            let blockCount = Int((pieceSize + Int64(blockSize) - 1) / Int64(blockSize))
+            
+            for blockIndex in 0..<blockCount {
+                let offset = UInt32(blockIndex) * blockSize
+                if receivedBlockOffsets[pieceIndex]?.contains(offset) == true {
+                    continue
+                }
+                
+                let length = min(blockSize, UInt32(pieceSize) - offset)
+                let request = BlockRequest(pieceIndex: pieceIndex, offset: offset, length: length)
+                
+                if pendingRequests[request] == nil {
+                    pendingRequests[request] = now
+                    return request
+                }
+            }
+        }
 
-            pendingRequests.insert(request)
-            return request
+        // Loop 2: Critical window duplicate request hotswapping
+        for pieceIndex in candidates {
+            guard isPieceCritical(pieceIndex) else { continue }
+            
+            let pieceSize = pieceSize(for: pieceIndex)
+            let blockCount = Int((pieceSize + Int64(blockSize) - 1) / Int64(blockSize))
+            
+            for blockIndex in 0..<blockCount {
+                let offset = UInt32(blockIndex) * blockSize
+                if receivedBlockOffsets[pieceIndex]?.contains(offset) == true {
+                    continue
+                }
+                
+                let length = min(blockSize, UInt32(pieceSize) - offset)
+                let request = BlockRequest(pieceIndex: pieceIndex, offset: offset, length: length)
+                
+                if connectionOutstanding.contains(request) {
+                    continue
+                }
+                
+                if let sentTime = pendingRequests[request],
+                   now.timeIntervalSince(sentTime) > Self.duplicateRequestTimeout {
+                    pendingRequests[request] = now
+                    TorrentLog.info("[PieceManager] Hotswapping critical block p\(pieceIndex)@\(offset) (pending \(String(format: "%.1f", now.timeIntervalSince(sentTime)))s)")
+                    return request
+                }
+            }
         }
 
         return nil
@@ -102,7 +185,7 @@ public actor PieceManager {
 
     public func recycleRequests(_ requests: [BlockRequest]) {
         for request in requests {
-            pendingRequests.remove(request)
+            pendingRequests.removeValue(forKey: request)
         }
     }
 
@@ -115,7 +198,11 @@ public actor PieceManager {
     }
 
     public func markBlockReceived(pieceIndex: UInt32, offset: UInt32, block: Data) -> PieceReceiveOutcome {
-        pendingRequests.remove(BlockRequest(pieceIndex: pieceIndex, offset: offset, length: 0))
+        pendingRequests.removeValue(forKey: BlockRequest(pieceIndex: pieceIndex, offset: offset, length: 0))
+
+        if downloadedPieces.contains(pieceIndex) {
+            return .incomplete
+        }
 
         let expectedSize = Int(pieceSize(for: pieceIndex))
         if pieceBuffers[pieceIndex] == nil {
@@ -147,7 +234,7 @@ public actor PieceManager {
     }
 
     public func cancelPendingRequests() -> [BlockRequest] {
-        let requests = Array(pendingRequests)
+        let requests = Array(pendingRequests.keys)
         pendingRequests.removeAll()
         return requests
     }
@@ -224,25 +311,6 @@ public actor PieceManager {
         playerHotPieces.count
     }
 
-    /// Pick per-peer work from the player's sliding window first, then bootstrap metadata,
-    /// then a bounded sequential fallback so peers keep contributing without racing far ahead.
-    private func earliestIncompletePiece(peerBitfield: Data) -> UInt32? {
-        if let p = firstIncompletePiece(in: buildPlaybackPriorityOrder(), peerBitfield: peerBitfield) {
-            return p
-        }
-
-        if needsIndexBootstrap() {
-            if let p = firstIncompletePiece(in: buildBootstrapPriorityOrder(), peerBitfield: peerBitfield) {
-                return p
-            }
-            return firstWarmSequentialMissing(peerBitfield: peerBitfield)
-                ?? firstSequentialMissing(peerBitfield: peerBitfield)
-        }
-
-        return firstIncompletePiece(in: buildFullPriorityOrder(), peerBitfield: peerBitfield)
-            ?? firstSequentialMissing(peerBitfield: peerBitfield)
-    }
-
     private func buildPlaybackPriorityOrder() -> [UInt32] {
         guard let playbackAnchorPiece else { return playerHotPieces }
         var priority: [UInt32] = []
@@ -266,32 +334,6 @@ public actor PieceManager {
         return priority
     }
 
-    private func firstWarmSequentialMissing(peerBitfield: Data) -> UInt32? {
-        guard let playbackAnchorPiece else { return nil }
-        let start = max(streamFirstPiece, Int(playbackAnchorPiece))
-        let end = min(streamLastPiece, start + Self.warmReadAheadPieceCount)
-        guard start <= end else { return nil }
-        for i in start...end {
-            let idx = UInt32(i)
-            if downloadedPieces.contains(idx) { continue }
-            if !peerBitfield.isEmpty, !peerHasPiece(idx, in: peerBitfield) { continue }
-            return idx
-        }
-        return nil
-    }
-
-    private func firstSequentialMissing(peerBitfield: Data) -> UInt32? {
-        let end = min(streamLastPiece, pieceCount - 1)
-        guard streamFirstPiece <= end else { return nil }
-        for i in streamFirstPiece...end {
-            let idx = UInt32(i)
-            if downloadedPieces.contains(idx) { continue }
-            if !peerBitfield.isEmpty, !peerHasPiece(idx, in: peerBitfield) { continue }
-            return idx
-        }
-        return nil
-    }
-
     private func needsIndexBootstrap() -> Bool {
         if indexBootstrapCompleted { return false }
         if !downloadedPieces.contains(UInt32(streamFirstPiece)) { return true }
@@ -299,17 +341,6 @@ public actor PieceManager {
             return true
         }
         return false
-    }
-
-    private func firstIncompletePiece(in priority: [UInt32], peerBitfield: Data) -> UInt32? {
-        for index in priority {
-            guard !downloadedPieces.contains(index) else { continue }
-            if !peerBitfield.isEmpty, !peerHasPiece(index, in: peerBitfield) {
-                continue
-            }
-            return index
-        }
-        return nil
     }
 
     private func buildBootstrapPriorityOrder() -> [UInt32] {
@@ -347,19 +378,6 @@ public actor PieceManager {
         return last
     }
 
-    private func buildFullPriorityOrder() -> [UInt32] {
-        var priority = buildBootstrapPriorityOrder()
-        func append(_ index: UInt32) {
-            guard !priority.contains(index) else { return }
-            priority.append(index)
-        }
-
-        for i in streamFirstPiece..<pieceCount {
-            append(UInt32(i))
-        }
-        return priority
-    }
-
     private func pieceIndicesCovering(mediaOffset: Int64, length: Int) -> [UInt32] {
         guard length > 0, mediaOffset >= 0 else { return [] }
         let span = min(Int64(length), streamMediaByteLength - mediaOffset)
@@ -388,7 +406,7 @@ public actor PieceManager {
     private func resetPiece(_ pieceIndex: UInt32) {
         pieceBuffers[pieceIndex] = nil
         receivedBlockOffsets[pieceIndex] = nil
-        pendingRequests = pendingRequests.filter { $0.pieceIndex != pieceIndex }
+        pendingRequests = pendingRequests.filter { $0.key.pieceIndex != pieceIndex }
     }
 
     private func pieceSize(for pieceIndex: UInt32) -> Int64 {
