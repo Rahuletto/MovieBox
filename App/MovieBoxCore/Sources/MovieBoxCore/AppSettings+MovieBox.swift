@@ -50,7 +50,13 @@ public extension AppSettings {
 
     var enabledTorrentIndexerSet: Set<String> {
         let parsed = TorrentIndexerPreferences.parseCSV(enabledTorrentIndexers)
-        return parsed.isEmpty ? TorrentIndexerPreferences.defaultIDs : parsed
+        if parsed.isEmpty { return TorrentIndexerPreferences.defaultIDs }
+        // Upgrade installs still on the old five-indexer default.
+        let legacyDefault: Set<String> = ["torrentio", "yts", "eztv", "piratebay", "1337x"]
+        if parsed == legacyDefault {
+            return TorrentIndexerPreferences.defaultIDs
+        }
+        return parsed
     }
 
     var cacheKey: String {

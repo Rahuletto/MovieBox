@@ -425,7 +425,7 @@ private struct SettingsDraft: Equatable {
     var preferredAudioLang = "en"
     var preferredSubtitleLang = "en"
     var enableYTS = true
-    var enabledTorrentIndexers = "torrentio,yts,eztv,piratebay,1337x"
+    var enabledTorrentIndexers = "torrentio,yts,eztv,piratebay,1337x,bitsearch,torrentdownload"
     var enableSeeding = true
     var maxActiveDownloads = 2
     var maxActiveUploads = 5

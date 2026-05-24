@@ -10,6 +10,10 @@ public enum TorrentMovieRelevanceFilter {
     /// Single-token titles need an explicit release year in the torrent name (any film).
     private static let ambiguousTitleMaxLength = 12
 
+    private static let stopWords: Set<String> = [
+        "the", "a", "an", "and", "or", "of", "in", "to", "for", "with", "at", "from", "by", "on", "as", "is", "it", "vs",
+    ]
+
     private static let nonMovieMarkers = [
         "daily show", "jimmy kimmel", "late show", "tonight show", "fallon", "conan", "colbert",
         "ellen", "talk show", "snl", "saturday night live", "last week tonight", "real time with",
@@ -33,7 +37,7 @@ public enum TorrentMovieRelevanceFilter {
     ) -> [TorrentResult] {
         guard !results.isEmpty else { return results }
 
-        let movieTokens = titleTokens(movieTitle)
+        let movieTokens = significantTitleTokens(movieTitle)
 
         let scored: [(torrent: TorrentResult, score: Int)] = results.compactMap { torrent in
             let score = relevanceScore(
@@ -63,7 +67,7 @@ public enum TorrentMovieRelevanceFilter {
                     sizeBytes: torrent.sizeBytes,
                     runtimeMinutes: runtimeMinutes
                 ) else { return false }
-                return containsAllTokens(normalize(torrent.title), tokens: movieTokens)
+                return matchesSignificantTokens(normalize(torrent.title), tokens: movieTokens)
             }.sorted { lhs, rhs in
                 if lhs.seeders != rhs.seeders { return lhs.seeders > rhs.seeders }
                 return lhs.sizeBytes > rhs.sizeBytes
@@ -105,7 +109,7 @@ public enum TorrentMovieRelevanceFilter {
 
         if matchesTitlePrefix(normalized, movieTokens: movieTokens) {
             score += 80
-        } else if containsAllTokens(normalized, tokens: movieTokens) {
+        } else if matchesSignificantTokens(normalized, tokens: movieTokens) {
             score += 40
         } else {
             return 0
@@ -308,7 +312,7 @@ public enum TorrentMovieRelevanceFilter {
         let markers = ["becoming ", "the making of ", "documentary", "biography", "chronicles "]
         guard markers.contains(where: { normalized.contains($0) }) else { return false }
 
-        return containsAllTokens(normalized, tokens: movieTokens)
+        return matchesSignificantTokens(normalized, tokens: movieTokens)
     }
 
     private static func isAmbiguousTitle(_ movieTokens: [String]) -> Bool {
@@ -331,6 +335,24 @@ public enum TorrentMovieRelevanceFilter {
         return false
     }
 
+    private static func significantTitleTokens(_ movieTitle: String) -> [String] {
+        titleTokens(movieTitle).filter { !stopWords.contains($0) }
+    }
+
+    /// Franchise titles often omit filler words ("Star Wars Mandalorian Grogu" vs full TMDB name).
+    private static func matchesSignificantTokens(_ normalized: String, tokens: [String]) -> Bool {
+        guard !tokens.isEmpty else { return true }
+        let dotted = normalized.replacingOccurrences(of: " ", with: ".")
+        let matched = tokens.filter { token in
+            normalized.contains(token) || dotted.contains(token)
+        }
+        if tokens.count <= 2 {
+            return matched.count == tokens.count
+        }
+        let required = max(2, Int(ceil(Double(tokens.count) * 0.5)))
+        return matched.count >= required
+    }
+
     private static func containsAllTokens(_ normalized: String, tokens: [String]) -> Bool {
         let dotted = normalized.replacingOccurrences(of: " ", with: ".")
         return tokens.allSatisfy { token in
@@ -348,6 +370,7 @@ public enum TorrentMovieRelevanceFilter {
 
     private static func normalize(_ value: String) -> String {
         value.lowercased()
+            .replacingOccurrences(of: "&", with: " and ")
             .replacingOccurrences(of: ".", with: " ")
             .replacingOccurrences(of: "_", with: " ")
             .replacingOccurrences(of: "-", with: " ")

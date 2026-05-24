@@ -126,7 +126,7 @@ public final class AppSettings {
     public var preferredSubtitleLang: String
     public var enableYTS: Bool
     /// Comma-separated indexer ids from backend `/api/config` (e.g. `torrentio,yts,1337x`).
-    public var enabledTorrentIndexers: String = "torrentio,yts,eztv,piratebay,1337x"
+    public var enabledTorrentIndexers: String = "torrentio,yts,eztv,piratebay,1337x,bitsearch,torrentdownload"
     public var enableSeeding: Bool
     public var maxActiveDownloads: Int
     public var maxActiveUploads: Int
@@ -166,7 +166,7 @@ public final class AppSettings {
         preferredAudioLang: String = "en",
         preferredSubtitleLang: String = "en",
         enableYTS: Bool = true,
-        enabledTorrentIndexers: String = "torrentio,yts,eztv,piratebay,1337x",
+        enabledTorrentIndexers: String = "torrentio,yts,eztv,piratebay,1337x,bitsearch,torrentdownload",
         enableSeeding: Bool = true,
         maxActiveDownloads: Int = 2,
         maxActiveUploads: Int = 5,

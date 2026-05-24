@@ -1,5 +1,5 @@
 import type { TorrentIndexer, TorrentSearchHit } from '../types'
-import { decodeHtml, fetchHTML, hashFromMagnet, parseSizeBytes, resolveQualityLabel } from '../utils'
+import { decodeHtml, fetchHTML, hashFromMagnet, parseSizeBytes, resolveQualityLabel, searchWithQueryVariants } from '../utils'
 
 function parseTorrentDownloadRows(html: string): Array<{
   title: string
@@ -108,15 +108,16 @@ export const torrentDownloadIndexer: TorrentIndexer = {
       'https://torrentdownloaddb.info',
     ]
 
-    for (const base of hosts) {
-      try {
-        // eslint-disable-next-line no-await-in-loop
-        const rows = await searchTorrentDownloadHost(base, ctx.query)
-        if (rows.length) return rows
-      } catch {
-        // Try next host
+    return searchWithQueryVariants(ctx.query, ctx.year, async (query) => {
+      for (const base of hosts) {
+        try {
+          const rows = await searchTorrentDownloadHost(base, query)
+          if (rows.length) return rows
+        } catch {
+          // Try next host / query variant
+        }
       }
-    }
-    return []
+      return []
+    })
   },
 }

@@ -29,7 +29,7 @@ struct MyListView: View {
                     ForEach(movies, id: \.tmdbId) { movie in
                         MoviePosterCard(
                             title: movie.title,
-                            posterURL: MetadataClient().posterDisplayURL(posterPath: movie.posterPath),
+                            posterURL: MetadataClient().posterDisplayURL(posterPath: movie.posterPath, backdropPath: nil),
                             progress: watchProgress(for: movie)
                         ) {
                             router.showDetail(id: movie.tmdbId, kind: movie.mediaKindEnum)
