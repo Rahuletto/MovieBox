@@ -226,7 +226,7 @@ struct SearchView: View {
             if combined.isEmpty {
                 let cachedMovies = await MovieRegistry.shared.allMovies()
                 if !cachedMovies.isEmpty {
-                    let (fuzzyMatches, bestSuggestion) = try await Task.detached(priority: .userInitiated) { () -> ([Movie], String?) in
+                    let (fuzzyMatches, bestSuggestion) = await Task.detached(priority: .userInitiated) { () -> ([Movie], String?) in
                         var matches: [(movie: Movie, dist: Int)] = []
                         var bestMovie: Movie?
                         var minDistance = Int.max
@@ -261,7 +261,7 @@ struct SearchView: View {
                     }
                 }
             } else {
-                finalResults = try await Task.detached(priority: .userInitiated) {
+                finalResults = await Task.detached(priority: .userInitiated) {
                     return combined.sorted { m1, m2 in
                         let d1 = SearchView.levenshteinDistance(m1.title.lowercased(), q)
                         let d2 = SearchView.levenshteinDistance(m2.title.lowercased(), q)
@@ -288,7 +288,7 @@ struct SearchView: View {
         isSearching = false
     }
 
-    private static func levenshteinDistance(_ s1: String, _ s2: String) -> Int {
+    private nonisolated static func levenshteinDistance(_ s1: String, _ s2: String) -> Int {
         let empty = [Int](repeating: 0, count: s2.count + 1)
         var last = [Int](0...s2.count)
         var current = empty

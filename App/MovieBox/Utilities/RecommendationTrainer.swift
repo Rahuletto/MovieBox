@@ -42,94 +42,89 @@ final class RecommendationTrainer: NSObject, ObservableObject {
     func train(ratings: [RatingRecord], storedMovies: [MovieRecord], candidates: [Movie]) async {
         isTraining = true
         error = nil
-        
-        do {
-            // Convert ratings to signals
-            let ratingSignals = ratings.map { rating in
-                RatingSignal(
-                    tmdbId: rating.tmdbId,
-                    rating: rating.rating,
-                    genreIds: rating.genres,
-                    date: rating.ratedAt,
-                    source: .explicitRating
-                )
-            }
-            
-            // Watch history signals (implicit)
-            let watchSignals = storedMovies.filter { $0.lastWatchedAt != nil }.map { movie in
-                let ratingValue: Float
-                if movie.watchedFraction >= 0.8 {
-                    ratingValue = 1.0
-                } else if movie.watchedFraction >= 0.15 {
-                    ratingValue = 0.5
-                } else if movie.playbackPositionSeconds >= 30 {
-                    ratingValue = -0.5
-                } else {
-                    ratingValue = 0.0
-                }
-                return RatingSignal(
-                    tmdbId: movie.tmdbId,
-                    rating: ratingValue,
-                    genreIds: movie.genres,
-                    date: movie.lastWatchedAt ?? Date(),
-                    source: .watchHistory
-                )
-            }
-            
-            // Watchlist signals (implicit)
-            let watchlistSignals = storedMovies.filter { $0.watchlistAddedAt != nil }.map { movie in
-                RatingSignal(
-                    tmdbId: movie.tmdbId,
-                    rating: 1.0,
-                    genreIds: movie.genres,
-                    date: movie.watchlistAddedAt ?? Date(),
-                    source: .watchlist
-                )
-            }
-            
-            let signals = ratingSignals + watchSignals + watchlistSignals
-            
-            guard !signals.isEmpty else {
-                error = "No signals available for training"
-                isTraining = false
-                return
-            }
-            
-            // Compute affinity vector
-            let affinity = await engine.affinityVector(from: signals)
-            
-            // Rank candidates
-            let candidateRecords = candidates.map { movie in
-                RecommendationCandidate(id: movie.id, genreIds: movie.genreIds, baseScore: Float(movie.voteAverage / 10))
-            }
-            _ = await engine.rank(candidates: candidateRecords, ratings: signals)
-            
-            // Compute metrics
-            var genreDistribution: [Int: Int] = [:]
-            for signal in signals {
-                for genre in signal.genreIds {
-                    genreDistribution[genre, default: 0] += 1
-                }
-            }
-            
-            let avgRating = ratingSignals.isEmpty ? 0 : ratingSignals.map(\.rating).reduce(0, +) / Float(ratingSignals.count)
-            
-            metrics = TrainingMetrics(
-                totalRatings: signals.count,
-                avgRating: avgRating,
-                genreDistribution: genreDistribution,
-                affinityVector: affinity,
-                trainedAt: Date()
+
+        // Convert ratings to signals
+        let ratingSignals = ratings.map { rating in
+            RatingSignal(
+                tmdbId: rating.tmdbId,
+                rating: rating.rating,
+                genreIds: rating.genres,
+                date: rating.ratedAt,
+                source: .explicitRating
             )
-            
-            // Cache results
-            await cacheMetrics(metrics!)
-            
-            isTraining = false
-        } catch {
-            self.error = error.localizedDescription
-            isTraining = false
         }
+
+        // Watch history signals (implicit)
+        let watchSignals = storedMovies.filter { $0.lastWatchedAt != nil }.map { movie in
+            let ratingValue: Float
+            if movie.watchedFraction >= 0.8 {
+                ratingValue = 1.0
+            } else if movie.watchedFraction >= 0.15 {
+                ratingValue = 0.5
+            } else if movie.playbackPositionSeconds >= 30 {
+                ratingValue = -0.5
+            } else {
+                ratingValue = 0.0
+            }
+            return RatingSignal(
+                tmdbId: movie.tmdbId,
+                rating: ratingValue,
+                genreIds: movie.genres,
+                date: movie.lastWatchedAt ?? Date(),
+                source: .watchHistory
+            )
+        }
+
+        // Watchlist signals (implicit)
+        let watchlistSignals = storedMovies.filter { $0.watchlistAddedAt != nil }.map { movie in
+            RatingSignal(
+                tmdbId: movie.tmdbId,
+                rating: 1.0,
+                genreIds: movie.genres,
+                date: movie.watchlistAddedAt ?? Date(),
+                source: .watchlist
+            )
+        }
+
+        let signals = ratingSignals + watchSignals + watchlistSignals
+
+        guard !signals.isEmpty else {
+            error = "No signals available for training"
+            isTraining = false
+            return
+        }
+
+        // Compute affinity vector
+        let affinity = await engine.affinityVector(from: signals)
+
+        // Rank candidates
+        let candidateRecords = candidates.map { movie in
+            RecommendationCandidate(id: movie.id, genreIds: movie.genreIds, baseScore: Float(movie.voteAverage / 10))
+        }
+        _ = await engine.rank(candidates: candidateRecords, ratings: signals)
+
+        // Compute metrics
+        var genreDistribution: [Int: Int] = [:]
+        for signal in signals {
+            for genre in signal.genreIds {
+                genreDistribution[genre, default: 0] += 1
+            }
+        }
+
+        let avgRating = ratingSignals.isEmpty ? 0 : ratingSignals.map(\.rating).reduce(0, +) / Float(ratingSignals.count)
+
+        metrics = TrainingMetrics(
+            totalRatings: signals.count,
+            avgRating: avgRating,
+            genreDistribution: genreDistribution,
+            affinityVector: affinity,
+            trainedAt: Date()
+        )
+
+        // Cache results
+        await cacheMetrics(metrics!)
+
+        isTraining = false
     }
     
     private func cacheMetrics(_ metrics: TrainingMetrics) async {

@@ -45,7 +45,7 @@ enum SearchOpenedStore {
     }
 
     private static func pruneOldRecords(in modelContext: ModelContext) {
-        var descriptor = FetchDescriptor<SearchOpenedRecord>(
+        let descriptor = FetchDescriptor<SearchOpenedRecord>(
             sortBy: [SortDescriptor(\SearchOpenedRecord.openedAt, order: .reverse)]
         )
         guard let records = try? modelContext.fetch(descriptor), records.count > maxStoredItems else {

@@ -80,7 +80,6 @@ struct WindowConfigurator: NSViewRepresentable {
 
             if !isPlayerPresented && window.toolbar == nil {
                 let dummyToolbar = NSToolbar(identifier: "MovieBox.WindowChromeToolbar")
-                dummyToolbar.showsBaselineSeparator = false
                 window.toolbar = dummyToolbar
             }
 
@@ -159,7 +158,6 @@ struct WindowConfigurator: NSViewRepresentable {
                 // Restore dummy toolbar when in windowed mode and player is closed to preserve beautiful corner layouts.
                 if window.toolbar == nil {
                     let dummyToolbar = NSToolbar(identifier: "MovieBox.WindowChromeToolbar")
-                    dummyToolbar.showsBaselineSeparator = false
                     window.toolbar = dummyToolbar
                 }
                 window.titlebarAppearsTransparent = true

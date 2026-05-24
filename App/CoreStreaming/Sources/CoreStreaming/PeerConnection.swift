@@ -705,7 +705,10 @@ public final class PeerConnection: ObservableObject {
         state = .downloading
 
         for _ in 0..<availableSlots {
-            guard let request = await pieceManager.getNextRequest(peerBitfield: peerBitfield) else { break }
+            guard let request = await pieceManager.getNextRequest(
+                peerBitfield: peerBitfield,
+                connectionOutstanding: outstandingRequests
+            ) else { break }
 
             outstandingRequests.insert(request)
             requestSentAt[request] = Date.now

@@ -993,21 +993,30 @@ public final class TorrentEngine {
 
     private func startMaintenanceTimer() {
         maintenanceTimer = Task { [weak self] in
+            var iteration = 0
             while !Task.isCancelled {
                 do {
-                    try await Task.sleep(for: .seconds(10))
+                    try await Task.sleep(for: .seconds(2))
                 } catch {
                     break
                 }
                 guard let self else { return }
                 guard isRunning else { return }
-                pruneDeadPeers()
+                
+                iteration += 1
+                
+                if iteration % 5 == 0 {
+                    pruneDeadPeers()
+                }
+                
                 await expireStalledRequests()
-
-                if livePeerCount() < 8 {
-                    let peers = await fetchPeersFromTrackers(event: .empty)
-                    guard !Task.isCancelled else { return }
-                    await connectToPeers(peers)
+                
+                if iteration % 5 == 0 {
+                    if livePeerCount() < 8 {
+                        let peers = await fetchPeersFromTrackers(event: .empty)
+                        guard !Task.isCancelled else { return }
+                        await connectToPeers(peers)
+                    }
                 }
             }
         }
