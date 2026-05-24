@@ -24,17 +24,6 @@
 		D2898CB22FB9961F005174CF /* MovieBox.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MovieBox.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
-/* Begin PBXFileSystemSynchronizedRootGroup section */
-		D2898CB42FB9961F005174CF /* MovieBox */ = {
-			exceptions = (
-				D2898CC02FB99621005174CF /* Exceptions for "MovieBox" folder in "MovieBox" target */,
-			);
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = MovieBox;
-			sourceTree = "<group>";
-		};
-/* End PBXFileSystemSynchronizedRootGroup section */
-
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
 		D2898CC02FB99621005174CF /* Exceptions for "MovieBox" folder in "MovieBox" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
@@ -44,6 +33,17 @@
 			target = D2898CB12FB9961F005174CF /* MovieBox */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		D2898CB42FB9961F005174CF /* MovieBox */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				D2898CC02FB99621005174CF /* Exceptions for "MovieBox" folder in "MovieBox" target */,
+			);
+			path = MovieBox;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		D2898CAF2FB9961F005174CF /* Frameworks */ = {
@@ -92,6 +92,7 @@
 				D2898CAE2FB9961F005174CF /* Sources */,
 				D2898CAF2FB9961F005174CF /* Frameworks */,
 				D2898CB02FB9961F005174CF /* Resources */,
+				D2FF00020000000000000001 /* Embed FFmpeg Tools */,
 			);
 			buildRules = (
 			);
@@ -172,6 +173,26 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		D2FF00020000000000000001 /* Embed FFmpeg Tools */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Embed FFmpeg Tools";
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/ffmpeg",
+				"$(BUILT_PRODUCTS_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/ffprobe",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${SRCROOT}/Scripts/embed-ffmpeg-tools.sh\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		D2898CAE2FB9961F005174CF /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -220,7 +241,7 @@
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
@@ -283,7 +304,7 @@
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;

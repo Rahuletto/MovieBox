@@ -29,32 +29,11 @@ public struct EmbeddedSubtitleTrack: Sendable, Identifiable, Hashable {
 
 /// Lists and extracts subtitle streams baked into a local video file via ffmpeg/ffprobe.
 public enum EmbeddedSubtitleExtractor {
-    private static let ffmpegPath: String = {
-        if let bundlePath = Bundle.main.path(forResource: "ffmpeg", ofType: nil) {
-            return bundlePath
-        }
-        if FileManager.default.fileExists(atPath: "/opt/homebrew/bin/ffmpeg") {
-            return "/opt/homebrew/bin/ffmpeg"
-        }
-        return "/usr/local/bin/ffmpeg"
-    }()
-
-    private static let ffprobePath: String = {
-        let sibling = (ffmpegPath as NSString).deletingLastPathComponent.appending("/ffprobe")
-        if FileManager.default.fileExists(atPath: sibling) {
-            return sibling
-        }
-        if FileManager.default.fileExists(atPath: "/opt/homebrew/bin/ffprobe") {
-            return "/opt/homebrew/bin/ffprobe"
-        }
-        return "/usr/local/bin/ffprobe"
-    }()
-
     private static let minimumPartialProbeFileBytes: Int64 = 512 * 1024
     private static let minimumExtractFileBytes: Int64 = 2 * 1024 * 1024
 
     public static var isAvailable: Bool {
-        FileManager.default.isExecutableFile(atPath: ffmpegPath)
+        FFmpegToolLocator.isAvailable
     }
 
     /// Probes a media file for embedded subtitle streams. Returns empty if ffmpeg is missing or the slice is too small.
@@ -90,8 +69,10 @@ public enum EmbeddedSubtitleExtractor {
     }
 
     private static func runProbe(mediaFileURL: URL) -> [EmbeddedSubtitleTrack] {
+        guard let ffprobeURL = FFmpegToolLocator.url(for: "ffprobe") else { return [] }
+
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: ffprobePath)
+        process.executableURL = ffprobeURL
         process.arguments = [
             "-hide_banner",
             "-loglevel", "error",
@@ -138,6 +119,10 @@ public enum EmbeddedSubtitleExtractor {
         streamIndex: Int,
         outputURL: URL
     ) throws {
+        guard let ffmpegURL = FFmpegToolLocator.url(for: "ffmpeg") else {
+            throw EmbeddedSubtitleError.ffmpegNotFound
+        }
+
         let parent = outputURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
         if FileManager.default.fileExists(atPath: outputURL.path) {
@@ -145,7 +130,7 @@ public enum EmbeddedSubtitleExtractor {
         }
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: ffmpegPath)
+        process.executableURL = ffmpegURL
         process.arguments = [
             "-hide_banner",
             "-loglevel", "error",
@@ -178,7 +163,7 @@ public enum EmbeddedSubtitleError: Error, LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .ffmpegNotFound:
-            "ffmpeg was not found. Install with: brew install ffmpeg"
+            "ffmpeg was not found in the app bundle"
         case .fileTooSmall:
             "Not enough of the video file is downloaded yet to extract subtitles. Keep buffering, or pick an “In video” track that uses the player’s built-in captions."
         case .extractionFailed(let message):

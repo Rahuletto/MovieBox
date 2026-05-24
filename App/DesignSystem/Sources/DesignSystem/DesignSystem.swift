@@ -193,6 +193,8 @@ public struct MoviePosterCard: View {
     private let title: String
     private let subtitle: String
     private let posterURL: URL?
+    /// Optional watch progress (0…1) shown as a thin bar on the poster bottom edge.
+    private let progress: Double?
     private let action: () -> Void
     /// Optional hover callback — fired once when the cursor enters the card.
     /// Use it to kick off background prefetches (detail bundle, backdrop, etc.).
@@ -202,12 +204,14 @@ public struct MoviePosterCard: View {
         title: String,
         subtitle: String = "",
         posterURL: URL?,
+        progress: Double? = nil,
         onHover: (() -> Void)? = nil,
         action: @escaping () -> Void
     ) {
         self.title = title
         self.subtitle = subtitle
         self.posterURL = posterURL
+        self.progress = progress
         self.onHover = onHover
         self.action = action
     }
@@ -221,6 +225,22 @@ public struct MoviePosterCard: View {
                     .overlay(alignment: .bottomLeading) {
                         LinearGradient(colors: [.clear, Color.black.opacity(0.25)], startPoint: .top, endPoint: .bottom)
                             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    }
+                    .overlay(alignment: .bottom) {
+                        if let progress, progress > 0.001, progress < 0.995 {
+                            GeometryReader { geo in
+                                ZStack(alignment: .leading) {
+                                    Capsule()
+                                        .fill(.white.opacity(0.35))
+                                    Capsule()
+                                        .fill(.white)
+                                        .frame(width: max(4, geo.size.width * progress))
+                                }
+                            }
+                            .frame(height: 4)
+                            .padding(.horizontal, 12)
+                            .padding(.bottom, 12)
+                        }
                     }
                     .shadow(color: Color.black.opacity(0.28), radius: 12, x: 0, y: 5)
 

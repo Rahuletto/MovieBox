@@ -227,6 +227,10 @@ public final class StreamSession<O: StreamingOrchestration & Sendable>: Observab
         await orchestrator.mediaFileURLForSubtitleProbe()
     }
 
+    public func isCurrentStreamMKV() async -> Bool {
+        await orchestrator.streamIndexProbeLabel().contains("MKV")
+    }
+
     public func cancel() async {
         TorrentLog.info("[StreamSession] cancel — was \(stateLabel)")
         bufferingWatchdogTask?.cancel()
