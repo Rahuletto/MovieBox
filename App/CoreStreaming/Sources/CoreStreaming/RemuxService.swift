@@ -42,7 +42,19 @@ public actor RemuxService {
 
         if Self.isCompleteHLSPlaylist(playlistURL) {
             TorrentLog.info("[Remux] cache hit complete playlist=\(playlistURL.path)")
-            return RemuxResult(playlistURL: playlistURL, outputDirectory: outputDirectory, state: .completed)
+            let remuxPlan = try await plan(inputURL: inputURL)
+            let verified = try await verifyRemuxMetadata(
+                remuxPlan: remuxPlan,
+                outputDirectory: outputDirectory
+            )
+            return RemuxResult(
+                playlistURL: playlistURL,
+                outputDirectory: outputDirectory,
+                state: .completed,
+                durationSeconds: remuxPlan.probe.duration,
+                verifiedVideoColor: verified.video,
+                verifiedAtmos: verified.atmos
+            )
         }
 
         try fileManager.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
@@ -82,11 +94,18 @@ public actor RemuxService {
             throw RemuxError.incompletePlaylist
         }
         TorrentLog.info("[Remux] completed playlist=\(playlistURL.path)")
+
+        let verified = try await verifyRemuxMetadata(
+            remuxPlan: remuxPlan,
+            outputDirectory: outputDirectory
+        )
         return RemuxResult(
             playlistURL: playlistURL,
             outputDirectory: outputDirectory,
             state: .completed,
-            durationSeconds: remuxPlan.probe.duration
+            durationSeconds: remuxPlan.probe.duration,
+            verifiedVideoColor: verified.video,
+            verifiedAtmos: verified.atmos
         )
     }
 
@@ -102,11 +121,17 @@ public actor RemuxService {
         if let existing = activeStreamingProcesses[safeKey], existing.isRunning, Self.hasPlayableStreamingHLS(in: outputDirectory) {
             let playbackURL = try await ensureHLSServerURL(cacheKey: safeKey, outputDirectory: outputDirectory)
             TorrentLog.info("[Remux] streaming cache active playlist=\(playbackURL.absoluteString)")
+            let verified = try await verifyRemuxMetadata(
+                remuxPlan: remuxPlan,
+                outputDirectory: outputDirectory
+            )
             return RemuxResult(
                 playlistURL: playbackURL,
                 outputDirectory: outputDirectory,
                 state: .playable,
-                durationSeconds: remuxPlan.probe.duration
+                durationSeconds: remuxPlan.probe.duration,
+                verifiedVideoColor: verified.video,
+                verifiedAtmos: verified.atmos
             )
         }
 
@@ -139,11 +164,17 @@ public actor RemuxService {
             if Self.hasPlayableStreamingHLS(in: outputDirectory), process.isRunning {
                 let playbackURL = try await ensureHLSServerURL(cacheKey: safeKey, outputDirectory: outputDirectory)
                 TorrentLog.info("[Remux] streaming playable playlist=\(playbackURL.absoluteString) files=\(Self.hlsFileSummary(in: outputDirectory))")
+                let verified = try await verifyRemuxMetadata(
+                    remuxPlan: remuxPlan,
+                    outputDirectory: outputDirectory
+                )
                 return RemuxResult(
                     playlistURL: playbackURL,
                     outputDirectory: outputDirectory,
                     state: .playable,
-                    durationSeconds: remuxPlan.probe.duration
+                    durationSeconds: remuxPlan.probe.duration,
+                    verifiedVideoColor: verified.video,
+                    verifiedAtmos: verified.atmos
                 )
             }
             if !process.isRunning {
@@ -315,8 +346,63 @@ public actor RemuxService {
         let audio = probe.audioStreams.map { "\($0.index):\($0.codecName)" }.joined(separator: ",")
         let hdr = video?.dynamicRange.rawValue ?? "unknown"
         let dv = video?.hasDolbyVision == true ? "yes" : "no"
-        let atmos = probe.audioStreams.contains { $0.hasAtmosMetadata } ? "yes" : "no"
-        TorrentLog.info("[Remux] probe video=\(video?.codecName ?? "none") hdr=\(hdr) dv=\(dv) audio=\(audio) atmos=\(atmos)")
+        let mdm = video?.colorMetadata.hasMasteringDisplay == true ? "yes" : "no"
+        let cll = video?.colorMetadata.hasContentLightLevel == true ? "yes" : "no"
+        let atmos = probe.audioStreams.contains { $0.atmosInfo.hasAtmosMetadata } ? "yes" : "no"
+        TorrentLog.info("[Remux] probe video=\(video?.codecName ?? "none") hdr=\(hdr) dv=\(dv) mdm=\(mdm) cll=\(cll) audio=\(audio) atmos=\(atmos)")
+    }
+
+    private func verifyRemuxMetadata(
+        remuxPlan: RemuxPlan,
+        outputDirectory: URL
+    ) async throws -> (video: VideoColorMetadata?, atmos: AtmosAudioInfo?) {
+        let probeURLs = Self.outputProbeURLs(in: outputDirectory, decision: remuxPlan.decision)
+        guard !probeURLs.isEmpty else {
+            TorrentLog.warn("[Remux] hdr validate skipped — no probe target in \(outputDirectory.path)")
+            return (remuxPlan.videoStream?.colorMetadata, remuxPlan.audioStream?.atmosInfo)
+        }
+
+        var mergedVideo: VideoColorMetadata?
+        var mergedAtmos: AtmosAudioInfo?
+        for probeURL in probeURLs {
+            let outputProbe = try await probe(inputURL: probeURL)
+            if let video = outputProbe.videoStreams.first?.colorMetadata {
+                mergedVideo = Self.mergeVideoColorMetadata(mergedVideo, video)
+            }
+            if let atmos = remuxPlan.audioStream.flatMap({ planned in
+                outputProbe.audioStreams.first(where: { $0.codecName == planned.codecName })?.atmosInfo
+                    ?? outputProbe.audioStreams.first?.atmosInfo
+            }) {
+                mergedAtmos = Self.mergeAtmosInfo(mergedAtmos, atmos)
+            }
+        }
+
+        let sourceVideo = remuxPlan.videoStream?.colorMetadata
+        let sourceAtmos = remuxPlan.audioStream?.atmosInfo
+        let outputVideo = mergedVideo
+        let outputAtmos = mergedAtmos
+
+        let result = HDRMetadataValidator.validate(
+            sourceVideo: sourceVideo,
+            sourceAtmos: sourceAtmos,
+            outputVideo: outputVideo,
+            outputAtmos: outputAtmos,
+            plan: remuxPlan
+        )
+
+        for warning in result.warnings {
+            TorrentLog.warn("[Remux] hdr validate warn \(warning.field): \(warning.message)")
+        }
+
+        if !result.passed {
+            let detail = result.issues.map { "\($0.field): \($0.message)" }.joined(separator: "; ")
+            TorrentLog.error("[Remux] hdr validate failed \(detail)")
+            throw RemuxError.metadataStripped(detail)
+        }
+
+        let probedFiles = probeURLs.map(\.lastPathComponent).joined(separator: ",")
+        TorrentLog.info("[Remux] hdr validate passed files=[\(probedFiles)] hdr=\(outputVideo?.dynamicRange.rawValue ?? "sdr") mdm=\(outputVideo?.hasMasteringDisplay == true ? "yes" : "no") cll=\(outputVideo?.hasContentLightLevel == true ? "yes" : "no") atmos=\(outputAtmos?.hasAtmosMetadata == true ? "yes" : "no")")
+        return (outputVideo, outputAtmos)
     }
 }
 
@@ -353,6 +439,7 @@ public struct VideoStream: Sendable {
     public let dynamicRange: DynamicRange
     public let hasDolbyVision: Bool
     public let hasHDR10Plus: Bool
+    public let colorMetadata: VideoColorMetadata
 }
 
 public struct AudioStream: Sendable {
@@ -367,6 +454,7 @@ public struct AudioStream: Sendable {
     public let title: String?
     public let isDefault: Bool
     public let hasAtmosMetadata: Bool
+    public let atmosInfo: AtmosAudioInfo
 }
 
 public struct SubtitleStream: Sendable {
@@ -415,12 +503,25 @@ public struct RemuxResult: Sendable {
     public let outputDirectory: URL
     public let state: RemuxSessionState
     public let durationSeconds: Double?
+    /// Post-remux ffprobe of init.mp4 / segment — used for AVPlayer HUD and tone-map signaling.
+    public let verifiedVideoColor: VideoColorMetadata?
+    /// Verified E-AC-3 Atmos / multichannel for HDMI passthrough and Spatial Audio eligibility.
+    public let verifiedAtmos: AtmosAudioInfo?
 
-    public init(playlistURL: URL, outputDirectory: URL, state: RemuxSessionState, durationSeconds: Double? = nil) {
+    public init(
+        playlistURL: URL,
+        outputDirectory: URL,
+        state: RemuxSessionState,
+        durationSeconds: Double? = nil,
+        verifiedVideoColor: VideoColorMetadata? = nil,
+        verifiedAtmos: AtmosAudioInfo? = nil
+    ) {
         self.playlistURL = playlistURL
         self.outputDirectory = outputDirectory
         self.state = state
         self.durationSeconds = durationSeconds
+        self.verifiedVideoColor = verifiedVideoColor
+        self.verifiedAtmos = verifiedAtmos
     }
 }
 
@@ -466,6 +567,7 @@ public enum RemuxError: Error, LocalizedError, Equatable {
     case ffprobeNotFound
     case unsupported(String)
     case invalidProbe(String)
+    case metadataStripped(String)
 
     public var errorDescription: String? {
         switch self {
@@ -485,6 +587,8 @@ public enum RemuxError: Error, LocalizedError, Equatable {
             return message
         case .invalidProbe(let message):
             return "Invalid media probe: \(message)"
+        case .metadataStripped(let details):
+            return "HDR/Dolby metadata was lost during remux and cannot tone-map correctly on this Mac. \(details)"
         }
     }
 }
@@ -503,7 +607,13 @@ extension RemuxService {
         let videoStreams = streams
             .filter { $0.codecType == "video" }
             .map { stream in
-                VideoStream(
+                let colorMetadata = SideDataParser.videoColorMetadata(
+                    colorPrimaries: stream.colorPrimaries,
+                    colorTransfer: stream.colorTransfer,
+                    colorSpace: stream.colorSpace,
+                    sideDataList: stream.sideDataList
+                )
+                return VideoStream(
                     index: stream.index,
                     codecName: stream.codecName.normalizedCodecName,
                     profile: stream.profile,
@@ -517,17 +627,27 @@ extension RemuxService {
                     colorPrimaries: stream.colorPrimaries,
                     colorTransfer: stream.colorTransfer,
                     colorSpace: stream.colorSpace,
-                    dynamicRange: dynamicRange(for: stream),
-                    hasDolbyVision: hasDolbyVision(stream),
-                    hasHDR10Plus: hasHDR10Plus(stream)
+                    dynamicRange: colorMetadata.dynamicRange,
+                    hasDolbyVision: colorMetadata.dolbyVision != nil,
+                    hasHDR10Plus: colorMetadata.hdr10Plus.present,
+                    colorMetadata: colorMetadata
                 )
             }
         let audioStreams = streams
             .filter { $0.codecType == "audio" }
             .map { stream in
-                AudioStream(
+                let codec = stream.codecName.normalizedCodecName
+                let tagSearch = [stream.tags?.title, stream.tags?.language].compactMap { $0 }.joined(separator: " ")
+                let atmosInfo = SideDataParser.atmosAudioInfo(
+                    codecName: codec,
+                    channels: stream.channels,
+                    channelLayout: stream.channelLayout,
+                    sideDataList: stream.sideDataList,
+                    tagsSearch: tagSearch
+                )
+                return AudioStream(
                     index: stream.index,
-                    codecName: stream.codecName.normalizedCodecName,
+                    codecName: codec,
                     profile: stream.profile,
                     channels: stream.channels,
                     channelLayout: stream.channelLayout,
@@ -536,7 +656,8 @@ extension RemuxService {
                     language: stream.tags?.language,
                     title: stream.tags?.title,
                     isDefault: stream.disposition?.defaultValue == 1,
-                    hasAtmosMetadata: hasAtmosMetadata(stream)
+                    hasAtmosMetadata: atmosInfo.hasAtmosMetadata,
+                    atmosInfo: atmosInfo
                 )
             }
         let subtitleStreams = streams
@@ -618,7 +739,7 @@ extension RemuxService {
         if let audio = plan.audioStream {
             arguments.append(contentsOf: ["-map", "0:\(audio.index)"])
         }
-        arguments.append(contentsOf: ["-c", "copy"])
+        arguments.append(contentsOf: ["-map_metadata", "0", "-copy_unknown", "-c", "copy"])
         if let videoTag = plan.videoTag {
             arguments.append(contentsOf: ["-tag:v", videoTag])
         }
@@ -645,6 +766,7 @@ extension RemuxService {
         arguments.append(contentsOf: [
             "-dn",
             "-sn",
+            "-movflags", "+write_colr",
             "-avoid_negative_ts", "make_zero",
             "-reset_timestamps", "1",
             "-f", "hls",
@@ -848,29 +970,72 @@ extension RemuxService {
         )
     }
 
-    private static func dynamicRange(for stream: FFProbeStream) -> DynamicRange {
-        if hasDolbyVision(stream) { return .dolbyVision }
-        if hasHDR10Plus(stream) { return .hdr10Plus }
-        if stream.colorTransfer == "arib-std-b67" { return .hlg }
-        if stream.colorTransfer == "smpte2084" || stream.colorPrimaries == "bt2020" || stream.colorSpace == "bt2020nc" {
-            return .hdr10
+    static func outputProbeURLs(in outputDirectory: URL, decision: RemuxPlanDecision) -> [URL] {
+        let files = (try? FileManager.default.contentsOfDirectory(at: outputDirectory, includingPropertiesForKeys: nil)) ?? []
+        switch decision {
+        case .fmp4HLS:
+            var urls: [URL] = []
+            let initURL = outputDirectory.appendingPathComponent("init.mp4")
+            if FileManager.default.fileExists(atPath: initURL.path) {
+                urls.append(initURL)
+            }
+            let segments = files
+                .filter { $0.pathExtension.lowercased() == "m4s" }
+                .sorted { $0.lastPathComponent < $1.lastPathComponent }
+                .prefix(2)
+            urls.append(contentsOf: segments)
+            return urls
+        case .tsHLS:
+            return files
+                .filter { $0.pathExtension.lowercased() == "ts" }
+                .sorted { $0.lastPathComponent < $1.lastPathComponent }
+                .prefix(3)
+                .map { $0 }
+        case .unsupported:
+            return []
         }
-        return .sdr
     }
 
-    private static func hasDolbyVision(_ stream: FFProbeStream) -> Bool {
-        let haystack = stream.searchableMetadata
-        return haystack.contains("dolby vision") || haystack.contains("dovi") || haystack.contains("dv profile")
+    static func outputProbeURL(in outputDirectory: URL, decision: RemuxPlanDecision) -> URL? {
+        outputProbeURLs(in: outputDirectory, decision: decision).first
     }
 
-    private static func hasHDR10Plus(_ stream: FFProbeStream) -> Bool {
-        let haystack = stream.searchableMetadata
-        return haystack.contains("hdr10+") || haystack.contains("smpte2094") || haystack.contains("dynamic hdr plus")
+    static func mergeVideoColorMetadata(_ lhs: VideoColorMetadata?, _ rhs: VideoColorMetadata) -> VideoColorMetadata {
+        guard let lhs else { return rhs }
+        return VideoColorMetadata(
+            colorPrimaries: rhs.colorPrimaries ?? lhs.colorPrimaries,
+            colorTransfer: rhs.colorTransfer ?? lhs.colorTransfer,
+            colorSpace: rhs.colorSpace ?? lhs.colorSpace,
+            dynamicRange: maxDynamicRange(lhs.dynamicRange, rhs.dynamicRange),
+            masteringDisplay: rhs.masteringDisplay ?? lhs.masteringDisplay,
+            contentLightLevel: rhs.contentLightLevel ?? lhs.contentLightLevel,
+            dolbyVision: rhs.dolbyVision ?? lhs.dolbyVision,
+            hdr10Plus: HDR10PlusMetadata(present: lhs.hdr10Plus.present || rhs.hdr10Plus.present)
+        )
     }
 
-    private static func hasAtmosMetadata(_ stream: FFProbeStream) -> Bool {
-        let haystack = stream.searchableMetadata
-        return haystack.contains("atmos") || haystack.contains("joc")
+    static func mergeAtmosInfo(_ lhs: AtmosAudioInfo?, _ rhs: AtmosAudioInfo) -> AtmosAudioInfo {
+        guard let lhs else { return rhs }
+        let channels = [lhs.channelCount, rhs.channelCount].compactMap { $0 }.max()
+        return AtmosAudioInfo(
+            codecName: rhs.codecName,
+            channelCount: channels,
+            channelLayout: rhs.channelLayout ?? lhs.channelLayout,
+            hasAtmosMetadata: lhs.hasAtmosMetadata || rhs.hasAtmosMetadata
+        )
+    }
+
+    private static func maxDynamicRange(_ a: DynamicRange, _ b: DynamicRange) -> DynamicRange {
+        let rank: (DynamicRange) -> Int = {
+            switch $0 {
+            case .sdr: 0
+            case .hdr10: 1
+            case .hlg: 2
+            case .hdr10Plus: 3
+            case .dolbyVision: 4
+            }
+        }
+        return rank(a) >= rank(b) ? a : b
     }
 }
 
@@ -934,7 +1099,7 @@ private struct FFProbeStream: Decodable {
     let bitRate: String?
     let disposition: FFProbeDisposition?
     let tags: FFProbeTags?
-    let sideDataList: [FFProbeSideData]?
+    let sideDataList: [FFProbeSideDataEntry]?
 
     enum CodingKeys: String, CodingKey {
         case index
@@ -982,22 +1147,7 @@ private struct FFProbeStream: Decodable {
         bitRate = container.flexString(forKey: .bitRate)
         disposition = try container.decodeIfPresent(FFProbeDisposition.self, forKey: .disposition)
         tags = try container.decodeIfPresent(FFProbeTags.self, forKey: .tags)
-        sideDataList = try container.decodeIfPresent([FFProbeSideData].self, forKey: .sideDataList)
-    }
-
-    var searchableMetadata: String {
-        var values = [
-            codecName,
-            profile,
-            pixFmt,
-            colorPrimaries,
-            colorTransfer,
-            colorSpace,
-            tags?.language,
-            tags?.title
-        ].compactMap { $0 }
-        values.append(contentsOf: sideDataList?.flatMap(\.values) ?? [])
-        return values.joined(separator: " ").lowercased()
+        sideDataList = try container.decodeIfPresent([FFProbeSideDataEntry].self, forKey: .sideDataList)
     }
 }
 
@@ -1023,25 +1173,6 @@ private struct FFProbeDisposition: Decodable {
 private struct FFProbeTags: Decodable {
     let language: String?
     let title: String?
-}
-
-private struct FFProbeSideData: Decodable {
-    let values: [String]
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: DynamicCodingKey.self)
-        var parsed: [String] = []
-        for key in container.allKeys {
-            if let value = try? container.decode(String.self, forKey: key) {
-                parsed.append(value)
-            } else if let value = try? container.decode(Int.self, forKey: key) {
-                parsed.append(String(value))
-            } else if let value = try? container.decode(Double.self, forKey: key) {
-                parsed.append(String(value))
-            }
-        }
-        values = parsed
-    }
 }
 
 private struct DynamicCodingKey: CodingKey {

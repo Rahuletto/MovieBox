@@ -54,7 +54,7 @@ extension PlayerState {
         switch hdrType {
         case .dolbyVision, .dolbyVisionWithHDR10:
             kinds.append(.dolbyVision)
-        case .hdr, .hdr10, .hdr10Plus:
+        case .hdr, .hdr10, .hdr10Plus, .hlg:
             kinds.append(.hdr)
         case nil:
             break
