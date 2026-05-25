@@ -1,4 +1,5 @@
 import Foundation
+import MoviePlayerEngine
 
 public struct EmbeddedSubtitleTrack: Sendable, Identifiable, Hashable {
     public let index: Int

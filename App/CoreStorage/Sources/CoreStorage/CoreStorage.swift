@@ -142,6 +142,8 @@ public final class AppSettings {
     public var deleteTorrentAfterDownload: Bool
     public var autoRemoveCompleted: Bool
     public var preferHDR: Bool
+    /// When true, remux blocks playback if HDR/DV/Atmos metadata is stripped. Default off (warn and play).
+    public var strictHDRValidation: Bool
     public var subtitlesEnabled: Bool
     public var subtitleStyle: String
     public var subtitleFontSize: Double
@@ -182,6 +184,7 @@ public final class AppSettings {
         deleteTorrentAfterDownload: Bool = false,
         autoRemoveCompleted: Bool = false,
         preferHDR: Bool = true,
+        strictHDRValidation: Bool = false,
         subtitlesEnabled: Bool = true,
         subtitleStyle: String = "cinematic",
         subtitleFontSize: Double = 20,
@@ -221,6 +224,7 @@ public final class AppSettings {
         self.deleteTorrentAfterDownload = deleteTorrentAfterDownload
         self.autoRemoveCompleted = autoRemoveCompleted
         self.preferHDR = preferHDR
+        self.strictHDRValidation = strictHDRValidation
         self.subtitlesEnabled = subtitlesEnabled
         self.subtitleStyle = subtitleStyle
         self.subtitleFontSize = subtitleFontSize

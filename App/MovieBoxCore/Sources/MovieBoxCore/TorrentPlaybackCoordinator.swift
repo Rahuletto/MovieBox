@@ -3,24 +3,34 @@ import CoreStorage
 import CoreStreaming
 import CoreTorrent
 import Foundation
+import MoviePlayerKit
 
 @MainActor
 public final class TorrentPlaybackCoordinator {
     private let orchestrator: StreamingOrchestrator
-    private let remuxService: RemuxService
+    private let moviePlayer: MoviePlayerSession
     private(set) var session: TorrentStreamSession?
     public private(set) var torrents: [TorrentResult] = []
     public var downloadPersistence: DownloadPersistenceService?
 
-    public init(orchestrator: StreamingOrchestrator, remuxService: RemuxService = RemuxService()) {
+    public var strictHDRValidation: Bool {
+        get { moviePlayer.strictHDRValidation }
+        set { moviePlayer.strictHDRValidation = newValue }
+    }
+
+    public init(orchestrator: StreamingOrchestrator, moviePlayer: MoviePlayerSession = MoviePlayerSession()) {
         self.orchestrator = orchestrator
-        self.remuxService = remuxService
+        self.moviePlayer = moviePlayer
+    }
+
+    private func syncRemuxPolicy() async {
+        await moviePlayer.setStrictHDRValidation(strictHDRValidation)
     }
 
     public func cancel() async {
         await session?.cancel()
         session = nil
-        await remuxService.stopAll()
+        await moviePlayer.cancelRemux()
     }
 
     func configureSources(on playerState: PlayerState, torrents: [TorrentResult], selected: TorrentResult) {
@@ -63,6 +73,8 @@ public final class TorrentPlaybackCoordinator {
     ) async throws {
         configureSources(on: playerState, torrents: allTorrents, selected: torrent)
         installStreamBufferProvider(on: playerState)
+        await syncRemuxPolicy()
+        playerState.updatePlaybackQualityWarning(nil)
 
         guard case .ready(let url) = session.state else {
             if case .failed(let message) = session.state {
@@ -80,7 +92,7 @@ public final class TorrentPlaybackCoordinator {
             let cacheKey = localHLSCacheKey(for: torrent, localURL: url)
             PlaybackLog.log("[MKVHLS] finishPlayback local mkv export detected; remux start cacheKey=\(cacheKey) file=\(MovieBoxFileLogger.redactURL(url))")
             playerState.updateBufferingDetail("Preparing AVPlayer-compatible stream…")
-            let result = try await remuxService.remuxMKVToHLS(inputURL: url, cacheKey: cacheKey)
+            let result = try await moviePlayer.remuxMKVToHLS(inputURL: url, cacheKey: cacheKey)
             remuxResult = result
             playbackURL = result.playlistURL
             PlaybackLog.log("[MKVHLS] finishPlayback remux returned playlist=\(MovieBoxFileLogger.redactURL(playbackURL)) state=\(result.state)")
@@ -88,13 +100,17 @@ public final class TorrentPlaybackCoordinator {
             let cacheKey = localHLSCacheKey(for: torrent, localURL: url)
             PlaybackLog.log("[MKVHLS] finishPlayback live mkv stream detected; progressive remux start cacheKey=\(cacheKey) url=\(MovieBoxFileLogger.redactURL(url))")
             playerState.updateBufferingDetail("Preparing AVPlayer-compatible stream…")
-            let result = try await remuxService.remuxStreamingMKVToHLS(inputURL: url, cacheKey: cacheKey)
+            let result = try await moviePlayer.remuxStreamingMKVToHLS(inputURL: url, cacheKey: cacheKey)
             remuxResult = result
             playbackURL = result.playlistURL
             PlaybackLog.log("[MKVHLS] finishPlayback live remux playable playlist=\(MovieBoxFileLogger.redactURL(playbackURL)) state=\(result.state)")
             if let duration = result.durationSeconds, duration.isFinite, duration > 0 {
                 resolvedDuration = duration
             }
+        }
+
+        if let remuxResult {
+            moviePlayer.applyRemuxPlaybackSignals(remuxResult, to: playerState)
         }
 
         let verifiedHDR = playbackHDR(from: remuxResult, fallback: torrent.hdrType)
@@ -190,19 +206,24 @@ public final class TorrentPlaybackCoordinator {
         Task { @MainActor in
             await Task.yield()
             do {
+                await syncRemuxPolicy()
+                playerState.updatePlaybackQualityWarning(nil)
                 var resolvedPayload = loadPayload
                 var remuxResult: RemuxResult?
                 if localURL.pathExtension.lowercased() == "mkv" {
                     let cacheKey = localHLSCacheKey(for: torrent, localURL: localURL)
                     PlaybackLog.log("[MKVHLS] local mkv detected cacheKey=\(cacheKey) file=\(MovieBoxFileLogger.redactURL(localURL))")
                     playerState.updateBufferingDetail("Preparing AVPlayer-compatible stream…")
-                    let result = try await remuxService.remuxMKVToHLS(
+                    let result = try await moviePlayer.remuxMKVToHLS(
                         inputURL: localURL,
                         cacheKey: cacheKey
                     )
                     remuxResult = result
                     PlaybackLog.log("[MKVHLS] remux returned playlist=\(MovieBoxFileLogger.redactURL(result.playlistURL)) state=\(result.state)")
                     resolvedPayload.url = result.playlistURL
+                    if let remuxResult {
+                        moviePlayer.applyRemuxPlaybackSignals(remuxResult, to: playerState)
+                    }
                     resolvedPayload.hdr = playbackHDR(from: remuxResult, fallback: torrent.hdrType)
                     resolvedPayload.audio = playbackAudio(from: remuxResult, fallback: torrent.audioFormat)
                 } else {
@@ -236,13 +257,15 @@ public final class TorrentPlaybackCoordinator {
             let localURL = URL(fileURLWithPath: localPath)
             PlaybackLog.log("[MKVHLS] switchToSource local completed file ext=\(localURL.pathExtension.lowercased()) exists=\(FileManager.default.fileExists(atPath: localURL.path)) id=\(id)")
             do {
+                await syncRemuxPolicy()
+                playerState.updatePlaybackQualityWarning(nil)
                 var playbackURL = localURL
                 var remuxResult: RemuxResult?
                 if localURL.pathExtension.lowercased() == "mkv" {
                     let cacheKey = localHLSCacheKey(for: torrent, localURL: localURL)
                     PlaybackLog.log("[MKVHLS] switchToSource mkv remux start cacheKey=\(cacheKey)")
                     playerState.updateBufferingDetail("Preparing AVPlayer-compatible stream…")
-                    let result = try await remuxService.remuxMKVToHLS(
+                    let result = try await moviePlayer.remuxMKVToHLS(
                         inputURL: localURL,
                         cacheKey: cacheKey
                     )
@@ -251,6 +274,9 @@ public final class TorrentPlaybackCoordinator {
                     PlaybackLog.log("[MKVHLS] switchToSource remux returned playlist=\(MovieBoxFileLogger.redactURL(playbackURL)) state=\(result.state)")
                 } else {
                     PlaybackLog.log("[MKVHLS] switchToSource non-mkv local bypass")
+                }
+                if let remuxResult {
+                    moviePlayer.applyRemuxPlaybackSignals(remuxResult, to: playerState)
                 }
                 playerState.selectedPlaybackSourceID = id
                 PlaybackLog.log("[MKVHLS] switchToSource loading player url=\(MovieBoxFileLogger.redactURL(playbackURL)) ext=\(playbackURL.pathExtension.lowercased())")
@@ -303,32 +329,17 @@ public final class TorrentPlaybackCoordinator {
     }
 
     private func playbackHDR(from remux: RemuxResult?, fallback: CoreTorrent.HDRType?) -> PlayerHDRType? {
-        if let color = remux?.verifiedVideoColor {
-            return playerHDRType(from: color)
+        if let remux {
+            return moviePlayer.playbackHDR(from: remux)
         }
         return playerHDRType(from: fallback)
     }
 
     private func playbackAudio(from remux: RemuxResult?, fallback: CoreTorrent.AudioFormat?) -> PlayerAudioFormat? {
-        if let atmos = remux?.verifiedAtmos,
-           atmos.hasAtmosMetadata || atmos.isSpatialAudioEligible {
-            return .dolbyAtmos
+        if let remux {
+            return moviePlayer.playbackAudio(from: remux)
         }
         return playerAudioFormat(from: fallback)
-    }
-
-    private func playerHDRType(from color: VideoColorMetadata) -> PlayerHDRType? {
-        switch color.dynamicRange {
-        case .sdr: return nil
-        case .hdr10: return .hdr10
-        case .hdr10Plus: return .hdr10Plus
-        case .hlg: return .hlg
-        case .dolbyVision:
-            if color.colorTransfer == "smpte2084" || color.hasHDR10Plus {
-                return .dolbyVisionWithHDR10
-            }
-            return .dolbyVision
-        }
     }
 
     private func playerHDRType(from type: CoreTorrent.HDRType?) -> PlayerHDRType? {

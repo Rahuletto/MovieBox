@@ -119,6 +119,7 @@ struct AppShellView: View {
                     try? modelContext.save()
                 }
                 TorrentBackendSync.apply(from: settings)
+                appServices.syncPlaybackPolicy(from: settings)
             }
             applyLaunchTabIfNeeded()
         }

@@ -1,12 +1,14 @@
 import CoreStreaming
 import CoreTorrent
 import Foundation
+import MoviePlayerKit
 import Observation
 
 @MainActor
 @Observable
 public final class AppServices {
     public let downloadManager: DownloadManager
+    public let moviePlayerSession = MoviePlayerSession()
     public private(set) var playbackCoordinator: TorrentPlaybackCoordinator
     public private(set) var activeSession: TorrentStreamSession?
     public let persistentPlayback = PersistentPlaybackController()
@@ -17,7 +19,10 @@ public final class AppServices {
     public init(downloadDirectory: URL? = nil) {
         self.streamingOrchestrator = StreamingOrchestrator()
         self.downloadManager = DownloadManager(downloadDirectory: downloadDirectory)
-        self.playbackCoordinator = TorrentPlaybackCoordinator(orchestrator: streamingOrchestrator)
+        self.playbackCoordinator = TorrentPlaybackCoordinator(
+            orchestrator: streamingOrchestrator,
+            moviePlayer: moviePlayerSession
+        )
     }
 
     public func cancelActiveStream() async {
@@ -33,9 +38,16 @@ public final class AppServices {
 
     @discardableResult
     public func beginPlaybackCoordinator() -> TorrentPlaybackCoordinator {
-        playbackCoordinator = TorrentPlaybackCoordinator(orchestrator: streamingOrchestrator)
+        playbackCoordinator = TorrentPlaybackCoordinator(
+            orchestrator: streamingOrchestrator,
+            moviePlayer: moviePlayerSession
+        )
         playbackCoordinator.downloadPersistence = downloadPersistence
         return playbackCoordinator
+    }
+
+    public func syncPlaybackPolicy(from settings: AppSettings) {
+        playbackCoordinator.strictHDRValidation = settings.strictHDRValidation
     }
 
     public func registerActiveSession(_ session: TorrentStreamSession?) {

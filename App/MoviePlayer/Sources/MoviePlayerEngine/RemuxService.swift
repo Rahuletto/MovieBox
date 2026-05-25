@@ -1,11 +1,38 @@
 import CoreStorage
+
 import Foundation
+
+public struct HDRVerificationOutcome: Sendable {
+    public let video: VideoColorMetadata?
+    public let atmos: AtmosAudioInfo?
+    public let passed: Bool
+    public let warningSummary: String?
+
+    public init(
+        video: VideoColorMetadata?,
+        atmos: AtmosAudioInfo?,
+        passed: Bool,
+        warningSummary: String? = nil
+    ) {
+        self.video = video
+        self.atmos = atmos
+        self.passed = passed
+        self.warningSummary = warningSummary
+    }
+}
 
 public actor RemuxService {
     private let fileManager: FileManager
     private var activeStreamingProcesses: [String: Process] = [:]
     private var hlsServers: [String: HLSCacheServer] = [:]
     private var hlsServerURLs: [String: URL] = [:]
+
+    /// When false (default), HDR validation failures warn and playback continues without verified HDR badges.
+    public var strictHDRValidation = false
+
+    public func setStrictHDRValidation(_ enabled: Bool) {
+        strictHDRValidation = enabled
+    }
 
     public init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
@@ -16,7 +43,7 @@ public actor RemuxService {
 
     public func probe(inputURL: URL) async throws -> MediaProbe {
         let ffprobeURL = try Self.resolveTool(named: "ffprobe")
-        TorrentLog.info("[Remux] probe start file=\(inputURL.lastPathComponent) ffprobe=\(ffprobeURL.path)")
+        MoviePlayerLog.info("[Remux] probe start file=\(inputURL.lastPathComponent) ffprobe=\(ffprobeURL.path)")
         let data = try runProbe(ffprobeURL: ffprobeURL, inputURL: inputURL)
         let probe = try Self.decodeProbe(data)
         logProbe(probe)
@@ -30,7 +57,7 @@ public actor RemuxService {
 
     public func remuxMKVToHLS(inputURL: URL, cacheKey: String) async throws -> RemuxResult {
         guard inputURL.pathExtension.lowercased() == "mkv" else {
-            TorrentLog.info("[Remux] bypass non-mkv file=\(inputURL.lastPathComponent)")
+            MoviePlayerLog.info("[Remux] bypass non-mkv file=\(inputURL.lastPathComponent)")
             return RemuxResult(playlistURL: inputURL, outputDirectory: inputURL.deletingLastPathComponent(), state: .completed)
         }
 
@@ -38,32 +65,31 @@ public actor RemuxService {
         let ffmpegURL = try Self.resolveTool(named: "ffmpeg")
         let outputDirectory = try hlsOutputDirectory(cacheKey: cacheKey)
         let playlistURL = outputDirectory.appendingPathComponent("stream.m3u8")
-        TorrentLog.info("[Remux] request file=\(inputURL.lastPathComponent) cacheKey=\(Self.sanitizeCacheKey(cacheKey)) ffprobe=\(ffprobeURL.path) ffmpeg=\(ffmpegURL.path) out=\(outputDirectory.path)")
+        MoviePlayerLog.info("[Remux] request file=\(inputURL.lastPathComponent) cacheKey=\(Self.sanitizeCacheKey(cacheKey)) ffprobe=\(ffprobeURL.path) ffmpeg=\(ffmpegURL.path) out=\(outputDirectory.path)")
 
         if Self.isCompleteHLSPlaylist(playlistURL) {
-            TorrentLog.info("[Remux] cache hit complete playlist=\(playlistURL.path)")
+            MoviePlayerLog.info("[Remux] cache hit complete playlist=\(playlistURL.path)")
             let remuxPlan = try await plan(inputURL: inputURL)
             let verified = try await verifyRemuxMetadata(
                 remuxPlan: remuxPlan,
                 outputDirectory: outputDirectory
             )
-            return RemuxResult(
+            return remuxResult(
                 playlistURL: playlistURL,
                 outputDirectory: outputDirectory,
                 state: .completed,
                 durationSeconds: remuxPlan.probe.duration,
-                verifiedVideoColor: verified.video,
-                verifiedAtmos: verified.atmos
+                verification: verified
             )
         }
 
         try fileManager.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
         try removeStaleHLSFiles(in: outputDirectory)
-        TorrentLog.info("[Remux] cache miss prepared out=\(outputDirectory.path)")
+        MoviePlayerLog.info("[Remux] cache miss prepared out=\(outputDirectory.path)")
 
         let remuxPlan = try await plan(inputURL: inputURL)
         let arguments = try Self.buildFFmpegArguments(plan: remuxPlan)
-        TorrentLog.info("[Remux] plan=\(remuxPlan.decision.logLabel) video=\(remuxPlan.videoStream?.codecName ?? "none") copy audio=\(remuxPlan.audioStream?.index ?? -1):\(remuxPlan.audioStream?.codecName ?? "none") copy tag=\(remuxPlan.videoTag ?? "none")")
+        MoviePlayerLog.info("[Remux] plan=\(remuxPlan.decision.logLabel) video=\(remuxPlan.videoStream?.codecName ?? "none") copy audio=\(remuxPlan.audioStream?.index ?? -1):\(remuxPlan.audioStream?.codecName ?? "none") copy tag=\(remuxPlan.videoTag ?? "none")")
 
         let stderrURL = outputDirectory.appendingPathComponent("ffmpeg.stderr.log")
         try Data().write(to: stderrURL)
@@ -75,42 +101,41 @@ public actor RemuxService {
         process.standardOutput = Pipe()
 
         try process.run()
-        TorrentLog.info("[Remux] started ffmpeg pid=\(process.processIdentifier) args=\(Self.redactedArguments(arguments))")
+        MoviePlayerLog.info("[Remux] started ffmpeg pid=\(process.processIdentifier) args=\(Self.redactedArguments(arguments))")
         process.waitUntilExit()
         try? (process.standardError as? FileHandle)?.close()
 
         if process.terminationStatus != 0 {
             let tail = Self.stderrTail(from: stderrURL)
-            TorrentLog.error("[Remux] failed stderr=\(tail)")
+            MoviePlayerLog.error("[Remux] failed stderr=\(tail)")
             throw RemuxError.ffmpegFailed(tail)
         }
 
         guard Self.hasPlayableHLS(in: outputDirectory) else {
             throw RemuxError.outputNotFound
         }
-        TorrentLog.info("[Remux] playable playlist=\(playlistURL.path) files=\(Self.hlsFileSummary(in: outputDirectory))")
+        MoviePlayerLog.info("[Remux] playable playlist=\(playlistURL.path) files=\(Self.hlsFileSummary(in: outputDirectory))")
 
         guard Self.isCompleteHLSPlaylist(playlistURL) else {
             throw RemuxError.incompletePlaylist
         }
-        TorrentLog.info("[Remux] completed playlist=\(playlistURL.path)")
+        MoviePlayerLog.info("[Remux] completed playlist=\(playlistURL.path)")
 
         let verified = try await verifyRemuxMetadata(
             remuxPlan: remuxPlan,
             outputDirectory: outputDirectory
         )
-        return RemuxResult(
+        return remuxResult(
             playlistURL: playlistURL,
             outputDirectory: outputDirectory,
             state: .completed,
             durationSeconds: remuxPlan.probe.duration,
-            verifiedVideoColor: verified.video,
-            verifiedAtmos: verified.atmos
+            verification: verified
         )
     }
 
     public func remuxStreamingMKVToHLS(inputURL: URL, cacheKey: String) async throws -> RemuxResult {
-        TorrentLog.info("[Remux] streaming request begin url=\(inputURL.absoluteString) cacheKey=\(Self.sanitizeCacheKey(cacheKey))")
+        MoviePlayerLog.info("[Remux] streaming request begin url=\(inputURL.absoluteString) cacheKey=\(Self.sanitizeCacheKey(cacheKey))")
         let ffprobeURL = try Self.resolveTool(named: "ffprobe")
         let ffmpegURL = try Self.resolveTool(named: "ffmpeg")
         let outputDirectory = try hlsOutputDirectory(cacheKey: "stream-\(cacheKey)")
@@ -120,18 +145,17 @@ public actor RemuxService {
 
         if let existing = activeStreamingProcesses[safeKey], existing.isRunning, Self.hasPlayableStreamingHLS(in: outputDirectory) {
             let playbackURL = try await ensureHLSServerURL(cacheKey: safeKey, outputDirectory: outputDirectory)
-            TorrentLog.info("[Remux] streaming cache active playlist=\(playbackURL.absoluteString)")
+            MoviePlayerLog.info("[Remux] streaming cache active playlist=\(playbackURL.absoluteString)")
             let verified = try await verifyRemuxMetadata(
                 remuxPlan: remuxPlan,
                 outputDirectory: outputDirectory
             )
-            return RemuxResult(
+            return remuxResult(
                 playlistURL: playbackURL,
                 outputDirectory: outputDirectory,
                 state: .playable,
                 durationSeconds: remuxPlan.probe.duration,
-                verifiedVideoColor: verified.video,
-                verifiedAtmos: verified.atmos
+                verification: verified
             )
         }
 
@@ -141,7 +165,7 @@ public actor RemuxService {
 
         try fileManager.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
         try removeStaleHLSFiles(in: outputDirectory)
-        TorrentLog.info("[Remux] streaming request url=\(inputURL.absoluteString) cacheKey=\(safeKey) ffprobe=\(ffprobeURL.path) ffmpeg=\(ffmpegURL.path) out=\(outputDirectory.path)")
+        MoviePlayerLog.info("[Remux] streaming request url=\(inputURL.absoluteString) cacheKey=\(safeKey) ffprobe=\(ffprobeURL.path) ffmpeg=\(ffmpegURL.path) out=\(outputDirectory.path)")
 
         let arguments = try Self.buildStreamingFFmpegArguments(plan: remuxPlan)
         let stderrURL = outputDirectory.appendingPathComponent("ffmpeg.stderr.log")
@@ -156,30 +180,29 @@ public actor RemuxService {
 
         try process.run()
         activeStreamingProcesses[safeKey] = process
-        TorrentLog.info("[Remux] streaming started ffmpeg pid=\(process.processIdentifier) args=\(Self.redactedArguments(arguments))")
+        MoviePlayerLog.info("[Remux] streaming started ffmpeg pid=\(process.processIdentifier) args=\(Self.redactedArguments(arguments))")
 
         let deadline = Date().addingTimeInterval(90)
         while Date() < deadline {
             Self.normalizeStreamingPlaylist(at: outputDirectory.appendingPathComponent("stream.m3u8"))
             if Self.hasPlayableStreamingHLS(in: outputDirectory), process.isRunning {
                 let playbackURL = try await ensureHLSServerURL(cacheKey: safeKey, outputDirectory: outputDirectory)
-                TorrentLog.info("[Remux] streaming playable playlist=\(playbackURL.absoluteString) files=\(Self.hlsFileSummary(in: outputDirectory))")
+                MoviePlayerLog.info("[Remux] streaming playable playlist=\(playbackURL.absoluteString) files=\(Self.hlsFileSummary(in: outputDirectory))")
                 let verified = try await verifyRemuxMetadata(
                     remuxPlan: remuxPlan,
                     outputDirectory: outputDirectory
                 )
-                return RemuxResult(
+                return remuxResult(
                     playlistURL: playbackURL,
                     outputDirectory: outputDirectory,
                     state: .playable,
                     durationSeconds: remuxPlan.probe.duration,
-                    verifiedVideoColor: verified.video,
-                    verifiedAtmos: verified.atmos
+                    verification: verified
                 )
             }
             if !process.isRunning {
                 let tail = Self.stderrTail(from: stderrURL)
-                TorrentLog.error("[Remux] streaming failed before playable status=\(process.terminationStatus) stderr=\(tail)")
+                MoviePlayerLog.error("[Remux] streaming failed before playable status=\(process.terminationStatus) stderr=\(tail)")
                 activeStreamingProcesses[safeKey] = nil
                 await stopHLSServer(cacheKey: safeKey)
                 throw RemuxError.ffmpegFailed(tail)
@@ -188,7 +211,7 @@ public actor RemuxService {
         }
 
         let tail = Self.stderrTail(from: stderrURL)
-        TorrentLog.error("[Remux] streaming timed out waiting for first segment stderr=\(tail)")
+        MoviePlayerLog.error("[Remux] streaming timed out waiting for first segment stderr=\(tail)")
         throw RemuxError.ffmpegFailed("Timed out waiting for HLS remux to become playable.\n\(tail)")
     }
 
@@ -212,10 +235,10 @@ public actor RemuxService {
     }
 
     public func stopAll() async {
-        TorrentLog.info("[Remux] stopAll requested, terminating active processes count=\(activeStreamingProcesses.count)")
+        MoviePlayerLog.info("[Remux] stopAll requested, terminating active processes count=\(activeStreamingProcesses.count)")
         for (cacheKey, process) in activeStreamingProcesses {
             if process.isRunning {
-                TorrentLog.info("[Remux] terminating process pid=\(process.processIdentifier) for cacheKey=\(cacheKey)")
+                MoviePlayerLog.info("[Remux] terminating process pid=\(process.processIdentifier) for cacheKey=\(cacheKey)")
                 process.terminate()
             }
             await stopHLSServer(cacheKey: cacheKey)
@@ -272,10 +295,10 @@ public actor RemuxService {
         if process.terminationStatus != 0 {
             let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
             let message = String(data: errorData, encoding: .utf8) ?? "ffprobe failed"
-            TorrentLog.error("[Remux] ffprobe failed status=\(process.terminationStatus) stderr=\(Self.usefulTail(message))")
+            MoviePlayerLog.error("[Remux] ffprobe failed status=\(process.terminationStatus) stderr=\(Self.usefulTail(message))")
             throw RemuxError.ffprobeFailed(Self.usefulTail(message))
         }
-        TorrentLog.info("[Remux] ffprobe completed bytes=\(outputData.count)")
+        MoviePlayerLog.info("[Remux] ffprobe completed bytes=\(outputData.count)")
         return outputData
     }
 
@@ -325,10 +348,10 @@ public actor RemuxService {
                 }
             }
             if prunedCount > 0 {
-                TorrentLog.info("[Remux] Cleaned up \(prunedCount) stale HLS cache directories from previous sessions.")
+                MoviePlayerLog.info("[Remux] Cleaned up \(prunedCount) stale HLS cache directories from previous sessions.")
             }
         } catch {
-            TorrentLog.warn("[Remux] Global HLS cache pruning failed: \(error.localizedDescription)")
+            MoviePlayerLog.warn("[Remux] Global HLS cache pruning failed: \(error.localizedDescription)")
         }
     }
 
@@ -338,7 +361,7 @@ public actor RemuxService {
         for url in contents where ["m3u8", "mp4", "m4s", "ts", "mpd", "log"].contains(url.pathExtension.lowercased()) {
             try fileManager.removeItem(at: url)
         }
-        TorrentLog.info("[Remux] removed stale hls files count=\(contents.count) out=\(directory.path)")
+        MoviePlayerLog.info("[Remux] removed stale hls files count=\(contents.count) out=\(directory.path)")
     }
 
     private func logProbe(_ probe: MediaProbe) {
@@ -349,17 +372,21 @@ public actor RemuxService {
         let mdm = video?.colorMetadata.hasMasteringDisplay == true ? "yes" : "no"
         let cll = video?.colorMetadata.hasContentLightLevel == true ? "yes" : "no"
         let atmos = probe.audioStreams.contains { $0.atmosInfo.hasAtmosMetadata } ? "yes" : "no"
-        TorrentLog.info("[Remux] probe video=\(video?.codecName ?? "none") hdr=\(hdr) dv=\(dv) mdm=\(mdm) cll=\(cll) audio=\(audio) atmos=\(atmos)")
+        MoviePlayerLog.info("[Remux] probe video=\(video?.codecName ?? "none") hdr=\(hdr) dv=\(dv) mdm=\(mdm) cll=\(cll) audio=\(audio) atmos=\(atmos)")
     }
 
     private func verifyRemuxMetadata(
         remuxPlan: RemuxPlan,
         outputDirectory: URL
-    ) async throws -> (video: VideoColorMetadata?, atmos: AtmosAudioInfo?) {
+    ) async throws -> HDRVerificationOutcome {
         let probeURLs = Self.outputProbeURLs(in: outputDirectory, decision: remuxPlan.decision)
         guard !probeURLs.isEmpty else {
-            TorrentLog.warn("[Remux] hdr validate skipped — no probe target in \(outputDirectory.path)")
-            return (remuxPlan.videoStream?.colorMetadata, remuxPlan.audioStream?.atmosInfo)
+            MoviePlayerLog.warn("[Remux] hdr validate skipped — no probe target in \(outputDirectory.path)")
+            return HDRVerificationOutcome(
+                video: remuxPlan.videoStream?.colorMetadata,
+                atmos: remuxPlan.audioStream?.atmosInfo,
+                passed: true
+            )
         }
 
         var mergedVideo: VideoColorMetadata?
@@ -391,18 +418,48 @@ public actor RemuxService {
         )
 
         for warning in result.warnings {
-            TorrentLog.warn("[Remux] hdr validate warn \(warning.field): \(warning.message)")
+            MoviePlayerLog.warn("[Remux] hdr validate warn \(warning.field): \(warning.message)")
         }
 
         if !result.passed {
             let detail = result.issues.map { "\($0.field): \($0.message)" }.joined(separator: "; ")
-            TorrentLog.error("[Remux] hdr validate failed \(detail)")
-            throw RemuxError.metadataStripped(detail)
+            if strictHDRValidation {
+                MoviePlayerLog.error("[Remux] hdr validate failed strict \(detail)")
+                throw RemuxError.metadataStripped(detail)
+            }
+            MoviePlayerLog.warn("[Remux] hdr validate failed permissive \(detail)")
+            return HDRVerificationOutcome(
+                video: outputVideo,
+                atmos: outputAtmos,
+                passed: false,
+                warningSummary: "HDR metadata incomplete — picture may look incorrect."
+            )
         }
 
         let probedFiles = probeURLs.map(\.lastPathComponent).joined(separator: ",")
-        TorrentLog.info("[Remux] hdr validate passed files=[\(probedFiles)] hdr=\(outputVideo?.dynamicRange.rawValue ?? "sdr") mdm=\(outputVideo?.hasMasteringDisplay == true ? "yes" : "no") cll=\(outputVideo?.hasContentLightLevel == true ? "yes" : "no") atmos=\(outputAtmos?.hasAtmosMetadata == true ? "yes" : "no")")
-        return (outputVideo, outputAtmos)
+        MoviePlayerLog.info("[Remux] hdr validate passed files=[\(probedFiles)] hdr=\(outputVideo?.dynamicRange.rawValue ?? "sdr") mdm=\(outputVideo?.hasMasteringDisplay == true ? "yes" : "no") cll=\(outputVideo?.hasContentLightLevel == true ? "yes" : "no") atmos=\(outputAtmos?.hasAtmosMetadata == true ? "yes" : "no")")
+        return HDRVerificationOutcome(video: outputVideo, atmos: outputAtmos, passed: true)
+    }
+
+    private func remuxResult(
+        playlistURL: URL,
+        outputDirectory: URL,
+        state: RemuxSessionState,
+        durationSeconds: Double?,
+        verification: HDRVerificationOutcome
+    ) -> RemuxResult {
+        let badgesVideo = verification.passed ? verification.video : nil
+        let badgesAtmos = verification.passed ? verification.atmos : nil
+        return RemuxResult(
+            playlistURL: playlistURL,
+            outputDirectory: outputDirectory,
+            state: state,
+            durationSeconds: durationSeconds,
+            verifiedVideoColor: badgesVideo,
+            verifiedAtmos: badgesAtmos,
+            metadataValidationPassed: verification.passed,
+            metadataValidationWarning: verification.warningSummary
+        )
     }
 }
 
@@ -507,6 +564,8 @@ public struct RemuxResult: Sendable {
     public let verifiedVideoColor: VideoColorMetadata?
     /// Verified E-AC-3 Atmos / multichannel for HDMI passthrough and Spatial Audio eligibility.
     public let verifiedAtmos: AtmosAudioInfo?
+    public let metadataValidationPassed: Bool
+    public let metadataValidationWarning: String?
 
     public init(
         playlistURL: URL,
@@ -514,7 +573,9 @@ public struct RemuxResult: Sendable {
         state: RemuxSessionState,
         durationSeconds: Double? = nil,
         verifiedVideoColor: VideoColorMetadata? = nil,
-        verifiedAtmos: AtmosAudioInfo? = nil
+        verifiedAtmos: AtmosAudioInfo? = nil,
+        metadataValidationPassed: Bool = true,
+        metadataValidationWarning: String? = nil
     ) {
         self.playlistURL = playlistURL
         self.outputDirectory = outputDirectory
@@ -522,6 +583,8 @@ public struct RemuxResult: Sendable {
         self.durationSeconds = durationSeconds
         self.verifiedVideoColor = verifiedVideoColor
         self.verifiedAtmos = verifiedAtmos
+        self.metadataValidationPassed = metadataValidationPassed
+        self.metadataValidationWarning = metadataValidationWarning
     }
 }
 
@@ -600,7 +663,7 @@ extension RemuxService {
             response = try JSONDecoder().decode(FFProbeResponse.self, from: data)
         } catch {
             let snippet = String(data: data.prefix(512), encoding: .utf8) ?? "<binary>"
-            TorrentLog.error("[Remux] ffprobe json decode failed error=\(error) snippet=\(snippet)")
+            MoviePlayerLog.error("[Remux] ffprobe json decode failed error=\(error) snippet=\(snippet)")
             throw RemuxError.invalidProbe(error.localizedDescription)
         }
         let streams = response.streams ?? []
@@ -685,7 +748,7 @@ extension RemuxService {
         }
         guard ["h264", "hevc"].contains(video.codecName) else {
             let reason = "Video codec \(video.codecName) cannot be remuxed losslessly for AVPlayer."
-            TorrentLog.warn("[Remux] unsupported video=\(video.codecName) reason=\(reason)")
+            MoviePlayerLog.warn("[Remux] unsupported video=\(video.codecName) reason=\(reason)")
             return unsupported(inputURL: inputURL, probe: probe, video: video, reason: reason)
         }
 
@@ -693,7 +756,7 @@ extension RemuxService {
         guard let audio = compatibleAudio.first(where: \.isDefault) ?? compatibleAudio.first else {
             let codec = probe.audioStreams.first?.codecName ?? "none"
             let reason = "Audio codec \(codec) is not AVPlayer-compatible in strict preservation mode."
-            TorrentLog.warn("[Remux] unsupported audio=\(codec) reason=\(reason)")
+            MoviePlayerLog.warn("[Remux] unsupported audio=\(codec) reason=\(reason)")
             return unsupported(inputURL: inputURL, probe: probe, video: video, reason: reason)
         }
 

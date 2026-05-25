@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.3
 import PackageDescription
 
 let package = Package(
@@ -7,12 +7,15 @@ let package = Package(
     products: [
         .library(name: "CorePlayer", targets: ["CorePlayer"])
     ],
-    dependencies: [],
+    dependencies: [
+        .package(path: "../MoviePlayer"),
+    ],
     targets: [
         .target(
             name: "CorePlayer",
-            dependencies: [],
-            resources: [.process("Resources")]
+            dependencies: [
+                .product(name: "MoviePlayerUI", package: "MoviePlayer"),
+            ]
         )
     ],
     swiftLanguageModes: [.v6]
