@@ -25,6 +25,11 @@ public enum MovieBoxTypography {
     public static let caption = Font.system(.caption, weight: .medium)
 }
 
+/// Shared horizontal inset for home/catalog shelves so titles and carousels align.
+public enum MovieBoxLayout {
+    public static let shelfHorizontalInset: CGFloat = 28
+}
+
 public enum GlassStrength {
     case ultraThin
     case regular
@@ -288,14 +293,26 @@ public struct MoviePosterCard: View {
     }
 }
 
+private struct IdentifiedShelfItem<Value>: Identifiable {
+    let id: String
+    let value: Value
+}
+
 public struct HorizontalMovieRow<Item: Identifiable, Content: View>: View {
     private let title: String
     private let items: [Item]
+    private let itemIdentity: ((Item) -> String)?
     private let content: (Item) -> Content
 
-    public init(title: String, items: [Item], @ViewBuilder content: @escaping (Item) -> Content) {
+    public init(
+        title: String,
+        items: [Item],
+        itemIdentity: ((Item) -> String)? = nil,
+        @ViewBuilder content: @escaping (Item) -> Content
+    ) {
         self.title = title
         self.items = items
+        self.itemIdentity = itemIdentity
         self.content = content
     }
 
@@ -304,15 +321,21 @@ public struct HorizontalMovieRow<Item: Identifiable, Content: View>: View {
             Text(title)
                 .font(MovieBoxTypography.title)
                 .foregroundStyle(.primary)
-                .padding(.horizontal, 28)
+                .padding(.horizontal, MovieBoxLayout.shelfHorizontalInset)
 
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(alignment: .top, spacing: 18) {
-                    ForEach(items) { item in
-                        content(item)
+                    if let itemIdentity {
+                        ForEach(items.map { IdentifiedShelfItem(id: itemIdentity($0), value: $0) }) { entry in
+                            content(entry.value)
+                        }
+                    } else {
+                        ForEach(items) { item in
+                            content(item)
+                        }
                     }
                 }
-                .padding(.horizontal, 28)
+                .padding(.horizontal, MovieBoxLayout.shelfHorizontalInset)
                 .padding(.bottom, 10)
             }
         }

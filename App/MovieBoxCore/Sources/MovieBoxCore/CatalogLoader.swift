@@ -466,12 +466,16 @@ public enum CatalogLoader {
                         kindsByID[show.id] = .tv
                     }
 
-                    let rows: [MetadataCategory: [Movie]] = [
+                    var rows: [MetadataCategory: [Movie]] = [
                         .trending: interleave(hydratedMovieTrending, hydratedTvTrending),
                         .popular: interleave(hydratedMoviePopular, hydratedTvPopular),
                         .topRated: interleave(hydratedMovieTopRated, hydratedTvTopRated),
                         .nowPlaying: hydratedMovieNowPlaying,
                     ]
+
+                    if rows[.trending]?.isEmpty ?? true {
+                        rows[.trending] = rows[.popular] ?? []
+                    }
 
                     continuation.yield(HomeCatalogPayload(rows: rows, kindsByID: kindsByID, extraSections: []))
 

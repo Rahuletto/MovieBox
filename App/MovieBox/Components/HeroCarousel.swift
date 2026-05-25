@@ -190,7 +190,7 @@ struct HeroCarousel: View {
                         .buttonStyle(.plain)
                         .help("Next movie")
                     }
-                    .padding(.horizontal, 20)
+                    .padding(.horizontal, MovieBoxLayout.shelfHorizontalInset)
                     .padding(.bottom, 12)
                 }
             }

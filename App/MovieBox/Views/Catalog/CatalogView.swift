@@ -209,51 +209,12 @@ struct CatalogView: View {
         baseSections: [HomeExtraSection],
         rows: [MetadataCategory: [Movie]]
     ) async -> [HomeExtraSection] {
-        let explicitSignals = ratings.map {
-            RatingSignal(
-                tmdbId: $0.tmdbId,
-                rating: $0.rating,
-                genreIds: $0.genres,
-                date: $0.ratedAt,
-                source: .explicitRating
-            )
-        }
-
-        let watchSignals = storedMovies
-            .filter { $0.mediaKindEnum == kind && $0.lastWatchedAt != nil }
-            .map { record in
-                let signalStrength: Float
-                if record.watchedFraction >= 0.8 {
-                    signalStrength = 1.0
-                } else if record.watchedFraction >= 0.2 {
-                    signalStrength = 0.5
-                } else if record.playbackPositionSeconds >= 30 {
-                    signalStrength = -0.25
-                } else {
-                    signalStrength = 0
-                }
-                return RatingSignal(
-                    tmdbId: record.tmdbId,
-                    rating: signalStrength,
-                    genreIds: record.genres,
-                    date: record.lastWatchedAt ?? Date(),
-                    source: .watchHistory
-                )
-            }
-
-        let watchlistSignals = storedMovies
-            .filter { $0.mediaKindEnum == kind && $0.watchlistAddedAt != nil }
-            .map { record in
-                RatingSignal(
-                    tmdbId: record.tmdbId,
-                    rating: 0.8,
-                    genreIds: record.genres,
-                    date: record.watchlistAddedAt ?? Date(),
-                    source: .watchlist
-                )
-            }
-
-        let signals = explicitSignals + watchSignals + watchlistSignals
+        let signals = RecommendationSignals.build(
+            ratings: ratings,
+            storedMovies: storedMovies,
+            kind: kind,
+            watchlistSignalStrength: 0.8
+        )
         guard !signals.isEmpty else { return baseSections }
 
         var byMovieID: [Int: Movie] = [:]

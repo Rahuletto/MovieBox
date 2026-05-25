@@ -447,19 +447,9 @@ struct SearchView: View {
 
     private func loadGenreImages() async {
         guard genreImages.isEmpty else { return }
-        guard let mode = MetadataSettings.mode(from: settings) else { return }
-        let client = MetadataClient(mode: mode)
-        
-        var resolved: [Int: URL] = [:]
-        for genre in GenreCard.movieGenres {
-            if let path = genre.staticBackdropPath,
-               let url = client.imageURL(path: path, width: 780) {
-                resolved[genre.id] = url
-            }
-        }
-        
+        let resolved = GenreCard.backdropImageURLs(mode: MetadataSettings.mode(from: settings))
         await MainActor.run {
-            self.genreImages = resolved
+            genreImages = resolved
         }
     }
 }

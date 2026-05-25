@@ -91,6 +91,16 @@ struct AppMenuCommands: Commands {
                     router.backFromDetail()
                 }
             }
+            .keyboardShortcut("[", modifiers: .command)
+            .disabled(!playerState.isPresented && !router.isShowingDetail)
+
+            Button("Close") {
+                if playerState.isPresented {
+                    playerState.dismiss()
+                } else if router.isShowingDetail {
+                    router.backFromDetail()
+                }
+            }
             .keyboardShortcut(.escape, modifiers: [])
             .disabled(!playerState.isPresented && !router.isShowingDetail)
         }

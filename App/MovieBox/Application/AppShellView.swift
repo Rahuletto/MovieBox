@@ -17,7 +17,6 @@ struct AppShellView: View {
     @State private var showsReplaceStreamConfirmation = false
     @State private var didApplyLaunchTab = false
     @Namespace private var streamPillNamespace
-    @State private var navigationTracker: TrackpadNavigationTracker?
 
     private var persistentPlayback: PersistentPlaybackController {
         appServices.persistentPlayback
@@ -104,9 +103,6 @@ struct AppShellView: View {
         .onAppear {
             TorrentBackendSync.apply(from: settings.first)
             applyLaunchTabIfNeeded()
-            if navigationTracker == nil {
-                navigationTracker = TrackpadNavigationTracker(router: router)
-            }
         }
         .task {
             AppBootstrap.runInitialSetup(

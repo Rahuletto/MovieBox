@@ -61,6 +61,20 @@ struct GenreCard: Identifiable, Hashable {
               colors: [Color(red: 0.84, green: 0.52, blue: 0.18), Color(red: 0.95, green: 0.74, blue: 0.36)],
               staticBackdropPath: "/Adrip2Jqzw56KeuV2nAxucKMNXA.jpg")  // The Good, the Bad and the Ugly
     ]
+
+    /// TMDB backdrop URLs for genre card art (static paths on each genre).
+    static func backdropImageURLs(mode: MetadataEndpointMode?) -> [Int: URL] {
+        guard let mode else { return [:] }
+        let client = MetadataClient(mode: mode)
+        var resolved: [Int: URL] = [:]
+        for genre in movieGenres {
+            if let path = genre.staticBackdropPath,
+               let url = client.imageURL(path: path, width: 780) {
+                resolved[genre.id] = url
+            }
+        }
+        return resolved
+    }
 }
 
 struct GenreCardView: View {

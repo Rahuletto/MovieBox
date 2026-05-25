@@ -43,50 +43,11 @@ final class RecommendationTrainer: NSObject, ObservableObject {
         isTraining = true
         error = nil
 
-        // Convert ratings to signals
-        let ratingSignals = ratings.map { rating in
-            RatingSignal(
-                tmdbId: rating.tmdbId,
-                rating: rating.rating,
-                genreIds: rating.genres,
-                date: rating.ratedAt,
-                source: .explicitRating
-            )
-        }
-
-        // Watch history signals (implicit)
-        let watchSignals = storedMovies.filter { $0.lastWatchedAt != nil }.map { movie in
-            let ratingValue: Float
-            if movie.watchedFraction >= 0.8 {
-                ratingValue = 1.0
-            } else if movie.watchedFraction >= 0.15 {
-                ratingValue = 0.5
-            } else if movie.playbackPositionSeconds >= 30 {
-                ratingValue = -0.5
-            } else {
-                ratingValue = 0.0
-            }
-            return RatingSignal(
-                tmdbId: movie.tmdbId,
-                rating: ratingValue,
-                genreIds: movie.genres,
-                date: movie.lastWatchedAt ?? Date(),
-                source: .watchHistory
-            )
-        }
-
-        // Watchlist signals (implicit)
-        let watchlistSignals = storedMovies.filter { $0.watchlistAddedAt != nil }.map { movie in
-            RatingSignal(
-                tmdbId: movie.tmdbId,
-                rating: 1.0,
-                genreIds: movie.genres,
-                date: movie.watchlistAddedAt ?? Date(),
-                source: .watchlist
-            )
-        }
-
-        let signals = ratingSignals + watchSignals + watchlistSignals
+        let signals = RecommendationSignals.build(
+            ratings: ratings,
+            storedMovies: storedMovies,
+            watchlistSignalStrength: 1.0
+        )
 
         guard !signals.isEmpty else {
             error = "No signals available for training"
@@ -111,7 +72,8 @@ final class RecommendationTrainer: NSObject, ObservableObject {
             }
         }
 
-        let avgRating = ratingSignals.isEmpty ? 0 : ratingSignals.map(\.rating).reduce(0, +) / Float(ratingSignals.count)
+        let explicitSignals = signals.filter { $0.source == .explicitRating }
+        let avgRating = explicitSignals.isEmpty ? 0 : explicitSignals.map(\.rating).reduce(0, +) / Float(explicitSignals.count)
 
         metrics = TrainingMetrics(
             totalRatings: signals.count,
