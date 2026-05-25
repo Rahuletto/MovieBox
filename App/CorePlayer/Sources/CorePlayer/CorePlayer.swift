@@ -9,6 +9,7 @@ public enum PlayerHDRType: String, Sendable, Codable {
     case hdr = "HDR"
     case hdr10 = "HDR10"
     case hdr10Plus = "HDR10+"
+    case hlg = "HLG"
     case dolbyVision = "Dolby Vision"
     case dolbyVisionWithHDR10 = "DV-HDR10"
 }
@@ -1418,6 +1419,9 @@ public final class PlayerState {
                         self.duration = readyDuration
                     }
                     PlaybackLog.log("AVPlayerItem readyToPlay duration=\(self.duration)s")
+                    Task { @MainActor [weak self] in
+                        await self?.logVideoColorMetadataFromAsset(item: item)
+                    }
                     self.errorMessage = nil
                     self.bufferingDetail = nil
                     self.tryApplyPendingResume()
@@ -1899,6 +1903,29 @@ public final class PlayerState {
             self.playbackEndObserver = nil
         }
         cancellables.removeAll()
+    }
+
+    private func logVideoColorMetadataFromAsset(item: AVPlayerItem) async {
+        guard let track = try? await item.asset.loadTracks(withMediaType: .video).first,
+              let formatDescription = track.formatDescriptions.first else {
+            return
+        }
+        let format = formatDescription as! CMFormatDescription
+        let primaries = CMFormatDescriptionGetExtension(
+            format,
+            extensionKey: kCMFormatDescriptionExtension_ColorPrimaries
+        ) as? String
+        let transfer = CMFormatDescriptionGetExtension(
+            format,
+            extensionKey: kCMFormatDescriptionExtension_TransferFunction
+        ) as? String
+        let matrix = CMFormatDescriptionGetExtension(
+            format,
+            extensionKey: kCMFormatDescriptionExtension_YCbCrMatrix
+        ) as? String
+        PlaybackLog.log(
+            "[HDR] AVPlayer track color primaries=\(primaries ?? "nil") transfer=\(transfer ?? "nil") matrix=\(matrix ?? "nil") playerHDR=\(hdrType?.rawValue ?? "none")"
+        )
     }
 }
 

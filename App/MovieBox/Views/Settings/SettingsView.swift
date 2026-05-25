@@ -430,6 +430,9 @@ private struct PlaybackSettingsSection: View {
 
             Section("Audio") {
                 TextField("Preferred Language", text: $draft.preferredAudioLang, prompt: Text("en"))
+                Text("Dolby Atmos and Spatial Audio use the verified surround bitstream from your file. On a receiver, enable Prefer HDMI Passthrough in System Settings → Sound. On AirPods Pro, turn on Spatial Audio in Control Center while playing.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Picker("Audio Format Priority", selection: $draft.audioFormatPriority) {
                     Text("Best Available").tag("best")
                     Text("Dolby Atmos").tag("atmos")
