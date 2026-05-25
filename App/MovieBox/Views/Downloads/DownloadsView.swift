@@ -1,3 +1,4 @@
+import CoreMetadata
 import CorePlayer
 import CoreStorage
 import CoreStreaming
@@ -13,6 +14,7 @@ struct DownloadsView: View {
     @Environment(AppServices.self) private var appServices
     @Environment(PlayerState.self) private var playerState
     @Query private var settings: [AppSettings]
+    @Query private var movieRecords: [MovieRecord]
 
     @State private var magnetInput: String = ""
     @State private var showsMagnetSheet = false
@@ -31,6 +33,18 @@ struct DownloadsView: View {
             url: "https://devstreaming-cdn.apple.com/videos/streaming/examples/adv_dv_atmos/main.m3u8"
         ),
     ]
+
+    private var activeTasks: [DownloadManager.DownloadTask] {
+        downloadManager.tasks.filter { $0.state != .completed && $0.state != .failed }
+    }
+
+    private var completedTasks: [DownloadManager.DownloadTask] {
+        downloadManager.tasks.filter { $0.state == .completed }
+    }
+
+    private var failedTasks: [DownloadManager.DownloadTask] {
+        downloadManager.tasks.filter { $0.state == .failed }
+    }
 
     var body: some View {
         downloadsScrollContent
@@ -63,12 +77,12 @@ struct DownloadsView: View {
 
     private var downloadsScrollContent: some View {
         ScrollView {
-            VStack(spacing: 20) {
+            VStack(alignment: .leading, spacing: 28) {
                 if let errorMessage {
                     Text(errorMessage)
                         .font(.caption)
                         .foregroundStyle(.red)
-                        .padding(.horizontal, 28)
+                        .padding(.horizontal, MovieBoxLayout.shelfHorizontalInset)
                 }
 
                 if downloadManager.tasks.isEmpty, hdrTestStreams.isEmpty {
@@ -79,28 +93,97 @@ struct DownloadsView: View {
                     )
                     .frame(maxWidth: .infinity, minHeight: 260)
                 } else {
-                    LazyVStack(spacing: 12) {
-                        ForEach(hdrTestStreams) { stream in
-                            DownloadTaskRow(
-                                model: .hdrTest(stream),
-                                downloadManager: downloadManager,
-                                playback: playback,
-                                onWatchHDRTest: playHDRTestStream
-                            )
-                        }
-                        ForEach(downloadManager.tasks) { task in
-                            DownloadTaskRow(
-                                model: .task(task),
-                                downloadManager: downloadManager,
-                                playback: playback
-                            )
-                        }
+                    downloadSections
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 18)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private var downloadSections: some View {
+        VStack(alignment: .leading, spacing: 42) {
+            if !activeTasks.isEmpty {
+                downloadLandscapeSection(title: "In progress") {
+                    ForEach(activeTasks) { task in
+                        downloadCard(for: task)
                     }
-                    .padding(.horizontal, 28)
-                    .padding(.vertical, 10)
+                }
+            }
+
+            if !completedTasks.isEmpty {
+                downloadLandscapeSection(title: "Ready to watch") {
+                    ForEach(completedTasks) { task in
+                        downloadCard(for: task)
+                    }
+                }
+            }
+
+            if !failedTasks.isEmpty {
+                downloadLandscapeSection(title: "Failed") {
+                    ForEach(failedTasks) { task in
+                        downloadCard(for: task)
+                    }
+                }
+            }
+
+            if !hdrTestStreams.isEmpty {
+                downloadLandscapeSection(title: "Streaming samples") {
+                    ForEach(hdrTestStreams) { stream in
+                        DownloadTaskRow(
+                            model: .hdrTest(stream),
+                            artworkURL: nil,
+                            tmdbId: 0,
+                            mediaKind: .movie,
+                            downloadManager: downloadManager,
+                            playback: playback,
+                            onWatchHDRTest: playHDRTestStream
+                        )
+                    }
                 }
             }
         }
+    }
+
+    private func downloadCard(for task: DownloadManager.DownloadTask) -> some View {
+        DownloadTaskRow(
+            model: .task(task),
+            artworkURL: artworkURL(for: task.tmdbId),
+            tmdbId: task.tmdbId,
+            mediaKind: MediaKind(storageValue: task.mediaKind) ?? .movie,
+            downloadManager: downloadManager,
+            playback: playback
+        )
+    }
+
+    private func downloadLandscapeSection<Content: View>(
+        title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(title)
+                .font(MovieBoxTypography.title)
+                .foregroundStyle(.primary)
+                .padding(.horizontal, MovieBoxLayout.shelfHorizontalInset)
+
+            LazyVStack(spacing: 14) {
+                content()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, MovieBoxLayout.shelfHorizontalInset)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func artworkURL(for tmdbId: Int) -> URL? {
+        guard tmdbId != 0,
+              let record = movieRecords.first(where: { $0.tmdbId == tmdbId }),
+              let path = record.posterPath
+        else { return nil }
+        return MetadataClient().imageURL(path: path, width: 1280)
     }
 
     private func playHDRTestStream(_ stream: HDRTestStream) {

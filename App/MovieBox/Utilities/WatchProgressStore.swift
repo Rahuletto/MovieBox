@@ -37,6 +37,40 @@ enum WatchProgressStore {
         return record
     }
 
+    /// Ensures a `MovieRecord` exists so local/download playback can persist resume position.
+    @MainActor
+    @discardableResult
+    static func ensurePlaybackRecord(
+        tmdbId: Int,
+        title: String,
+        mediaKind: MediaKind,
+        posterPath: String? = nil,
+        in context: ModelContext,
+        existing: [MovieRecord]
+    ) -> MovieRecord? {
+        guard tmdbId > 0 else { return nil }
+        let cleanedTitle = PlaybackDisplayTitle.clean(title)
+        if let record = existing.first(where: { $0.tmdbId == tmdbId }) {
+            if record.title.isEmpty {
+                record.title = cleanedTitle
+            }
+            if record.posterPath == nil, let posterPath {
+                record.posterPath = posterPath
+            }
+            return record
+        }
+        let record = MovieRecord(
+            tmdbId: tmdbId,
+            mediaKind: mediaKind.storageValue,
+            title: cleanedTitle,
+            posterPath: posterPath,
+            lastWatchedAt: Date()
+        )
+        context.insert(record)
+        try? context.save()
+        return record
+    }
+
     static func savedPosition(for tmdbId: Int, in records: [MovieRecord]) -> Double {
         records.first(where: { $0.tmdbId == tmdbId })?.playbackPositionSeconds ?? 0
     }

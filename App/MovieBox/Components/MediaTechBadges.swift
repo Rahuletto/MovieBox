@@ -63,16 +63,17 @@ struct MediaTechBadge: View {
         }
     }
 
-    /// Dolby lockups: template on dark pill (wide logos need the capsule).
+    /// Dolby lockups: template on dark pill; Vision uses 372×138 vertical art (not the legacy stacked mark).
     private func dolbyPillBadge(assetName: String) -> some View {
         let overallWidth = kind.displayWidth(for: size)
         let overallHeight = kind.displayHeight(for: size)
-        let horizontalPadding = size == .list ? 3.5 * 1.05 : 3.5
-        let verticalPadding = size == .list ? 2.0 * 1.05 : 2.0
+        let horizontalPadding: CGFloat = kind == .dolbyVision ? 4 : (size == .list ? 3.5 * 1.05 : 3.5)
+        let verticalPadding: CGFloat = kind == .dolbyVision ? 3 : (size == .list ? 2.0 * 1.05 : 2.0)
 
         return Image(assetName)
             .renderingMode(.template)
             .resizable()
+            .interpolation(.high)
             .scaledToFit()
             .foregroundStyle(.white)
             .frame(width: overallWidth - horizontalPadding * 2, height: overallHeight - verticalPadding * 2)
@@ -97,26 +98,31 @@ private extension MediaTechKind {
         }
     }
 
+    /// `badge-dolby-vision.png` source artboard (CloudFront vertical lockup).
+    static let dolbyVisionAspectRatio: CGFloat = 372.0 / 138.0
+
     func displayHeight(for size: MediaTechBadgeSize) -> CGFloat {
-        // Dolby logos are horizontal lockups that read smaller than the
-        // 4K/HDR pills at the same height, so they need a slightly taller box.
         let base: CGFloat = switch self {
         case .fourK: 13
         case .hdr: 13
-        case .dolbyVision: 15
+        case .dolbyVision: 18
         case .dolbyAtmos: 15
         }
         return size == .list ? base * 1.05 : base
     }
 
     func displayWidth(for size: MediaTechBadgeSize) -> CGFloat {
-        let base: CGFloat = switch self {
-        case .fourK: 25
-        case .hdr: 30
-        case .dolbyVision: 38
-        case .dolbyAtmos: 34
+        let height = displayHeight(for: size)
+        switch self {
+        case .dolbyVision:
+            return height * Self.dolbyVisionAspectRatio
+        case .fourK:
+            return size == .list ? 25 * 1.05 : 25
+        case .hdr:
+            return size == .list ? 30 * 1.05 : 30
+        case .dolbyAtmos:
+            return size == .list ? 34 * 1.05 : 34
         }
-        return size == .list ? base * 1.05 : base
     }
 
     var fallbackLabel: String {
@@ -143,6 +149,25 @@ func torrentTechKinds(for torrent: TorrentResult) -> [MediaTechKind] {
     }
     if torrent.audioFormat == .dolbyAtmos {
         kinds.append(.dolbyAtmos)
+    }
+    return kinds
+}
+
+/// Maps persisted download quality/HDR strings to hero/list tech badges.
+func downloadTechKinds(quality: String, hdrType: String?) -> [MediaTechKind] {
+    var kinds: [MediaTechKind] = []
+    if quality == VideoQuality.p2160.rawValue {
+        kinds.append(.fourK)
+    }
+    if let hdrType, let parsed = HDRType(rawValue: hdrType) {
+        switch parsed {
+        case .dolbyVisionOnly, .dolbyVisionWithHDR10:
+            kinds.append(.dolbyVision)
+        case .hdr10Plus, .hdr10, .hdr:
+            kinds.append(.hdr)
+        case .hlg:
+            break
+        }
     }
     return kinds
 }
