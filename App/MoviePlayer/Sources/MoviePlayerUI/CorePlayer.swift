@@ -88,6 +88,8 @@ public final class PlayerState {
     
     public var hdrType: PlayerHDRType? = nil
     public var audioFormat: PlayerAudioFormat? = nil
+    /// Latest HDR/DV/Atmos probe (HLS manifest and/or AVPlayer track).
+    public var streamQualityDiagnostics: StreamQualityDiagnostics?
     public var errorMessage: String? = nil
     public var onPositionUpdate: ((Int, Double, Double) -> Void)?
 
@@ -142,6 +144,8 @@ public final class PlayerState {
     private var hudPillDismissTask: Task<Void, Never>?
     private var hudPillDismissGeneration: UInt64 = 0
     private var qualityBadgePillShownForCurrentItem = false
+    /// When set at `load()`, remux-verified badges are not replaced by AVPlayer track probing.
+    private var qualityBadgesLockedFromPrepare = false
 
     private var timeObserver: Any?
     private var itemStatusObserver: NSKeyValueObservation?
@@ -288,6 +292,19 @@ public final class PlayerState {
         resourceLoaderDelegate: AVAssetResourceLoaderDelegate? = nil,
         resourceLoaderQueue: DispatchQueue? = nil
     ) {
+        // #region agent log
+        DebugAgentLog.write(
+            hypothesisId: "H4",
+            location: "CorePlayer.swift:load",
+            message: "player load",
+            data: [
+                "ext": url.pathExtension.lowercased(),
+                "movieId": String(movieId),
+                "resumePosition": resumePosition.map { String($0) } ?? "nil",
+                "chromeHidden": String(isPlaybackChromeHidden),
+            ]
+        )
+        // #endregion
         stopPlaybackResources()
 
         streamsFromLocalTorrentServer =
@@ -302,6 +319,7 @@ public final class PlayerState {
         self.subtitleURL = subtitleURL
         self.hdrType = hdrType
         self.audioFormat = audioFormat
+        qualityBadgesLockedFromPrepare = hdrType != nil || audioFormat != nil
         self.subtitleAppearance = subtitleAppearance
         qualityBadgePillShownForCurrentItem = false
         self.subtitleFontSize = subtitleFontSize
@@ -621,6 +639,11 @@ public final class PlayerState {
         guard !qualityBadgePillShownForCurrentItem, !isFastScanning else { return }
         let kinds = qualityBadgeKinds
         guard !kinds.isEmpty else { return }
+        // Already visible (e.g. repeated readyToPlay while probing) — don't extend or re-animate.
+        if case .qualityBadges(let showing) = hudStatusPill, showing == kinds {
+            qualityBadgePillShownForCurrentItem = true
+            return
+        }
         qualityBadgePillShownForCurrentItem = true
         presentTransientHUDPill(
             .qualityBadges(kinds: kinds),
@@ -1046,6 +1069,8 @@ public final class PlayerState {
         posterURL = nil
         hdrType = nil
         audioFormat = nil
+        streamQualityDiagnostics = nil
+        qualityBadgesLockedFromPrepare = false
         qualityBadgePillShownForCurrentItem = false
         playbackSources = []
         selectedPlaybackSourceID = nil
@@ -1152,6 +1177,7 @@ public final class PlayerState {
                 return
             }
             pipHostView?.prepareForPictureInPicture()
+            pipHostView?.window?.layoutIfNeeded()
             controller.startPictureInPicture()
         }
     }
@@ -1162,6 +1188,7 @@ public final class PlayerState {
         if controller.isPictureInPictureActive { return true }
         guard controller.isPictureInPicturePossible else { return false }
         pipHostView?.prepareForPictureInPicture()
+        pipHostView?.window?.layoutIfNeeded()
         controller.startPictureInPicture()
         return true
     }
@@ -1426,14 +1453,31 @@ public final class PlayerState {
                         self.duration = readyDuration
                     }
                     PlaybackLog.log("AVPlayerItem readyToPlay duration=\(self.duration)s")
+                    // #region agent log
+                    if let container = self.pipHostView {
+                        let superName = container.superview.map { String(describing: type(of: $0)) } ?? "nil"
+                        DebugAgentLog.write(
+                            hypothesisId: "H1,H2,H4",
+                            location: "CorePlayer.swift:readyToPlay",
+                            message: "item ready",
+                            data: [
+                                "duration": String(self.duration),
+                                "containerFrame": NSStringFromRect( container.frame),
+                                "layerFrame": NSStringFromRect( container.playerLayer.frame),
+                                "superview": superName,
+                                "pendingResume": self.pendingResumePosition.map { String($0) } ?? "nil",
+                            ]
+                        )
+                    }
+                    // #endregion
                     Task { @MainActor [weak self] in
-                        await self?.logVideoColorMetadataFromAsset(item: item)
+                        guard let self else { return }
+                        await self.applyStreamQualityBadgesFromAsset(item: item)
                     }
                     self.errorMessage = nil
                     self.bufferingDetail = nil
                     self.tryApplyPendingResume()
                     self.updateBufferingState(for: item)
-                    self.presentQualityBadgesHUDPillIfNeeded()
                     self.scheduleWindowAutosizeRetries()
                     Task { @MainActor [weak self] in
                         guard let self, item === self.observedPlayerItem else { return }
@@ -1502,10 +1546,20 @@ public final class PlayerState {
                        let reason = self.player.reasonForWaitingToPlay {
                         PlaybackLog.log("waitingToPlay reason=\(reason.rawValue) wantsPlay=\(self.userWantsPlayback)")
                     } else if status == .playing {
+                        if !self.isPlaying { self.isPlaying = true }
                         PlaybackLog.log("timeControlStatus=playing wantsPlay=\(self.userWantsPlayback)")
-                    } else if status == .paused, self.userWantsPlayback {
-                        PlaybackLog.log("timeControlStatus=paused but user wants play — nudging")
-                        self.nudgePlaybackIfStalled()
+                    } else if status == .paused {
+                        if self.isPictureInPictureActive {
+                            if self.isPlaying { self.isPlaying = false }
+                            self.updateBufferingState()
+                            return
+                        }
+                        if self.userWantsPlayback {
+                            PlaybackLog.log("timeControlStatus=paused but user wants play — nudging")
+                            self.nudgePlaybackIfStalled()
+                        } else if self.isPlaying {
+                            self.isPlaying = false
+                        }
                     }
                     self.updateBufferingState()
                 }
@@ -1912,27 +1966,48 @@ public final class PlayerState {
         cancellables.removeAll()
     }
 
-    private func logVideoColorMetadataFromAsset(item: AVPlayerItem) async {
-        guard let track = try? await item.asset.loadTracks(withMediaType: .video).first,
-              let formatDescription = track.formatDescriptions.first else {
-            return
+    private func applyStreamQualityBadgesFromAsset(item: AVPlayerItem) async {
+        let manifestURL = (item.asset as? AVURLAsset)?.url
+        var detected = StreamQualityDetection.DetectedQuality()
+        for attempt in 0..<4 {
+            detected = await StreamQualityDetection.detect(from: item.asset, manifestURL: manifestURL)
+            if detected.hdrType != nil || detected.audioFormat != nil {
+                break
+            }
+            if attempt < 3 {
+                try? await Task.sleep(for: .milliseconds(350))
+            }
         }
-        let format = formatDescription as! CMFormatDescription
-        let primaries = CMFormatDescriptionGetExtension(
-            format,
-            extensionKey: kCMFormatDescriptionExtension_ColorPrimaries
-        ) as? String
-        let transfer = CMFormatDescriptionGetExtension(
-            format,
-            extensionKey: kCMFormatDescriptionExtension_TransferFunction
-        ) as? String
-        let matrix = CMFormatDescriptionGetExtension(
-            format,
-            extensionKey: kCMFormatDescriptionExtension_YCbCrMatrix
-        ) as? String
+
+        streamQualityDiagnostics = detected.diagnostics
+
+        if !qualityBadgesLockedFromPrepare {
+            if let streamHDR = detected.hdrType, streamHDR != hdrType {
+                hdrType = streamHDR
+            }
+            if let streamAtmos = detected.audioFormat, streamAtmos != audioFormat {
+                audioFormat = streamAtmos
+            }
+            // Pill is one-shot per load; badge values may refine as HLS/track probing updates.
+            presentQualityBadgesHUDPillIfNeeded()
+        }
+
+        let sourceLabel = manifestURL?.absoluteString ?? title
         PlaybackLog.log(
-            "[HDR] AVPlayer track color primaries=\(primaries ?? "nil") transfer=\(transfer ?? "nil") matrix=\(matrix ?? "nil") playerHDR=\(hdrType?.rawValue ?? "none")"
+            "[HDR] stream detect hdr=\(detected.hdrType?.rawValue ?? "none") atmos=\(detected.audioFormat != nil) locked=\(qualityBadgesLockedFromPrepare) playerHDR=\(hdrType?.rawValue ?? "none") source=\(sourceLabel)"
         )
+    }
+
+    /// Probes HLS manifest + AVPlayer tracks (used by Apple reference streams in Downloads).
+    public func refreshStreamQualityBadges(manifestURL: URL?) async {
+        guard let item = player.currentItem else { return }
+        let url = manifestURL ?? (item.asset as? AVURLAsset)?.url
+        let detected = await StreamQualityDetection.detect(from: item.asset, manifestURL: url)
+        streamQualityDiagnostics = detected.diagnostics
+        if !qualityBadgesLockedFromPrepare {
+            hdrType = detected.hdrType
+            audioFormat = detected.audioFormat
+        }
     }
 }
 
@@ -1945,36 +2020,95 @@ public struct AVPlayerLayerView: NSViewRepresentable {
         self.state = state
     }
 
-    public func makeNSView(context: Context) -> PlayerContainerView {
-        let view = PlayerContainerView()
-        view.bind(to: state)
-        view.playerLayer.player = player
-        view.playerLayer.videoGravity = state.videoGravity
+    public func makeNSView(context: Context) -> PlayerSurfaceHost {
+        let host = PlayerSurfaceHost()
+        host.configure(player: player, state: state)
         DispatchQueue.main.async {
-            state.setupPiP(with: view.playerLayer)
+            state.setupPiP(with: host.playerContainer.playerLayer)
         }
-        return view
+        return host
     }
 
-    public func updateNSView(_ nsView: PlayerContainerView, context: Context) {
-        nsView.bind(to: state)
-        nsView.playerLayer.player = player
-        nsView.playerLayer.videoGravity = state.videoGravity
+    public func updateNSView(_ host: PlayerSurfaceHost, context: Context) {
+        host.configure(player: player, state: state)
         if state.isPresented {
-            state.setupPiP(with: nsView.playerLayer)
+            state.setupPiP(with: host.playerContainer.playerLayer)
         }
+        host.needsLayout = true
     }
 
-    public static func dismantleNSView(_ nsView: PlayerContainerView, coordinator: ()) {
-        nsView.restoreAfterPictureInPicture()
-        nsView.bind(to: nil)
+    public static func dismantleNSView(_ host: PlayerSurfaceHost, coordinator: ()) {
+        host.teardown()
+    }
+}
+
+/// Layout anchor inside SwiftUI; `PlayerContainerView` stays here during normal playback.
+public final class PlayerSurfaceHost: NSView {
+    let playerContainer = PlayerContainerView()
+    private var lastLayoutLogSignature = ""
+
+    public override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = false
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    fileprivate func configure(player: AVPlayer, state: PlayerState) {
+        playerContainer.bind(to: state, anchor: self)
+        playerContainer.playerLayer.player = player
+        playerContainer.playerLayer.videoGravity = state.videoGravity
+        attachPlayerContainer()
+    }
+
+    fileprivate func teardown() {
+        playerContainer.restoreAfterPictureInPicture()
+        playerContainer.bind(to: nil, anchor: nil)
+    }
+
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        attachPlayerContainer()
+    }
+
+    public override func layout() {
+        super.layout()
+        attachPlayerContainer()
+        // #region agent log
+        let onHost = playerContainer.superview === self
+        let signature = "\(Int(bounds.width))x\(Int(bounds.height))|\(Int(playerContainer.frame.width))x\(Int(playerContainer.frame.height))|\(onHost)"
+        if signature != lastLayoutLogSignature, bounds.width > 1, bounds.height > 1 {
+            lastLayoutLogSignature = signature
+            DebugAgentLog.write(
+                hypothesisId: "H1,H5",
+                location: "CorePlayer.swift:PlayerSurfaceHost.layout",
+                message: "surface host layout",
+                data: [
+                    "hostBounds": NSStringFromRect( bounds),
+                    "containerFrame": NSStringFromRect( playerContainer.frame),
+                    "containerOnHost": String(onHost),
+                ]
+            )
+        }
+        // #endregion
+    }
+
+    private func attachPlayerContainer() {
+        if playerContainer.superview !== self {
+            playerContainer.removeFromSuperview()
+            addSubview(playerContainer)
+        }
+        playerContainer.frame = bounds
+        playerContainer.autoresizingMask = [.width, .height]
     }
 }
 
 public final class PlayerContainerView: NSView {
     private weak var playerState: PlayerState?
-    private weak var pipReparentSuperview: NSView?
-    private var pipReparentFrame: NSRect = .zero
+    private weak var presentationAnchor: PlayerSurfaceHost?
+    private var isReparentedForPictureInPicture = false
 
     public var playerLayer: AVPlayerLayer {
         guard let playerLayer = layer as? AVPlayerLayer else {
@@ -1983,48 +2117,73 @@ public final class PlayerContainerView: NSView {
         return playerLayer
     }
 
-    fileprivate func bind(to state: PlayerState?) {
+    fileprivate func bind(to state: PlayerState?, anchor: PlayerSurfaceHost?) {
         playerState?.pipHostView = nil
         playerState = state
+        presentationAnchor = anchor
         state?.pipHostView = self
     }
 
-    /// PiP inserts `AVPictureInPicturePlayerLayerView` into the layer host's superview chain.
-    /// Reparent onto the window content view first so that does not land on `NSHostingController.view`.
+    /// Briefly moves the layer host above `NSHostingController.view` so PiP can attach (not under SwiftUI).
     fileprivate func prepareForPictureInPicture() {
-        guard pipReparentSuperview == nil,
-              let window,
-              let contentView = window.contentView,
-              isInsideHostingHierarchy
+        guard let anchor = presentationAnchor,
+              let contentView = anchor.window?.contentView,
+              !isReparentedForPictureInPicture
         else { return }
 
-        pipReparentSuperview = superview
-        pipReparentFrame = frame
-        let frameInContent = convert(bounds, to: contentView)
+        let hostingRoot = Self.largestHostingSubview(of: contentView) ?? contentView
+        let targetFrame = anchor.convert(anchor.bounds, to: contentView)
         removeFromSuperview()
-        contentView.addSubview(self)
-        frame = frameInContent
+        contentView.addSubview(self, positioned: .above, relativeTo: hostingRoot)
+        frame = targetFrame
+        isReparentedForPictureInPicture = true
+        layoutSubtreeIfNeeded()
+        contentView.layoutSubtreeIfNeeded()
+        // #region agent log
+        DebugAgentLog.write(
+            hypothesisId: "H2",
+            location: "CorePlayer.swift:prepareForPictureInPicture",
+            message: "reparented for PiP",
+            data: [
+                "targetFrame": NSStringFromRect( targetFrame),
+                "anchorBounds": NSStringFromRect( anchor.bounds),
+            ]
+        )
+        // #endregion
     }
 
     fileprivate func restoreAfterPictureInPicture() {
-        guard let superview = pipReparentSuperview else { return }
-        let frame = pipReparentFrame
+        guard isReparentedForPictureInPicture, let anchor = presentationAnchor else { return }
         removeFromSuperview()
-        superview.addSubview(self)
-        self.frame = frame
-        pipReparentSuperview = nil
-        pipReparentFrame = .zero
+        anchor.addSubview(self)
+        frame = anchor.bounds
+        autoresizingMask = [.width, .height]
+        isReparentedForPictureInPicture = false
+        // #region agent log
+        DebugAgentLog.write(
+            hypothesisId: "H2",
+            location: "CorePlayer.swift:restoreAfterPictureInPicture",
+            message: "restored after PiP",
+            data: [
+                "anchorBounds": NSStringFromRect( anchor.bounds),
+                "containerFrame": NSStringFromRect( frame),
+            ]
+        )
+        // #endregion
     }
 
-    private var isInsideHostingHierarchy: Bool {
-        var view: NSView? = self
-        while let current = view {
-            if String(describing: type(of: current)).localizedCaseInsensitiveContains("hosting") {
-                return true
-            }
-            view = current.superview
+    private static func largestHostingSubview(of contentView: NSView) -> NSView? {
+        contentView.subviews
+            .filter { isHostingRelatedView($0) }
+            .max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
+    }
+
+    private static func isHostingRelatedView(_ view: NSView) -> Bool {
+        let typeName = String(describing: type(of: view))
+        if typeName.localizedCaseInsensitiveContains("hosting") {
+            return true
         }
-        return false
+        return view.className.localizedCaseInsensitiveContains("hosting")
     }
 
     public override func makeBackingLayer() -> CALayer {
@@ -2046,6 +2205,22 @@ public final class PlayerContainerView: NSView {
     public override func layout() {
         super.layout()
         playerLayer.frame = bounds
+        // #region agent log
+        if isReparentedForPictureInPicture || bounds.width < 200 || bounds.height < 200 {
+            let superName = superview.map { String(describing: type(of: $0)) } ?? "nil"
+            DebugAgentLog.write(
+                hypothesisId: "H2,H5",
+                location: "CorePlayer.swift:PlayerContainerView.layout",
+                message: "container layout anomaly",
+                data: [
+                    "reparented": String(isReparentedForPictureInPicture),
+                    "bounds": NSStringFromRect( bounds),
+                    "layerFrame": NSStringFromRect( playerLayer.frame),
+                    "superview": superName,
+                ]
+            )
+        }
+        // #endregion
     }
 }
 
@@ -2091,9 +2266,10 @@ public struct PlayerView<
 
     public var body: some View {
         ZStack {
-            if !state.isPlaybackChromeHidden {
-                Color.black.ignoresSafeArea()
-            }
+            // Letterbox + load state behind AVPlayerLayer (resizeAspect). Kept during PiP chrome
+            // hide so minimize/restore does not animate this layer away (mid-transition black flash).
+            // Browsing while detached uses higher z-index in AppShell, not transparency here.
+            Color.black.ignoresSafeArea()
 
             // Native AVPlayer rendering layer — always mounted while playback is active.
             AVPlayerLayerView(player: state.player, state: state)
@@ -2430,6 +2606,8 @@ public struct PlayerView<
                             .contentShape(Capsule(style: .continuous))
                         }
                         .buttonStyle(.plain)
+                        .animation(.spring(response: 0.34, dampingFraction: 0.78), value: state.isMuted)
+                        .animation(.interactiveSpring(response: 0.16, dampingFraction: 0.88), value: state.volume)
 
                         // Episodes Button (TV only)
                         if !state.episodes.isEmpty {
@@ -2827,9 +3005,46 @@ public struct PlayerView<
         }
     }
 
+    private func hdrDiagnosticsSection(from diagnostics: StreamQualityDiagnostics?) -> DiagnosticsPanelSnapshot.Section? {
+        guard let diagnostics else { return nil }
+        var rows: [DiagnosticsPanelSnapshot.Row] = [
+            .init(label: "Probe source", value: diagnostics.source),
+        ]
+        if let hdr = diagnostics.hdrType?.rawValue {
+            rows.append(.init(label: "Detected HDR", value: hdr))
+        }
+        if let videoRange = diagnostics.videoRange, !videoRange.isEmpty {
+            rows.append(.init(label: "VIDEO-RANGE", value: videoRange))
+        }
+        if let codecs = diagnostics.codecs, !codecs.isEmpty {
+            rows.append(.init(label: "CODECS", value: codecs))
+        }
+        if let resolution = diagnostics.resolution, !resolution.isEmpty {
+            rows.append(.init(label: "Top variant", value: resolution))
+        }
+        if let peakBitrate = diagnostics.peakBitrate, !peakBitrate.isEmpty {
+            rows.append(.init(label: "Peak bitrate", value: peakBitrate))
+        }
+        if let primaries = diagnostics.colorPrimaries, !primaries.isEmpty {
+            rows.append(.init(label: "Color primaries", value: primaries))
+        }
+        if let transfer = diagnostics.colorTransfer, !transfer.isEmpty {
+            rows.append(.init(label: "Transfer", value: transfer))
+        }
+        if let atmos = diagnostics.atmosRendition, !atmos.isEmpty {
+            rows.append(.init(label: "Atmos audio", value: atmos))
+        } else if diagnostics.audioFormat == .dolbyAtmos {
+            rows.append(.init(label: "Atmos audio", value: "Dolby Atmos"))
+        }
+        guard rows.count > 1 else { return nil }
+        return DiagnosticsPanelSnapshot.Section(title: "HDR / Dolby", rows: rows)
+    }
+
     private func showNerdStats() async {
         guard let item = state.player.currentItem,
               let asset = item.asset as? AVURLAsset else { return }
+
+        await state.refreshStreamQualityBadges(manifestURL: asset.url)
 
         let streamURL = asset.url
         var quality = "Adaptive HLS"
@@ -2903,31 +3118,39 @@ public struct PlayerView<
         }
         let title = state.seriesName.isEmpty ? state.title : state.seriesName
         let capturedAt = Date()
+        var sections: [DiagnosticsPanelSnapshot.Section] = [
+            DiagnosticsPanelSnapshot.Section(
+                title: "Playback",
+                rows: [
+                    .init(label: "Title", value: title),
+                    .init(label: "Format", value: format),
+                    .init(label: "Quality", value: quality),
+                    .init(label: "Bitrate", value: bitrate),
+                    .init(label: "Codec", value: codec),
+                    .init(label: "Observed", value: observedBitrate),
+                    .init(label: "Indicated", value: indicatedBitrate),
+                    .init(label: "Switch", value: switchBitrate),
+                    .init(label: "HUD HDR", value: state.hdrType?.rawValue ?? "none"),
+                    .init(label: "HUD Atmos", value: state.audioFormat?.rawValue ?? "none"),
+                ]
+            ),
+        ]
+        if let hdr = hdrDiagnosticsSection(from: state.streamQualityDiagnostics) {
+            sections.append(hdr)
+        }
+        sections.append(
+            DiagnosticsPanelSnapshot.Section(
+                title: "Source",
+                rows: [
+                    .init(label: "URL", value: streamURL.absoluteString),
+                ]
+            )
+        )
         nerdStatsSnapshot = DiagnosticsPanelSnapshot(
             title: "Nerd Stats",
             subtitle: "Updated \(capturedAt.formatted(date: .omitted, time: .standard))",
             capturedAt: capturedAt,
-            sections: [
-                DiagnosticsPanelSnapshot.Section(
-                    title: "Playback",
-                    rows: [
-                        .init(label: "Title", value: title),
-                        .init(label: "Format", value: format),
-                        .init(label: "Quality", value: quality),
-                        .init(label: "Bitrate", value: bitrate),
-                        .init(label: "Codec", value: codec),
-                        .init(label: "Observed", value: observedBitrate),
-                        .init(label: "Indicated", value: indicatedBitrate),
-                        .init(label: "Switch", value: switchBitrate),
-                    ]
-                ),
-                DiagnosticsPanelSnapshot.Section(
-                    title: "Source",
-                    rows: [
-                        .init(label: "URL", value: streamURL.absoluteString),
-                    ]
-                ),
-            ],
+            sections: sections,
             emptyTitle: "No playback data",
             emptyDescription: "Stats appear while a trailer or clip is playing.",
             emptySystemImage: "play.rectangle"
@@ -3257,21 +3480,20 @@ private struct PlayerVolumeIcon: View {
         Double(min(max(volume, 0), 1))
     }
 
+    /// Single symbol identity so `contentTransition(.symbolEffect(.replace))` can morph (mute ↔ waves).
+    private var symbolName: String {
+        isSilent ? "speaker.slash.fill" : "speaker.wave.3.fill"
+    }
+
     var body: some View {
-        Group {
-            if isSilent {
-                Image(systemName: "speaker.slash.fill")
-            } else {
-                Image(systemName: "speaker.wave.3.fill", variableValue: clampedVolume)
-            }
-        }
-        .font(.system(size: iconFont, weight: .semibold))
-        .playerGlassSymbol()
-        .frame(width: frameSize, height: frameSize)
-        .contentShape(Rectangle())
-        .contentTransition(.symbolEffect(.replace))
-        .animation(.spring(response: 0.34, dampingFraction: 0.78), value: isSilent)
-        .animation(.interactiveSpring(response: 0.16, dampingFraction: 0.88), value: clampedVolume)
+        Image(systemName: symbolName, variableValue: isSilent ? 0 : clampedVolume)
+            .font(.system(size: iconFont, weight: .semibold))
+            .playerGlassSymbol()
+            .frame(width: frameSize, height: frameSize)
+            .contentShape(Rectangle())
+            .contentTransition(.symbolEffect(.replace))
+            .animation(.spring(response: 0.34, dampingFraction: 0.78), value: symbolName)
+            .animation(.interactiveSpring(response: 0.16, dampingFraction: 0.88), value: clampedVolume)
     }
 }
 
@@ -3661,6 +3883,7 @@ public final class PlayerPiPDelegate: NSObject, AVPictureInPictureControllerDele
     public func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         let activeState = self.state
         Task { @MainActor in
+            activeState.pipHostView?.prepareForPictureInPicture()
             activeState.isPictureInPictureActive = true
             activeState.keepPlaybackAliveForPiP()
         }

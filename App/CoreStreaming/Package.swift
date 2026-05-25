@@ -23,7 +23,12 @@ let package = Package(
         ),
         .testTarget(
             name: "CoreStreamingTests",
-            dependencies: ["CoreStreaming", "CoreStorage", "CoreTorrent"]
+            dependencies: [
+                "CoreStreaming",
+                "CoreStorage",
+                "CoreTorrent",
+                .product(name: "MoviePlayerEngine", package: "MoviePlayer"),
+            ]
         ),
     ],
     swiftLanguageModes: [.v6]

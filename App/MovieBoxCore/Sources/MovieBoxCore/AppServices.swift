@@ -1,3 +1,4 @@
+import CoreStorage
 import CoreStreaming
 import CoreTorrent
 import Foundation
@@ -48,6 +49,7 @@ public final class AppServices {
 
     public func syncPlaybackPolicy(from settings: AppSettings) {
         playbackCoordinator.strictHDRValidation = settings.strictHDRValidation
+        moviePlayerSession.allowTranscodeFallback = settings.allowTranscodeFallback
     }
 
     public func registerActiveSession(_ session: TorrentStreamSession?) {

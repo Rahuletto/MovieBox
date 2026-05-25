@@ -6,6 +6,7 @@ import MovieBoxCore
 import SwiftData
 import SwiftUI
 import UniformTypeIdentifiers
+import DesignSystem
 
 struct DownloadsView: View {
     @Environment(AppRouter.self) private var router
@@ -21,6 +22,15 @@ struct DownloadsView: View {
 
     private var downloadManager: DownloadManager { appServices.downloadManager }
     private var playback: PlaybackSettings { PlaybackSettings.from(settings.first) }
+
+    /// Apple reference stream — https://developer.apple.com/streaming/examples/
+    private let hdrTestStreams: [HDRTestStream] = [
+        HDRTestStream(
+            id: "apple-adv-dv-atmos",
+            title: "Apple Advanced HDR",
+            url: "https://devstreaming-cdn.apple.com/videos/streaming/examples/adv_dv_atmos/main.m3u8"
+        ),
+    ]
 
     var body: some View {
         downloadsScrollContent
@@ -61,7 +71,7 @@ struct DownloadsView: View {
                         .padding(.horizontal, 28)
                 }
 
-                if downloadManager.tasks.isEmpty {
+                if downloadManager.tasks.isEmpty, hdrTestStreams.isEmpty {
                     ContentUnavailableView(
                         "No Downloads",
                         systemImage: "arrow.down.circle",
@@ -70,9 +80,17 @@ struct DownloadsView: View {
                     .frame(maxWidth: .infinity, minHeight: 260)
                 } else {
                     LazyVStack(spacing: 12) {
+                        ForEach(hdrTestStreams) { stream in
+                            DownloadTaskRow(
+                                model: .hdrTest(stream),
+                                downloadManager: downloadManager,
+                                playback: playback,
+                                onWatchHDRTest: playHDRTestStream
+                            )
+                        }
                         ForEach(downloadManager.tasks) { task in
                             DownloadTaskRow(
-                                task: task,
+                                model: .task(task),
                                 downloadManager: downloadManager,
                                 playback: playback
                             )
@@ -83,6 +101,21 @@ struct DownloadsView: View {
                 }
             }
         }
+    }
+
+    private func playHDRTestStream(_ stream: HDRTestStream) {
+        guard let url = URL(string: stream.url) else {
+            errorMessage = "Invalid HDR test stream URL."
+            return
+        }
+        errorMessage = nil
+        playerState.load(
+            url: url,
+            title: stream.title,
+            movieId: 0,
+            subtitleAppearance: playback.appearance,
+            subtitleFontSize: playback.fontSize
+        )
     }
 
     private var magnetSheetContent: some View {

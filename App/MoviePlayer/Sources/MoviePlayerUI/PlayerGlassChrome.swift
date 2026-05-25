@@ -92,7 +92,18 @@ public extension View {
         symbolRenderingMode(.hierarchical)
     }
 
+
     func nativeGlassEffect(cornerRadius: CGFloat = 12) -> some View {
         playerGlassChrome(.roundedRect(cornerRadius: cornerRadius), interactive: true)
+    }
+}
+
+extension Image {
+    /// Bitmap badges (HDR / Dolby lockups) on glass — template mask tints with semantic foreground.
+    func playerGlassBadgeImage() -> some View {
+        renderingMode(.template)
+            .resizable()
+            .scaledToFit()
+            .foregroundStyle(.primary)
     }
 }

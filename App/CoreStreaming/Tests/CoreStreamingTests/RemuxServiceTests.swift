@@ -1,6 +1,6 @@
 import Foundation
+import MoviePlayerEngine
 import XCTest
-@testable import CoreStreaming
 
 final class RemuxServiceTests: XCTestCase {
     func testHEVCMain10EAC3IsAccepted() throws {
@@ -27,32 +27,38 @@ final class RemuxServiceTests: XCTestCase {
         XCTAssertEqual(plan.audioStream?.codecName, "aac")
     }
 
-    func testHEVCTrueHDIsRejected() throws {
+    func testHEVCTrueHDIsRejectedWhenTranscodeDisabled() throws {
+        let plan = try makePlan(
+            videoCodec: "hevc",
+            audioCodecs: [("truehd", true)],
+            policy: PlaybackPreparePolicy(allowTranscodeFallback: false)
+        )
+
+        XCTAssertEqual(plan.decision, .unsupported)
+        XCTAssertTrue(plan.unsupportedReason?.contains("losslessly") == true)
+    }
+
+    func testHEVCTrueHDTranscodesWhenAllowed() throws {
         let plan = try makePlan(videoCodec: "hevc", audioCodecs: [("truehd", true)])
 
-        XCTAssertEqual(plan.decision, .unsupported)
-        XCTAssertEqual(plan.unsupportedReason, "Audio codec truehd is not AVPlayer-compatible in strict preservation mode.")
+        XCTAssertEqual(plan.decision, .transcodeFMP4HLS)
+        XCTAssertEqual(plan.audioStream?.codecName, "truehd")
     }
 
-    func testHEVCDTSIsRejected() throws {
-        let plan = try makePlan(videoCodec: "hevc", audioCodecs: [("dts", true)])
-
-        XCTAssertEqual(plan.decision, .unsupported)
-        XCTAssertEqual(plan.unsupportedReason, "Audio codec dts is not AVPlayer-compatible in strict preservation mode.")
-    }
-
-    func testAV1IsRejected() throws {
+    func testAV1TranscodesWhenAllowed() throws {
         let plan = try makePlan(videoCodec: "av1", audioCodecs: [("aac", true)])
 
-        XCTAssertEqual(plan.decision, .unsupported)
-        XCTAssertEqual(plan.unsupportedReason, "Video codec av1 cannot be remuxed losslessly for AVPlayer.")
+        XCTAssertEqual(plan.decision, .transcodeFMP4HLS)
     }
 
-    func testNoCompatibleAudioIsRejected() throws {
-        let plan = try makePlan(videoCodec: "h264", audioCodecs: [("opus", true), ("flac", false)])
+    func testNoCompatibleAudioIsRejectedWhenTranscodeDisabled() throws {
+        let plan = try makePlan(
+            videoCodec: "h264",
+            audioCodecs: [("opus", true), ("flac", false)],
+            policy: PlaybackPreparePolicy(allowTranscodeFallback: false)
+        )
 
         XCTAssertEqual(plan.decision, .unsupported)
-        XCTAssertEqual(plan.unsupportedReason, "Audio codec opus is not AVPlayer-compatible in strict preservation mode.")
     }
 
     func testAudioWithNumericBitsPerSampleDecodes() throws {
@@ -266,10 +272,28 @@ final class RemuxServiceTests: XCTestCase {
         XCTAssertTrue(arguments.containsSubsequence(["-map", "0:1"]))
     }
 
+    func testNativePassthroughForMP4H264AAC() throws {
+        let probe = try decode("""
+        {
+          "streams": [
+            { "index": 0, "codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080 },
+            { "index": 1, "codec_type": "audio", "codec_name": "aac", "disposition": { "default": 1 } }
+          ],
+          "format": { "format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "60.0" }
+        }
+        """)
+        let plan = try RemuxService.makePlan(
+            inputURL: URL(fileURLWithPath: "/tmp/movie.mp4"),
+            probe: probe
+        )
+        XCTAssertEqual(plan.decision, .nativePassthrough)
+    }
+
     private func makePlan(
         videoCodec: String,
         videoProfile: String = "Main",
-        audioCodecs: [(codec: String, isDefault: Bool)]
+        audioCodecs: [(codec: String, isDefault: Bool)],
+        policy: PlaybackPreparePolicy = PlaybackPreparePolicy()
     ) throws -> RemuxPlan {
         let audioJSON = audioCodecs.enumerated().map { offset, audio in
             """
@@ -300,7 +324,11 @@ final class RemuxServiceTests: XCTestCase {
           "format": { "format_name": "matroska,webm", "duration": "60.0" }
         }
         """)
-        return try RemuxService.makePlan(inputURL: URL(fileURLWithPath: "/tmp/movie.mkv"), probe: probe)
+        return try RemuxService.makePlan(
+            inputURL: URL(fileURLWithPath: "/tmp/movie.mkv"),
+            probe: probe,
+            policy: policy
+        )
     }
 
     private func decode(_ json: String) throws -> MediaProbe {

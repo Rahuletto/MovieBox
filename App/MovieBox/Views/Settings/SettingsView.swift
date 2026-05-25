@@ -433,6 +433,10 @@ private struct PlaybackSettingsSection: View {
                 Text("When off, playback continues if remux drops HDR mastering data; you may see a warning instead of an error. HDR badges only appear when metadata is verified.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Toggle("Transcode unsupported formats", isOn: $draft.allowTranscodeFallback)
+                Text("Uses more CPU and disk. Converts VP9, AV1, DTS, and other codecs to Apple-friendly HLS via hardware encoding. HDR/Dolby badges are not shown for transcoded playback.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Audio") {
@@ -531,6 +535,7 @@ private struct SettingsDraft: Equatable {
     var autoRemoveCompleted = false
     var preferHDR = true
     var strictHDRValidation = false
+    var allowTranscodeFallback = true
     var subtitlesEnabled = true
     var subtitleStyle = "cinematic"
     var subtitleFontSize = 20.0
@@ -573,6 +578,7 @@ private struct SettingsDraft: Equatable {
         autoRemoveCompleted = settings.autoRemoveCompleted
         preferHDR = settings.preferHDR
         strictHDRValidation = settings.strictHDRValidation
+        allowTranscodeFallback = settings.allowTranscodeFallback
         subtitlesEnabled = settings.subtitlesEnabled
         subtitleStyle = settings.subtitleStyle
         subtitleFontSize = settings.subtitleFontSize
@@ -615,6 +621,7 @@ private struct SettingsDraft: Equatable {
         settings.autoRemoveCompleted = autoRemoveCompleted
         settings.preferHDR = preferHDR
         settings.strictHDRValidation = strictHDRValidation
+        settings.allowTranscodeFallback = allowTranscodeFallback
         settings.subtitlesEnabled = subtitlesEnabled
         settings.subtitleStyle = subtitleStyle
         settings.subtitleFontSize = subtitleFontSize
