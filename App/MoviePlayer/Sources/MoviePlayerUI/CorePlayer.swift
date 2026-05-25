@@ -2264,12 +2264,17 @@ public struct PlayerView<
         self.streamStatsAccessory = streamStatsAccessory
     }
 
+    /// Letterbox fill only while the in-window player surface is visible. Cleared during PiP so
+    /// AVKit’s “playing in Picture in Picture” placeholder is not covered by SwiftUI black.
+    private var showsLetterboxBackdrop: Bool {
+        !state.isPictureInPictureActive && !state.isPlaybackChromeHidden
+    }
+
     public var body: some View {
         ZStack {
-            // Letterbox + load state behind AVPlayerLayer (resizeAspect). Kept during PiP chrome
-            // hide so minimize/restore does not animate this layer away (mid-transition black flash).
-            // Browsing while detached uses higher z-index in AppShell, not transparency here.
-            Color.black.ignoresSafeArea()
+            if showsLetterboxBackdrop {
+                Color.black.ignoresSafeArea()
+            }
 
             // Native AVPlayer rendering layer — always mounted while playback is active.
             AVPlayerLayerView(player: state.player, state: state)
@@ -2369,7 +2374,6 @@ public struct PlayerView<
                 style: .continuous
             )
         )
-        .compositingGroup()
         .overlay(alignment: .top) {
             if !state.isPlaybackChromeHidden {
                 VStack(spacing: 8) {

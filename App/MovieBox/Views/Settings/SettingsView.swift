@@ -3,6 +3,7 @@ import CoreMLEngine
 import CoreMetadata
 import CorePlayer
 import CoreStorage
+import CoreStreaming
 import CoreTorrent
 import MovieBoxCore
 import SwiftData
@@ -45,31 +46,34 @@ struct SettingsView: View {
         .onAppear { loadSettings() }
         .onChange(of: settingsRows) { _, _ in loadSettings() }
         .onChange(of: draft) { _, _ in
-            guard !isHydratingDraft else { return }
-            hasLoadedSettings = true
+            guard !isHydratingDraft, hasLoadedSettings else { return }
             save()
         }
     }
 
     private func loadSettings() {
-        guard !hasLoadedSettings else { return }
         if let settings = settingsRows.first {
             isHydratingDraft = true
             draft = SettingsDraft(settings: settings)
             hasLoadedSettings = true
             isHydratingDraft = false
+            return
         }
+        guard !hasLoadedSettings else { return }
+        hasLoadedSettings = true
     }
 
     private func save() {
         if let existing = settingsRows.first {
             draft.apply(to: existing)
             appServices.syncPlaybackPolicy(from: existing)
+            appServices.applyDownloadDirectory(from: existing)
         } else {
             let newSettings = AppSettings()
             draft.apply(to: newSettings)
             modelContext.insert(newSettings)
             appServices.syncPlaybackPolicy(from: newSettings)
+            appServices.applyDownloadDirectory(from: newSettings)
         }
         if let first = settingsRows.first {
             MovieBoxFileLogger.isDebugLoggingEnabled = first.debugLogging
@@ -371,11 +375,18 @@ private struct DownloadSettingsSection: View {
             Section("Location") {
                 LabeledContent("Download Folder") {
                     HStack {
-                        TextField("", text: $draft.defaultDownloadPath)
-                            .frame(maxWidth: 240)
+                        TextField(
+                            "",
+                            text: $draft.defaultDownloadPath,
+                            prompt: Text(DownloadStorage.defaultRootDirectory().path)
+                        )
+                        .frame(maxWidth: 240)
                         Button("Choose…", action: chooseFolder)
                     }
                 }
+                Text("Use Choose… to grant access (required for folders outside Downloads). Default: Downloads/MovieBox.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Speed Limits") {
@@ -410,6 +421,7 @@ private struct DownloadSettingsSection: View {
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url {
             draft.defaultDownloadPath = url.path
+            DownloadFolderAccess.storeUserSelectedFolder(url)
         }
     }
 }
@@ -520,7 +532,7 @@ private struct SettingsDraft: Equatable {
     var appToken = ""
     var tmdbBearerToken = ""
     var omdbAPIKey = ""
-    var defaultDownloadPath = "~/Movies/MovieBox"
+    var defaultDownloadPath = ""
     var preferredQuality = "best"
     var preferredAudioLang = "en"
     var preferredSubtitleLang = "en"

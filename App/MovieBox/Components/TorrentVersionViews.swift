@@ -5,6 +5,18 @@ import SwiftUI
 
 // MARK: - Display model
 
+struct TorrentDownloadActivity: Equatable, Hashable {
+    enum Phase: String, Equatable, Hashable {
+        case queued
+        case downloading
+        case paused
+    }
+
+    let phase: Phase
+    let progress: Double
+    let label: String
+}
+
 struct TorrentCardModel: Identifiable, Hashable {
     let id: UUID
     let source: String
@@ -17,8 +29,14 @@ struct TorrentCardModel: Identifiable, Hashable {
     let isDownloaded: Bool
     /// Last streamed release for this title with saved watch progress.
     let showsResumePlay: Bool
+    let downloadActivity: TorrentDownloadActivity?
 
-    init(torrent: TorrentResult, isDownloaded: Bool = false, showsResumePlay: Bool = false) {
+    init(
+        torrent: TorrentResult,
+        isDownloaded: Bool = false,
+        showsResumePlay: Bool = false,
+        downloadActivity: TorrentDownloadActivity? = nil
+    ) {
         id = torrent.id
         source = torrent.trackerSource.label
         quality = torrent.quality.rawValue
@@ -26,6 +44,7 @@ struct TorrentCardModel: Identifiable, Hashable {
         title = torrent.title
         self.isDownloaded = isDownloaded
         self.showsResumePlay = showsResumePlay
+        self.downloadActivity = downloadActivity
 
         var parts: [String] = []
         if torrent.sizeBytes > 0 {
@@ -47,7 +66,6 @@ struct TorrentCardModel: Identifiable, Hashable {
 enum TorrentVersionListMode: Equatable {
     case detail(
         streamBusyTorrentID: UUID?,
-        downloadBusyTorrentID: UUID?,
         bufferingByID: [UUID: TorrentRowBufferingSnapshot],
         cardErrors: [UUID: String],
         onStream: (UUID) -> Void,
@@ -62,8 +80,8 @@ enum TorrentVersionListMode: Equatable {
 
     static func == (lhs: TorrentVersionListMode, rhs: TorrentVersionListMode) -> Bool {
         switch (lhs, rhs) {
-        case let (.detail(lStream, lDown, lBuf, lErr, _, _, _), .detail(rStream, rDown, rBuf, rErr, _, _, _)):
-            lStream == rStream && lDown == rDown && lBuf == rBuf && lErr == rErr
+        case let (.detail(lStream, lBuf, lErr, _, _, _), .detail(rStream, rBuf, rErr, _, _, _)):
+            lStream == rStream && lBuf == rBuf && lErr == rErr
         case let (.player(lSel, lSw, _), .player(rSel, rSw, _)):
             lSel == rSel && lSw == rSw
         default:
@@ -150,9 +168,10 @@ struct TorrentVersionRow: View, Equatable {
 
     private var modeKey: String {
         switch mode {
-        case .detail(let streamBusy, let downloadBusy, let buffering, let errors, _, _, _):
+        case .detail(let streamBusy, let buffering, let errors, _, _, _):
             let buf = buffering[model.id].map { "\($0.progress)-\($0.phase)" } ?? ""
-            return "detail-\(streamBusy?.uuidString ?? "")-\(downloadBusy?.uuidString ?? "")-\(buf)-\(errors[model.id] ?? "")"
+            let dl = model.downloadActivity.map { "\($0.phase)-\($0.progress)-\($0.label)" } ?? ""
+            return "detail-\(streamBusy?.uuidString ?? "")-\(buf)-\(dl)-\(errors[model.id] ?? "")"
         case .player(let selected, let switching, _):
             return "player-\(selected?.uuidString ?? "")-\(switching)"
         }
@@ -163,10 +182,9 @@ struct TorrentVersionRow: View, Equatable {
             switch mode {
             case .player(let selectedID, let isSwitching, let onSelect):
                 playerRow(selectedID: selectedID, isSwitching: isSwitching, onSelect: onSelect)
-            case .detail(let streamBusyID, let downloadBusyID, let buffering, let errors, let onStream, let onDownload, let onCopyError):
+            case .detail(let streamBusyID, let buffering, let errors, let onStream, let onDownload, let onCopyError):
                 detailRow(
                     streamBusyID: streamBusyID,
-                    downloadBusyID: downloadBusyID,
                     buffering: buffering[model.id],
                     errorMessage: errors[model.id],
                     onStream: { onStream(model.id) },
@@ -203,7 +221,6 @@ struct TorrentVersionRow: View, Equatable {
 
     private func detailRow(
         streamBusyID: UUID?,
-        downloadBusyID: UUID?,
         buffering: TorrentRowBufferingSnapshot?,
         errorMessage: String?,
         onStream: @escaping () -> Void,
@@ -211,12 +228,10 @@ struct TorrentVersionRow: View, Equatable {
         onCopyError: @escaping () -> Void
     ) -> some View {
         let isStreamBusy = streamBusyID == model.id
-        let isDownloadBusy = downloadBusyID == model.id
-        let isBusy = isStreamBusy || isDownloadBusy
         return rowContent(
             buffering: isStreamBusy ? buffering : nil,
             trailing: {
-                HStack(spacing: 4) {
+                HStack(spacing: 8) {
                     Button(action: onStream) {
                         if model.showsResumePlay {
                             Text("Resume")
@@ -234,31 +249,58 @@ struct TorrentVersionRow: View, Equatable {
                     }
                     .buttonStyle(.plain)
                     .help(model.showsResumePlay ? "Resume" : "Play")
-
-                    if !model.isDownloaded {
-                        Button(action: onDownload) {
-                            Image(systemName: "arrow.down.circle")
-                                .font(.system(size: 22))
-                                .symbolRenderingMode(.hierarchical)
-                                .foregroundStyle(.secondary)
+                    .opacity(isStreamBusy ? 0.35 : 1)
+                    .overlay {
+                        if isStreamBusy {
+                            ProgressView()
+                                .controlSize(.small)
                         }
-                        .buttonStyle(.plain)
-                        .help("Download")
                     }
+                    .disabled(isStreamBusy)
+
+                    downloadTrailing(
+                        onDownload: onDownload
+                    )
                 }
-                .frame(minWidth: model.showsResumePlay ? 88 : 64, alignment: .trailing)
-                .opacity(isBusy ? 0.35 : 1)
-                .overlay {
-                    if isBusy {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                }
-                .disabled(isBusy)
+                .frame(minWidth: model.showsResumePlay ? 120 : 96, alignment: .trailing)
             },
             errorMessage: errorMessage,
             onCopyError: onCopyError
         )
+    }
+
+    @ViewBuilder
+    private func downloadTrailing(onDownload: @escaping () -> Void) -> some View {
+        if let activity = model.downloadActivity {
+            HStack(spacing: 6) {
+                downloadProgressIcon(for: activity)
+                Text(activity.label)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .lineLimit(1)
+            }
+            .frame(minWidth: 72, alignment: .trailing)
+            .accessibilityElement(children: .combine)
+        } else if !model.isDownloaded {
+            Button(action: onDownload) {
+                DownloadProgressIcon(mode: .idle, size: 22)
+            }
+            .buttonStyle(.plain)
+            .help("Download")
+        }
+    }
+
+    private func downloadProgressIcon(for activity: TorrentDownloadActivity) -> some View {
+        let mode: DownloadProgressIcon.Mode = switch activity.phase {
+        case .queued:
+            .queued
+        case .downloading:
+            .downloading(progress: activity.progress)
+        case .paused:
+            .paused(progress: activity.progress)
+        }
+        return DownloadProgressIcon(mode: mode, size: 22)
     }
 
     private func rowContent<Trailing: View>(

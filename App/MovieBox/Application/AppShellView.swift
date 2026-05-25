@@ -1,3 +1,4 @@
+import Combine
 import CorePlayer
 import CoreStreaming
 import CoreStorage
@@ -103,6 +104,13 @@ struct AppShellView: View {
         .onAppear {
             TorrentBackendSync.apply(from: settings.first)
             applyLaunchTabIfNeeded()
+            syncDockDownloadPresentation()
+        }
+        .onReceive(appServices.downloadManager.objectWillChange) { _ in
+            syncDockDownloadPresentation()
+        }
+        .onChange(of: appServices.downloadManager.tasks.count) { _, _ in
+            syncDockDownloadPresentation()
         }
         .task {
             AppBootstrap.runInitialSetup(
@@ -120,6 +128,7 @@ struct AppShellView: View {
                 }
                 TorrentBackendSync.apply(from: settings)
                 appServices.syncPlaybackPolicy(from: settings)
+                appServices.applyDownloadDirectory(from: settings)
             }
             applyLaunchTabIfNeeded()
         }
@@ -177,6 +186,10 @@ struct AppShellView: View {
         Task {
             await appServices.cancelActiveStream()
         }
+    }
+
+    private func syncDockDownloadPresentation() {
+        DockDownloadPresenter.update(tasks: appServices.downloadManager.tasks)
     }
 
     /// macOS window restoration can reopen the last tab (e.g. Library); always land on Home for a fresh session.

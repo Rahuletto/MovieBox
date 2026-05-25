@@ -35,7 +35,7 @@ public enum AppBootstrap {
                 appToken: "",
                 tmdbBearerToken: "",
                 omdbAPIKey: "",
-                defaultDownloadPath: "~/Movies/MovieBox"
+                defaultDownloadPath: DownloadStorage.defaultRootDirectory().path
             ))
             modelContext.saveOrReport(errorCenter, context: "Default settings")
             return
@@ -45,9 +45,11 @@ public enum AppBootstrap {
         MovieBoxFileLogger.isDebugLoggingEnabled = first.debugLogging
         PlaybackLog.isEnabled = first.debugLogging
         LogStore.shared.log("AppBootstrap: Loaded AppSettings.")
-        if first.defaultDownloadPath == "~/Downloads/MovieBox" || first.defaultDownloadPath.isEmpty {
-            first.defaultDownloadPath = "~/Movies/MovieBox"
-            modelContext.saveOrReport(errorCenter, context: "Download path migration")
+        let moviesLegacy = first.defaultDownloadPath == "~/Movies/MovieBox"
+            || first.defaultDownloadPath.hasSuffix("/Movies/MovieBox")
+        if first.defaultDownloadPath.isEmpty || moviesLegacy {
+            first.defaultDownloadPath = DownloadStorage.defaultRootDirectory().path
+            modelContext.saveOrReport(errorCenter, context: "Download path migration (sandbox)")
         }
     }
 }

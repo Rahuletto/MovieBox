@@ -28,6 +28,11 @@ public enum MovieBoxTypography {
 /// Shared horizontal inset for home/catalog shelves so titles and carousels align.
 public enum MovieBoxLayout {
     public static let shelfHorizontalInset: CGFloat = 28
+    /// Wide cinematic shelf cards (home “Now In Theatres”, downloads).
+    public static let landscapeCardWidth: CGFloat = 680
+    public static let landscapeCardHeight: CGFloat = 382
+    public static let landscapeCardCornerRadius: CGFloat = 14
+    public static let landscapeLogoMaxWidth: CGFloat = 320
 }
 
 public enum GlassStrength {
@@ -136,6 +141,72 @@ public struct AmbientTopGlow: View {
             endRadius: 480
         )
         .ignoresSafeArea()
+    }
+}
+
+/// SF Symbol download control with a variable progress ring (`arrow.down.circle`).
+public struct DownloadProgressIcon: View {
+    public enum Mode: Equatable {
+        case idle
+        case queued
+        case downloading(progress: Double)
+        case paused(progress: Double)
+    }
+
+    public let mode: Mode
+    public var size: CGFloat = 22
+
+    /// Apple TV / system blue — used only while actively downloading.
+    public static let activeRingColor = Color(red: 0, green: 122 / 255, blue: 1)
+
+    public init(mode: Mode, size: CGFloat = 22) {
+        self.mode = mode
+        self.size = size
+    }
+
+    public var body: some View {
+        Group {
+            switch mode {
+            case .idle:
+                Image(systemName: "arrow.down.circle")
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(.secondary)
+            case .queued:
+                variableSymbol(value: 0.08, useActiveBlue: false)
+                    .symbolEffect(.pulse, options: .repeating)
+            case .downloading(let progress):
+                variableSymbol(value: progress, useActiveBlue: true)
+            case .paused(let progress):
+                variableSymbol(value: progress, useActiveBlue: false)
+            }
+        }
+        .font(.system(size: size, weight: .medium))
+        .frame(width: size + 4, height: size + 4)
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    @ViewBuilder
+    private func variableSymbol(value: Double, useActiveBlue: Bool) -> some View {
+        let clamped = min(1, max(0.05, value))
+        let symbol = Image(systemName: "arrow.down.circle", variableValue: clamped)
+        if useActiveBlue {
+            symbol
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(Self.activeRingColor, Color.primary.opacity(0.22))
+        } else {
+            symbol
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var accessibilityLabel: String {
+        switch mode {
+        case .idle: "Download"
+        case .queued: "Starting download"
+        case .downloading(let progress): "Downloading \(Int(progress * 100)) percent"
+        case .paused(let progress): "Paused at \(Int(progress * 100)) percent"
+        }
     }
 }
 

@@ -18,7 +18,7 @@ enum DevelopmentSettings {
         if let first = rows.first {
             settings = first
         } else {
-            settings = AppSettings(defaultDownloadPath: "~/Movies/MovieBox")
+            settings = AppSettings(defaultDownloadPath: "")
             modelContext.insert(settings)
         }
 

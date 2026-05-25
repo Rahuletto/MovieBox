@@ -22,7 +22,6 @@ struct DownloadsView: View {
     @State private var errorMessage: String?
     @State private var isStreaming = false
 
-    private var downloadManager: DownloadManager { appServices.downloadManager }
     private var playback: PlaybackSettings { PlaybackSettings.from(settings.first) }
 
     /// Apple reference stream — https://developer.apple.com/streaming/examples/
@@ -33,6 +32,40 @@ struct DownloadsView: View {
             url: "https://devstreaming-cdn.apple.com/videos/streaming/examples/adv_dv_atmos/main.m3u8"
         ),
     ]
+
+    var body: some View {
+        DownloadsViewBody(
+            downloadManager: appServices.downloadManager,
+            router: router,
+            playerState: playerState,
+            settings: settings,
+            movieRecords: movieRecords,
+            magnetInput: $magnetInput,
+            showsMagnetSheet: $showsMagnetSheet,
+            showsTorrentFileImporter: $showsTorrentFileImporter,
+            errorMessage: $errorMessage,
+            isStreaming: $isStreaming,
+            hdrTestStreams: hdrTestStreams,
+            playback: playback,
+            appServices: appServices
+        )
+    }
+}
+
+private struct DownloadsViewBody: View {
+    @ObservedObject var downloadManager: DownloadManager
+    @Bindable var router: AppRouter
+    @Bindable var playerState: PlayerState
+    let settings: [AppSettings]
+    let movieRecords: [MovieRecord]
+    @Binding var magnetInput: String
+    @Binding var showsMagnetSheet: Bool
+    @Binding var showsTorrentFileImporter: Bool
+    @Binding var errorMessage: String?
+    @Binding var isStreaming: Bool
+    let hdrTestStreams: [HDRTestStream]
+    let playback: PlaybackSettings
+    let appServices: AppServices
 
     private var activeTasks: [DownloadManager.DownloadTask] {
         downloadManager.tasks.filter { $0.state != .completed && $0.state != .failed }
@@ -169,11 +202,14 @@ struct DownloadsView: View {
                 .foregroundStyle(.primary)
                 .padding(.horizontal, MovieBoxLayout.shelfHorizontalInset)
 
-            LazyVStack(spacing: 14) {
-                content()
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 14) {
+                    content()
+                }
+                .padding(.horizontal, MovieBoxLayout.shelfHorizontalInset)
+                .scrollTargetLayout()
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, MovieBoxLayout.shelfHorizontalInset)
+            .scrollTargetBehavior(.viewAligned)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -287,7 +323,8 @@ struct DownloadsView: View {
                 title: torrent.title,
                 magnetURI: parsedLink,
                 quality: torrent.quality.rawValue,
-                hdrType: torrent.hdrType?.rawValue
+                hdrType: torrent.hdrType?.rawValue,
+                infoHash: torrent.infoHash
             )
             magnetInput = ""
             showsMagnetSheet = false

@@ -52,6 +52,31 @@ public final class AppServices {
         moviePlayerSession.allowTranscodeFallback = settings.allowTranscodeFallback
     }
 
+    /// Applies Settings → Downloads folder (sandbox bookmark + writable probe).
+    public func applyDownloadDirectory(from settings: AppSettings) {
+        let preferred = DownloadStorage.resolveRootDirectory(path: settings.defaultDownloadPath)
+        DownloadFolderAccess.activate(for: preferred)
+        do {
+            try downloadManager.configureDownloadRoot(preferred)
+            return
+        } catch {
+            NSLog(
+                "MovieBox: download folder unavailable at %@ — %@",
+                preferred.path,
+                error.localizedDescription
+            )
+        }
+
+        DownloadFolderAccess.deactivate()
+        let fallback = DownloadStorage.defaultRootDirectory()
+        DownloadFolderAccess.activate(for: fallback)
+        do {
+            try downloadManager.configureDownloadRoot(fallback)
+        } catch {
+            NSLog("MovieBox: fallback download folder failed — %@", error.localizedDescription)
+        }
+    }
+
     public func registerActiveSession(_ session: TorrentStreamSession?) {
         activeSession = session
     }
@@ -61,8 +86,13 @@ public final class AppServices {
         let candidates = torrents.filter { $0.seeders > 0 }
         let ordered = (candidates.isEmpty ? torrents : candidates).sorted { $0.seeders > $1.seeders }
         guard let torrent = ordered.first else { return }
-        let magnet = MagnetURI(from: torrent.magnetURI)
-        guard let infoHash = torrent.infoHash ?? magnet?.infoHash, !infoHash.isEmpty else { return }
-        TorrentMetadataFetcher.prewarm(infoHash: infoHash, magnetTrackers: magnet?.trackers ?? [])
+        guard let identity = DownloadIdentity.resolve(
+            magnetURI: torrent.magnetURI,
+            storedInfoHash: torrent.infoHash
+        ) else { return }
+        TorrentMetadataFetcher.prewarm(
+            infoHash: identity.infoHash,
+            magnetTrackers: identity.magnetTrackers
+        )
     }
 }
