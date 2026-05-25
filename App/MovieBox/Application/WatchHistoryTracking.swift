@@ -14,27 +14,79 @@ struct WatchHistoryTracking: ViewModifier {
     @State private var lastPersistedMovieId: Int = 0
 
     func body(content: Content) -> some View {
-        content.onAppear {
-            playerState.onPositionUpdate = { movieId, position, duration in
-                let fraction = duration > 0 ? position / duration : 0
-                updateWatchHistory(tmdbId: movieId, position: position, duration: duration, fraction: fraction)
+        content
+            .onAppear {
+                playerState.onPositionUpdate = { movieId, position, duration in
+                    let fraction = duration > 0 ? position / duration : 0
+                    updateWatchHistory(
+                        tmdbId: movieId,
+                        position: position,
+                        duration: duration,
+                        fraction: fraction,
+                        force: false
+                    )
+                }
             }
-        }
+            .onChange(of: playerState.isPresented) { _, isPresented in
+                guard !isPresented else { return }
+                flushWatchHistoryOnDismiss()
+            }
     }
 
-    private func updateWatchHistory(tmdbId: Int, position: Double, duration: Double, fraction: Double) {
+    private func flushWatchHistoryOnDismiss() {
+        let movieId = playerState.movieId
+        guard movieId > 0 else { return }
+        let duration = playerState.duration
+        guard duration > 0 else { return }
+        let position = playerState.currentTime
+        let fraction = position / duration
+        updateWatchHistory(
+            tmdbId: movieId,
+            position: position,
+            duration: duration,
+            fraction: fraction,
+            force: true
+        )
+    }
+
+    private func updateWatchHistory(
+        tmdbId: Int,
+        position: Double,
+        duration: Double,
+        fraction: Double,
+        force: Bool
+    ) {
         guard tmdbId > 0 else { return }
-        guard let record = storedMovies.first(where: { $0.tmdbId == tmdbId }) else { return }
-        guard position > PlaybackDisplayTitle.minimumContinueSeconds || fraction > 0.01 else { return }
+        guard force || position > PlaybackDisplayTitle.minimumContinueSeconds || fraction > 0.01 else { return }
+
+        let record: MovieRecord
+        if let existing = storedMovies.first(where: { $0.tmdbId == tmdbId }) {
+            record = existing
+        } else {
+            let hudTitle = playerState.seriesName.isEmpty
+                ? playerState.title
+                : playerState.seriesName
+            guard let created = WatchProgressStore.ensurePlaybackRecord(
+                tmdbId: tmdbId,
+                title: hudTitle,
+                mediaKind: .movie,
+                in: modelContext,
+                existing: storedMovies
+            ) else { return }
+            record = created
+        }
 
         let clampedFraction = min(1, max(fraction, 0))
-        let crossedMilestone =
-            (record.watchedFraction < 0.15 && clampedFraction >= 0.15) ||
-            (record.watchedFraction < 0.8 && clampedFraction >= 0.8)
+        if !force {
+            let crossedMilestone =
+                (record.watchedFraction < 0.15 && clampedFraction >= 0.15) ||
+                (record.watchedFraction < 0.8 && clampedFraction >= 0.8)
+            let now = Date()
+            let sameMovie = lastPersistedMovieId == tmdbId
+            let throttleElapsed = now.timeIntervalSince(lastPersistedAt) >= 12
+            guard crossedMilestone || !sameMovie || throttleElapsed else { return }
+        }
         let now = Date()
-        let sameMovie = lastPersistedMovieId == tmdbId
-        let throttleElapsed = now.timeIntervalSince(lastPersistedAt) >= 12
-        guard crossedMilestone || !sameMovie || throttleElapsed else { return }
 
         record.playbackPositionSeconds = position
         if duration.isFinite, duration > 0 {

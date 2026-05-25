@@ -11,7 +11,6 @@ struct HomeView: View {
     @Environment(PlayerState.self) private var playerState
     @Query private var settings: [AppSettings]
     @Query private var storedMovies: [MovieRecord]
-    @Query(sort: \DownloadRecord.createdAt, order: .reverse) private var downloads: [DownloadRecord]
     @State private var rows: [MetadataCategory: [Movie]] = [:]
     @State private var kindByID: [Int: MediaKind] = [:]
     @State private var extraSections: [HomeExtraSection] = []
@@ -80,19 +79,6 @@ struct HomeView: View {
                                             items: watchlistItems
                                         ) { item in
                                             router.showDetail(id: item.tmdbId, kind: item.kind)
-                                        }
-                                    }
-
-                                    if !downloadItems.isEmpty {
-                                        HomeQuickAccessRow(
-                                            title: "Downloads",
-                                            items: downloadItems
-                                        ) { item in
-                                            if item.tmdbId > 0 {
-                                                router.showDetail(id: item.tmdbId, kind: item.kind)
-                                            } else {
-                                                router.show(.downloads)
-                                            }
                                         }
                                     }
 
@@ -276,22 +262,6 @@ struct HomeView: View {
                     title: $0.title,
                     subtitle: $0.mediaKindEnum == .tv ? "Show" : "Movie",
                     posterURL: MetadataClient().imageURL(path: $0.posterPath)
-                )
-            }
-    }
-
-    private var downloadItems: [HomeQuickAccessItem] {
-        downloads
-            .prefix(12)
-            .map { download in
-                let matchingRecord = storedMovies.first(where: { $0.tmdbId == download.tmdbId && $0.mediaKind == download.mediaKind })
-                return HomeQuickAccessItem(
-                    id: "dl-\(download.infoHash)",
-                    tmdbId: download.tmdbId,
-                    kind: download.mediaKindEnum,
-                    title: download.title,
-                    subtitle: "Download",
-                    posterURL: MetadataClient().imageURL(path: matchingRecord?.posterPath)
                 )
             }
     }
