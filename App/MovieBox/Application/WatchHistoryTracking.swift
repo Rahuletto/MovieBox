@@ -1,3 +1,4 @@
+import CoreMetadata
 import CorePlayer
 import CoreStorage
 import MovieBoxCore
@@ -41,6 +42,13 @@ struct WatchHistoryTracking: ViewModifier {
         }
         record.watchedFraction = clampedFraction
         record.lastWatchedAt = now
+        if record.mediaKindEnum == .tv,
+           let index = playerState.currentEpisodeIndex,
+           playerState.episodes.indices.contains(index) {
+            let episode = playerState.episodes[index]
+            record.lastWatchedSeason = episode.seasonNumber
+            record.lastWatchedEpisode = episode.episodeNumber
+        }
         try? modelContext.save()
         lastPersistedAt = now
         lastPersistedMovieId = tmdbId

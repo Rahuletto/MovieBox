@@ -65,8 +65,8 @@ enum WatchProgressStore {
         return min(1, max(0, record.watchedFraction))
     }
 
-    /// e.g. `17m left`, `1hr left`, `1hr 27m left`
-    static func timeRemainingLabel(for record: MovieRecord) -> String? {
+    /// Remaining runtime for overlays, e.g. `47m`, `1h 27m`.
+    static func remainingTimeLabel(for record: MovieRecord) -> String? {
         let duration = effectiveDuration(for: record)
         guard duration > record.playbackPositionSeconds else { return nil }
         let remaining = Int(ceil(duration - record.playbackPositionSeconds))
@@ -77,13 +77,30 @@ enum WatchProgressStore {
 
         if hours > 0 {
             if minutes > 0 {
-                return "\(hours)hr \(minutes)m left"
+                return "\(hours)h \(minutes)m"
             }
-            return "\(hours)hr left"
+            return "\(hours)h"
         }
         if minutes > 0 {
-            return "\(minutes)m left"
+            return "\(minutes)m"
         }
-        return "<1m left"
+        return "<1m"
+    }
+
+    /// Apple TV–style chip: `S1, E1 • 47m` for series, `31m` for movies.
+    static func continueWatchingOverlayLabel(for record: MovieRecord) -> String? {
+        guard let time = remainingTimeLabel(for: record) else { return nil }
+        if record.mediaKindEnum == .tv,
+           record.lastWatchedSeason > 0,
+           record.lastWatchedEpisode > 0 {
+            return "S\(record.lastWatchedSeason), E\(record.lastWatchedEpisode) • \(time)"
+        }
+        return time
+    }
+
+    /// Legacy subtitle under poster rows.
+    static func timeRemainingLabel(for record: MovieRecord) -> String? {
+        guard let label = remainingTimeLabel(for: record) else { return nil }
+        return "\(label) left"
     }
 }

@@ -1,4 +1,3 @@
-import CoreMLEngine
 import CoreMetadata
 import CorePlayer
 import CoreStorage
@@ -11,13 +10,11 @@ struct HomeView: View {
     @Environment(AppRouter.self) private var router
     @Environment(PlayerState.self) private var playerState
     @Query private var settings: [AppSettings]
-    @Query private var ratings: [RatingRecord]
     @Query private var storedMovies: [MovieRecord]
     @Query(sort: \DownloadRecord.createdAt, order: .reverse) private var downloads: [DownloadRecord]
     @State private var rows: [MetadataCategory: [Movie]] = [:]
     @State private var kindByID: [Int: MediaKind] = [:]
     @State private var extraSections: [HomeExtraSection] = []
-    @State private var recommended: [Movie] = []
     @State private var continueWatching: [MovieRecord] = []
     @State private var errorMessage: String?
     @State private var scrollOffset: CGFloat = 0
@@ -98,46 +95,60 @@ struct HomeView: View {
                                             }
                                         }
                                     }
+
                                 }
 
-                                if !recommended.isEmpty {
-                                    HorizontalMovieRow(title: "Recommended For You", items: recommended) { movie in
-                                        MoviePosterCard(
-                                            title: movie.title,
-                                            posterURL: posterURL(for: movie)
-                                        ) {
-                                            router.showDetail(id: movie.id, kind: kindByID[movie.id] ?? .movie)
-                                        }
-                                    }
-                                }
+                                if isHomeCatalogVisible {
+                                    homePosterShelf(
+                                        title: MetadataCategory.trending.rawValue,
+                                        movies: rows[.trending],
+                                        shelfKey: "trending"
+                                    )
 
-                                ForEach(MetadataCategory.allCases) { category in
-                                    if let movies = rows[category], !movies.isEmpty {
-                                        HorizontalMovieRow(title: category.rawValue, items: movies) { movie in
-                                            MoviePosterCard(
-                                                title: movie.title,
-                                                posterURL: posterURL(for: movie)
-                                            ) {
-                                                router.showDetail(id: movie.id, kind: kindByID[movie.id] ?? .movie)
-                                            }
-                                        }
-                                    }
-                                }
+                                    homePosterShelf(
+                                        title: MetadataCategory.popular.rawValue,
+                                        movies: rows[.popular],
+                                        shelfKey: "popular"
+                                    )
 
-                                ForEach(extraSections, id: \.id) { section in
-                                    if !section.items.isEmpty {
-                                        HorizontalMovieRow(title: section.title, items: section.items) { movie in
-                                            MoviePosterCard(
-                                                title: movie.title,
-                                                posterURL: posterURL(for: movie)
-                                            ) {
-                                                router.showDetail(
-                                                    id: movie.id,
-                                                    kind: section.kindByID[movie.id] ?? .movie
-                                                )
-                                            }
+                                    if let nowPlaying = rows[.nowPlaying], nowPlaying.count >= 2 {
+                                        FeaturedLandscapeRow(
+                                            title: MetadataCategory.nowPlaying.rawValue,
+                                            movies: Array(nowPlaying.prefix(10)),
+                                            kindForMovie: { kindByID[$0.id] ?? .movie }
+                                        ) { movie in
+                                            router.showDetail(
+                                                id: movie.id,
+                                                kind: kindByID[movie.id] ?? .movie
+                                            )
                                         }
                                     }
+
+                                    if let topRated = rows[.topRated], topRated.count >= 3 {
+                                        FeaturedSpotlightRow(
+                                            title: "Must See",
+                                            movies: Array(topRated.prefix(10)),
+                                            kindForMovie: { kindByID[$0.id] ?? .movie }
+                                        ) { movie in
+                                            router.showDetail(
+                                                id: movie.id,
+                                                kind: kindByID[movie.id] ?? .movie
+                                            )
+                                        }
+                                    }
+
+                                    homeExtraPosterShelf(id: "critically-acclaimed")
+
+                                    homePosterShelf(
+                                        title: MetadataCategory.topRated.rawValue,
+                                        movies: rows[.topRated],
+                                        shelfKey: "top-rated"
+                                    )
+
+                                    homeExtraPosterShelf(id: "binge-worthy-shows")
+                                    homeExtraPosterShelf(id: "oscar-winners")
+
+                                    ExploreGenresSection()
                                 }
                             }
                         }
@@ -190,10 +201,6 @@ struct HomeView: View {
             guard let mode = metadataMode else { return }
             await load(mode: mode)
         }
-        .task(id: personalizationKey) {
-            guard allowsMetadataFetch else { return }
-            await refreshRecommendations()
-        }
     }
 
     private var allowsMetadataFetch: Bool {
@@ -215,24 +222,6 @@ struct HomeView: View {
     private var settingsKey: String {
         guard let setting = settings.first else { return "missing" }
         return "\(setting.useLocalBackend)|\(setting.resolvedProxyBaseURL)|\(setting.tmdbBearerToken)|\(setting.posterSize)|\(setting.backdropSize)|\(setting.requestTimeout)"
-    }
-
-    private var personalizationKey: String {
-        let ratingPart = ratings
-            .sorted { $0.tmdbId < $1.tmdbId }
-            .map { "\($0.tmdbId):\($0.rating):\($0.ratedAt.timeIntervalSince1970)" }
-            .joined(separator: "|")
-        let watchlistPart = storedMovies
-            .filter { $0.watchlistAddedAt != nil }
-            .sorted { $0.tmdbId < $1.tmdbId }
-            .map { String($0.tmdbId) }
-            .joined(separator: ",")
-        let completedPart = storedMovies
-            .filter { $0.watchedFraction >= 0.8 }
-            .sorted { $0.tmdbId < $1.tmdbId }
-            .map { String($0.tmdbId) }
-            .joined(separator: ",")
-        return "\(ratingPart)#wl:\(watchlistPart)#done:\(completedPart)"
     }
 
     private func load(mode: MetadataEndpointMode) async {
@@ -260,9 +249,6 @@ struct HomeView: View {
                         .sorted { ($0.lastWatchedAt ?? .distantPast) > ($1.lastWatchedAt ?? .distantPast) }
                         .prefix(8)
                         .map { $0 }
-                    await refreshRecommendations()
-                } else {
-                    await refreshRecommendations()
                 }
             }
         } catch {
@@ -275,75 +261,6 @@ struct HomeView: View {
                 backendURL: settings.first?.resolvedProxyBaseURL
             )
         }
-    }
-
-    private func refreshRecommendations() async {
-        let trending = rows[.trending] ?? []
-        let popular = rows[.popular] ?? []
-        let topRated = rows[.topRated] ?? []
-
-        var uniqueMoviesMap: [Int: Movie] = [:]
-        for movie in (trending + popular + topRated) {
-            uniqueMoviesMap[movie.id] = movie
-        }
-        let allMovies = Array(uniqueMoviesMap.values)
-        guard !allMovies.isEmpty else {
-            recommended = []
-            return
-        }
-
-        let ratingSignals = ratings.map { rating in
-            RatingSignal(
-                tmdbId: rating.tmdbId,
-                rating: rating.rating,
-                genreIds: rating.genres,
-                date: rating.ratedAt,
-                source: .explicitRating
-            )
-        }
-
-        let watchSignals = storedMovies.filter { $0.lastWatchedAt != nil }.map { movie in
-            let ratingValue: Float
-            if movie.watchedFraction >= 0.8 {
-                ratingValue = 1.0
-            } else if movie.watchedFraction >= 0.15 {
-                ratingValue = 0.5
-            } else if movie.playbackPositionSeconds >= 30 {
-                ratingValue = -0.5
-            } else {
-                ratingValue = 0.0
-            }
-            return RatingSignal(
-                tmdbId: movie.tmdbId,
-                rating: ratingValue,
-                genreIds: movie.genres,
-                date: movie.lastWatchedAt ?? Date(),
-                source: .watchHistory
-            )
-        }
-
-        let watchlistSignals = storedMovies.filter { $0.watchlistAddedAt != nil }.map { movie in
-            RatingSignal(
-                tmdbId: movie.tmdbId,
-                rating: 1.0,
-                genreIds: movie.genres,
-                date: movie.watchlistAddedAt ?? Date(),
-                source: .watchlist
-            )
-        }
-
-        let allSignals = ratingSignals + watchSignals + watchlistSignals
-        guard !allSignals.isEmpty else {
-            recommended = []
-            return
-        }
-
-        let engine = GenreAffinityEngine()
-        let candidates = allMovies.map {
-            RecommendationCandidate(id: $0.id, genreIds: $0.genreIds, baseScore: Float($0.voteAverage / 10))
-        }
-        let ranked = await engine.rank(candidates: candidates, ratings: allSignals)
-        recommended = ranked.compactMap { uniqueMoviesMap[$0.id] }.prefix(12).map { $0 }
     }
 
     private var watchlistItems: [HomeQuickAccessItem] {
@@ -382,6 +299,52 @@ struct HomeView: View {
     private func posterURL(for movie: Movie) -> URL? {
         MetadataClient().posterDisplayURL(posterPath: movie.posterPath, backdropPath: movie.backdropPath)
     }
+
+    private func extraSection(id: String) -> HomeExtraSection? {
+        extraSections.first { $0.id == id }
+    }
+
+    @ViewBuilder
+    private func homePosterShelf(title: String, movies: [Movie]?, shelfKey: String) -> some View {
+        if let movies, !movies.isEmpty {
+            HorizontalMovieRow(
+                title: title,
+                items: movies,
+                itemIdentity: { "home-\(shelfKey)-\($0.id)" }
+            ) { movie in
+                MoviePosterCard(
+                    title: movie.title,
+                    posterURL: posterURL(for: movie)
+                ) {
+                    router.showDetail(
+                        id: movie.id,
+                        kind: kindByID[movie.id] ?? .movie
+                    )
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func homeExtraPosterShelf(id: String) -> some View {
+        if let section = extraSection(id: id), !section.items.isEmpty {
+            HorizontalMovieRow(
+                title: section.title,
+                items: section.items,
+                itemIdentity: { "home-\(id)-\($0.id)" }
+            ) { movie in
+                MoviePosterCard(
+                    title: movie.title,
+                    posterURL: posterURL(for: movie)
+                ) {
+                    router.showDetail(
+                        id: movie.id,
+                        kind: section.kindByID[movie.id] ?? .movie
+                    )
+                }
+            }
+        }
+    }
 }
 
 private struct HomeCatalogLoadingView: View {
@@ -391,14 +354,14 @@ private struct HomeCatalogLoadingView: View {
                 .fill(Color.primary.opacity(0.06))
                 .frame(maxWidth: .infinity)
                 .frame(height: 420)
-                .padding(.horizontal, 20)
+                .padding(.horizontal, MovieBoxLayout.shelfHorizontalInset)
                 .redacted(reason: .placeholder)
 
             VStack(alignment: .leading, spacing: 14) {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill(Color.primary.opacity(0.08))
                     .frame(width: 140, height: 18)
-                    .padding(.horizontal, 20)
+                    .padding(.horizontal, MovieBoxLayout.shelfHorizontalInset)
 
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 16) {
@@ -408,7 +371,7 @@ private struct HomeCatalogLoadingView: View {
                                 .frame(width: MoviePosterCard.posterWidth, height: MoviePosterCard.posterHeight)
                         }
                     }
-                    .padding(.horizontal, 20)
+                    .padding(.horizontal, MovieBoxLayout.shelfHorizontalInset)
                 }
             }
             .redacted(reason: .placeholder)
@@ -463,34 +426,20 @@ private struct ContinueWatchingRow: View {
             Text("Continue Watching")
                 .font(MovieBoxTypography.title)
                 .foregroundStyle(.primary)
-                .padding(.horizontal, 20)
+                .padding(.horizontal, MovieBoxLayout.shelfHorizontalInset)
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 16) {
                     ForEach(records, id: \.tmdbId) { record in
-                        Button {
+                        ContinueWatchingCard(
+                            record: record,
+                            backdropURL: backdropURL(for: record)
+                        ) {
                             action(record)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 8) {
-                                continueWatchingBanner(for: record)
-
-                                Text(record.title)
-                                    .font(.body.weight(.semibold))
-                                    .lineLimit(1)
-                                    .frame(width: 360, alignment: .leading)
-
-                                if let remaining = WatchProgressStore.timeRemainingLabel(for: record) {
-                                    Text(remaining)
-                                        .font(.subheadline.weight(.medium))
-                                        .foregroundStyle(.secondary)
-                                        .frame(width: 360, alignment: .leading)
-                                }
-                            }
                         }
-                        .buttonStyle(.plain)
                     }
                 }
-                .padding(.horizontal, 20)
+                .padding(.horizontal, MovieBoxLayout.shelfHorizontalInset)
             }
         }
         .task {
@@ -498,46 +447,10 @@ private struct ContinueWatchingRow: View {
         }
     }
 
-    @ViewBuilder
-    private func continueWatchingBanner(for record: MovieRecord) -> some View {
-        let progress = WatchProgressStore.progressFraction(for: record)
+    private func backdropURL(for record: MovieRecord) -> URL? {
         let movie = movieDetails[record.tmdbId]
         let bannerPath = movie?.backdropPath ?? movie?.posterPath ?? record.posterPath
-        let imageURL = bannerPath.flatMap { MetadataClient().imageURL(path: $0, width: 780) }
-
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(Color(nsColor: .controlBackgroundColor))
-            .frame(width: 360, height: 200)
-            .overlay {
-                if let imageURL {
-                    CachedImageView(url: imageURL) {
-                        ProgressView()
-                    } content: { image in
-                        image.resizable().scaledToFill()
-                    }
-                    .id(imageURL)
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                } else {
-                    Image(systemName: "film.stack")
-                        .font(.system(size: 32))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .overlay(alignment: .bottom) {
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Capsule()
-                            .fill(.white.opacity(0.35))
-                        Capsule()
-                            .fill(.white)
-                            .frame(width: max(4, geo.size.width * progress))
-                    }
-                }
-                .frame(height: 4)
-                .padding(.horizontal, 12)
-                .padding(.bottom, 12)
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        return bannerPath.flatMap { MetadataClient().imageURL(path: $0, width: 780) }
     }
 
     private func prefetchMovieDetails() async {

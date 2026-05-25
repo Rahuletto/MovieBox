@@ -16,6 +16,14 @@ final class AppRouter {
         case personDetail(Int)
     }
 
+    struct NavigationSnapshot: Equatable {
+        var selectedRoute: Route
+        var detailKind: MediaKind
+        var activeTab: Route
+        var personReturnRoute: Route?
+        var detailReturnRoute: Route?
+    }
+
     /// Route to restore when leaving person detail (usually `.movieDetail`).
     var personReturnRoute: Route?
     /// Route to restore when leaving title detail opened from person (usually `.personDetail`).
@@ -34,6 +42,17 @@ final class AppRouter {
     var selectedGenre: GenreCard? = nil
     /// Magnet URI or raw info-hash pasted/opened from outside the app; consumed by Downloads.
     var pendingMagnetImport: String?
+
+    private var history: [NavigationSnapshot] = []
+    private var historyIndex = 0
+
+    init() {
+        let initial = makeSnapshot()
+        history = [initial]
+        historyIndex = 0
+    }
+
+    var canNavigateBack: Bool { historyIndex > 0 }
 
     func importMagnet(_ value: String) {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -61,6 +80,7 @@ final class AppRouter {
                 selectedGenre = nil
             }
             selectedRoute = route
+            recordNavigation()
         }
     }
 
@@ -73,6 +93,7 @@ final class AppRouter {
             }
             detailKind = kind
             selectedRoute = .movieDetail(id)
+            recordNavigation()
         }
     }
 
@@ -80,29 +101,24 @@ final class AppRouter {
         withAnimation(MovieBoxMotion.navigation) {
             personReturnRoute = returningTo
             selectedRoute = .personDetail(id)
+            recordNavigation()
+        }
+    }
+
+    func navigateBack() {
+        guard canNavigateBack else { return }
+        withAnimation(MovieBoxMotion.navigation) {
+            historyIndex -= 1
+            apply(history[historyIndex])
         }
     }
 
     func backFromDetail() {
-        withAnimation(MovieBoxMotion.navigation) {
-            if let returnRoute = detailReturnRoute {
-                selectedRoute = returnRoute
-                detailReturnRoute = nil
-            } else {
-                selectedRoute = activeTab
-            }
-        }
+        navigateBack()
     }
 
     func backFromPerson() {
-        withAnimation(MovieBoxMotion.navigation) {
-            if let returnRoute = personReturnRoute {
-                selectedRoute = returnRoute
-                personReturnRoute = nil
-            } else {
-                selectedRoute = activeTab
-            }
-        }
+        navigateBack()
     }
 
     var isShowingDetail: Bool {
@@ -110,6 +126,37 @@ final class AppRouter {
         case .movieDetail, .personDetail: true
         default: false
         }
+    }
+
+    // MARK: - History
+
+    private func makeSnapshot() -> NavigationSnapshot {
+        NavigationSnapshot(
+            selectedRoute: selectedRoute,
+            detailKind: detailKind,
+            activeTab: activeTab,
+            personReturnRoute: personReturnRoute,
+            detailReturnRoute: detailReturnRoute
+        )
+    }
+
+    private func apply(_ snapshot: NavigationSnapshot) {
+        detailKind = snapshot.detailKind
+        personReturnRoute = snapshot.personReturnRoute
+        detailReturnRoute = snapshot.detailReturnRoute
+        activeTab = snapshot.activeTab
+        selectedRoute = snapshot.selectedRoute
+    }
+
+    private func recordNavigation() {
+        let snap = makeSnapshot()
+        if historyIndex < history.count - 1 {
+            history.removeSubrange((historyIndex + 1)...)
+        }
+        if history.last != snap {
+            history.append(snap)
+        }
+        historyIndex = history.count - 1
     }
 }
 

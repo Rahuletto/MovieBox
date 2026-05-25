@@ -1,4 +1,6 @@
 import AppKit
+import CoreMLEngine
+import CoreMetadata
 import CorePlayer
 import CoreStorage
 import CoreTorrent
@@ -29,6 +31,9 @@ struct SettingsView: View {
             }
             Tab("Playback", systemImage: "play.rectangle") {
                 PlaybackSettingsSection(draft: $draft)
+            }
+            Tab("Recommendations", systemImage: "brain.head.profile") {
+                RecommendationSettingsSection()
             }
             Tab("Advanced", systemImage: "wrench.and.screwdriver") {
                 AdvancedSettingsSection(draft: $draft)
@@ -72,6 +77,83 @@ struct SettingsView: View {
         } catch {
             NSLog("MovieBox Settings: failed to save — \(error.localizedDescription)")
         }
+    }
+}
+
+// MARK: - Recommendations
+
+private struct RecommendationSettingsSection: View {
+    @Query private var ratings: [RatingRecord]
+    @Query private var storedMovies: [MovieRecord]
+    @StateObject private var trainer = RecommendationTrainer()
+
+    var body: some View {
+        Form {
+            Section("Model State") {
+                LabeledContent("Explicit ratings", value: "\(ratings.count)")
+                LabeledContent("Watch history items", value: "\(storedMovies.filter { $0.lastWatchedAt != nil }.count)")
+                LabeledContent("Watchlist items", value: "\(storedMovies.filter { $0.watchlistAddedAt != nil }.count)")
+            }
+
+            Section("Training") {
+                Button {
+                    Task {
+                        let candidates = await MovieRegistry.shared.allMovies()
+                        await trainer.train(
+                            ratings: ratings,
+                            storedMovies: storedMovies,
+                            candidates: candidates
+                        )
+                    }
+                } label: {
+                    if trainer.isTraining {
+                        Label("Training…", systemImage: "hourglass")
+                    } else {
+                        Label("Train Recommendations", systemImage: "brain")
+                    }
+                }
+                .disabled(trainer.isTraining)
+
+                if let error = trainer.error {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+
+            if let metrics = trainer.metrics {
+                Section("Latest Metrics") {
+                    LabeledContent("Total signals", value: "\(metrics.totalRatings)")
+                    LabeledContent("Average explicit rating", value: String(format: "%.2f", metrics.avgRating))
+                    LabeledContent("Model version", value: metrics.modelVersion)
+                    LabeledContent("Trained at", value: metrics.trainedAt.formatted(date: .abbreviated, time: .shortened))
+                }
+
+                Section("Top Genre Affinities") {
+                    ForEach(topAffinities(from: metrics.affinityVector), id: \.genreID) { row in
+                        HStack {
+                            Text("Genre \(row.genreID)")
+                            Spacer()
+                            Text(String(format: "%.3f", row.score))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear {
+            trainer.loadCachedMetrics()
+        }
+    }
+
+    private func topAffinities(from vector: [Int: Float]) -> [(genreID: Int, score: Float)] {
+        vector
+            .map { (genreID: $0.key, score: $0.value) }
+            .sorted { $0.score > $1.score }
+            .prefix(8)
+            .map { $0 }
     }
 }
 
