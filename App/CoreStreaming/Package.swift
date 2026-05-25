@@ -10,10 +10,21 @@ let package = Package(
     dependencies: [
         .package(path: "../CoreTorrent"),
         .package(path: "../CoreStorage"),
+        .package(path: "../MoviePlayer"),
     ],
     targets: [
-        .target(name: "CoreStreaming", dependencies: ["CoreTorrent", "CoreStorage"]),
-        .testTarget(name: "CoreStreamingTests", dependencies: ["CoreStreaming", "CoreStorage", "CoreTorrent"])
+        .target(
+            name: "CoreStreaming",
+            dependencies: [
+                "CoreTorrent",
+                "CoreStorage",
+                .product(name: "MoviePlayerEngine", package: "MoviePlayer"),
+            ]
+        ),
+        .testTarget(
+            name: "CoreStreamingTests",
+            dependencies: ["CoreStreaming", "CoreStorage", "CoreTorrent"]
+        ),
     ],
     swiftLanguageModes: [.v6]
 )

@@ -28,7 +28,7 @@ public final class HLSCacheServer {
                     self?.isRunning = true
                 case .failed(let error):
                     self?.isRunning = false
-                    TorrentLog.warn("[HLSCacheServer] Listener failed: \(error)")
+                    MoviePlayerLog.warn("[HLSCacheServer] Listener failed: \(error)")
                 case .cancelled:
                     self?.isRunning = false
                 default:
@@ -58,7 +58,7 @@ public final class HLSCacheServer {
             throw HLSCacheServerError.failedToStart
         }
         playlistURL = url
-        TorrentLog.info("[HLSCacheServer] listening port=\(port) dir=\(rootDirectory.path)")
+        MoviePlayerLog.info("[HLSCacheServer] listening port=\(port) dir=\(rootDirectory.path)")
         return url
     }
 

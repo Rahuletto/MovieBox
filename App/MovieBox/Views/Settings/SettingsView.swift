@@ -10,6 +10,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(AppServices.self) private var appServices
     @Query private var settingsRows: [AppSettings]
     @State private var draft = SettingsDraft()
     @State private var isHydratingDraft = false
@@ -63,10 +64,12 @@ struct SettingsView: View {
     private func save() {
         if let existing = settingsRows.first {
             draft.apply(to: existing)
+            appServices.syncPlaybackPolicy(from: existing)
         } else {
             let newSettings = AppSettings()
             draft.apply(to: newSettings)
             modelContext.insert(newSettings)
+            appServices.syncPlaybackPolicy(from: newSettings)
         }
         if let first = settingsRows.first {
             MovieBoxFileLogger.isDebugLoggingEnabled = first.debugLogging
@@ -426,6 +429,10 @@ private struct PlaybackSettingsSection: View {
                     Text("720p").tag("720p")
                 }
                 Toggle("Prefer HDR when available", isOn: $draft.preferHDR)
+                Toggle("Strict HDR metadata validation", isOn: $draft.strictHDRValidation)
+                Text("When off, playback continues if remux drops HDR mastering data; you may see a warning instead of an error. HDR badges only appear when metadata is verified.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Audio") {
@@ -523,6 +530,7 @@ private struct SettingsDraft: Equatable {
     var deleteTorrentAfterDownload = false
     var autoRemoveCompleted = false
     var preferHDR = true
+    var strictHDRValidation = false
     var subtitlesEnabled = true
     var subtitleStyle = "cinematic"
     var subtitleFontSize = 20.0
@@ -564,6 +572,7 @@ private struct SettingsDraft: Equatable {
         deleteTorrentAfterDownload = settings.deleteTorrentAfterDownload
         autoRemoveCompleted = settings.autoRemoveCompleted
         preferHDR = settings.preferHDR
+        strictHDRValidation = settings.strictHDRValidation
         subtitlesEnabled = settings.subtitlesEnabled
         subtitleStyle = settings.subtitleStyle
         subtitleFontSize = settings.subtitleFontSize
@@ -605,6 +614,7 @@ private struct SettingsDraft: Equatable {
         settings.deleteTorrentAfterDownload = deleteTorrentAfterDownload
         settings.autoRemoveCompleted = autoRemoveCompleted
         settings.preferHDR = preferHDR
+        settings.strictHDRValidation = strictHDRValidation
         settings.subtitlesEnabled = subtitlesEnabled
         settings.subtitleStyle = subtitleStyle
         settings.subtitleFontSize = subtitleFontSize

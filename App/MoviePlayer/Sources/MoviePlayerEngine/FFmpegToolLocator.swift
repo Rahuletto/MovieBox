@@ -1,7 +1,7 @@
 import Foundation
 
-enum FFmpegToolLocator {
-    static func url(for name: String) -> URL? {
+public enum FFmpegToolLocator {
+    public static func url(for name: String) -> URL? {
         if let auxiliary = Bundle.main.url(forAuxiliaryExecutable: name),
            FileManager.default.isExecutableFile(atPath: auxiliary.path) {
             return auxiliary
@@ -18,7 +18,7 @@ enum FFmpegToolLocator {
         return nil
     }
 
-    static var isAvailable: Bool {
+    public static var isAvailable: Bool {
         url(for: "ffmpeg") != nil && url(for: "ffprobe") != nil
     }
 }

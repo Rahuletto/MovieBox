@@ -63,6 +63,8 @@ public final class PlayerState {
     public var isBuffering: Bool = false
     /// Shown under the buffering spinner while the torrent stream is preparing.
     public var bufferingDetail: String?
+    /// Non-blocking HDR/Atmos validation notice (permissive remux mode).
+    public var playbackQualityWarning: String?
     public var currentTime: Double = 0
     public var duration: Double = 0
     public var bufferedTimeRanges: [ClosedRange<Double>] = []
@@ -260,6 +262,11 @@ public final class PlayerState {
         if text != nil {
             isBuffering = true
         }
+    }
+
+    public func updatePlaybackQualityWarning(_ text: String?) {
+        let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        playbackQualityWarning = trimmed.isEmpty ? nil : trimmed
     }
 
     public func load(
@@ -2189,7 +2196,19 @@ public struct PlayerView<
         .compositingGroup()
         .overlay(alignment: .top) {
             if !state.isPlaybackChromeHidden {
-                PlayerHUDStatusPillOverlay(pill: state.hudStatusPill)
+                VStack(spacing: 8) {
+                    PlayerHUDStatusPillOverlay(pill: state.hudStatusPill)
+                    if let warning = state.playbackQualityWarning {
+                        Text(warning)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color.orange.opacity(0.85), in: Capsule(style: .continuous))
+                            .shadow(color: .black.opacity(0.5), radius: 6, y: 2)
+                    }
+                }
+                .padding(.top, 12)
             }
         }
     }

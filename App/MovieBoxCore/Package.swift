@@ -13,6 +13,7 @@ let package = Package(
         .package(path: "../CorePlayer"),
         .package(path: "../CoreStorage"),
         .package(path: "../CoreStreaming"),
+        .package(path: "../MoviePlayer"),
     ],
     targets: [
         .target(
@@ -23,6 +24,7 @@ let package = Package(
                 "CorePlayer",
                 "CoreStorage",
                 "CoreStreaming",
+                .product(name: "MoviePlayerKit", package: "MoviePlayer"),
             ]
         ),
     ],
