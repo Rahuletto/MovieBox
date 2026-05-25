@@ -43,7 +43,19 @@ public final class DownloadPersistenceService: DownloadPersistenceDelegate {
             guard state != .failed else { continue }
 
             let storageDir = URL(fileURLWithPath: record.storageDirectory ?? defaultStoragePath(for: record), isDirectory: true)
-            guard !downloadManager.tasks.contains(where: { $0.infoHash == record.infoHash }) else { continue }
+            let normalizedHash = record.infoHash.lowercased()
+            guard !downloadManager.tasks.contains(where: {
+                ($0.infoHash ?? "").lowercased() == normalizedHash
+            }) else { continue }
+
+            var bitmap = record.pieceBitmap
+            if bitmap.isEmpty {
+                bitmap = DownloadBitmapPersistence.loadBitmap(
+                    infoHash: record.infoHash,
+                    in: storageDir
+                ) ?? Data()
+            }
+
             downloadManager.restoreTask(
                 id: stableTaskID(infoHash: record.infoHash),
                 tmdbId: record.tmdbId,
@@ -59,7 +71,7 @@ public final class DownloadPersistenceService: DownloadPersistenceDelegate {
                 downloadedBytes: record.downloadedBytes,
                 localFilePath: record.localFilePath,
                 storageDirectory: storageDir,
-                pieceBitmap: record.pieceBitmap
+                pieceBitmap: bitmap.isEmpty ? nil : bitmap
             )
         }
     }
@@ -119,8 +131,8 @@ public final class DownloadPersistenceService: DownloadPersistenceDelegate {
 
     private func defaultStoragePath(for record: DownloadRecord) -> String {
         let safeTitle = record.title.replacingOccurrences(of: "/", with: "_")
-        return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Movies/MovieBox/\(safeTitle)")
+        return DownloadStorage.defaultRootDirectory()
+            .appendingPathComponent(safeTitle, isDirectory: true)
             .path
     }
 

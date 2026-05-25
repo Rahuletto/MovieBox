@@ -37,20 +37,24 @@ public final class StreamingOrchestrator: @unchecked Sendable {
     ) async throws -> URL {
         peerId = BitTorrentPeerID.make()
 
-        let magnet = MagnetURI(from: torrent.magnetURI)
-        let infoHash = torrent.infoHash ?? magnet?.infoHash
-        guard let infoHash, !infoHash.isEmpty else {
+        guard let identity = DownloadIdentity.resolve(
+            magnetURI: torrent.magnetURI,
+            storedInfoHash: torrent.infoHash
+        ) else {
             TorrentLog.warn("[Streaming] invalid magnet — no info hash for \"\(torrent.title)\"")
             throw StreamingOrchestratorError.invalidMagnetURI
         }
+        let infoHash = identity.infoHash
 
-        TorrentLog.info("[Streaming] fetching metadata — hash=\(infoHash.prefix(8))… trackers=\(magnet?.trackers.count ?? 0)")
+        TorrentLog.info(
+            "[Streaming] fetching metadata — hash=\(infoHash.prefix(8))… trackers=\(identity.magnetTrackers.count)"
+        )
 
         do {
             metadata = try await Task.detached(priority: .userInitiated) {
                 try await TorrentMetadataFetcher.fetch(
                     infoHash: infoHash,
-                    magnetTrackers: magnet?.trackers ?? []
+                    magnetTrackers: identity.magnetTrackers
                 )
             }.value
         } catch {

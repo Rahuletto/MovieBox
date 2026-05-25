@@ -9,8 +9,8 @@ struct FeaturedLandscapeRow: View {
     let kindForMovie: (Movie) -> MediaKind
     let onSelect: (Movie) -> Void
 
-    private let cardWidth: CGFloat = 680
-    private let cardHeight: CGFloat = 382
+    private let cardWidth: CGFloat = MovieBoxLayout.landscapeCardWidth
+    private let cardHeight: CGFloat = MovieBoxLayout.landscapeCardHeight
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {

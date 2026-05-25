@@ -172,7 +172,7 @@ public final class AppSettings {
         appToken: String = "",
         tmdbBearerToken: String = "",
         omdbAPIKey: String = "",
-        defaultDownloadPath: String = "~/Movies/MovieBox",
+        defaultDownloadPath: String = "",
         preferredQuality: String = "best",
         preferredAudioLang: String = "en",
         preferredSubtitleLang: String = "en",

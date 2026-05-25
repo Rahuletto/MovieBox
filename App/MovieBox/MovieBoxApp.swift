@@ -9,6 +9,7 @@ import UniformTypeIdentifiers
 
 @main
 struct MovieBoxApp: App {
+    @NSApplicationDelegateAdaptor(AppLifecycleDelegate.self) private var appDelegate
     private let sharedModelContainer: ModelContainer
 
     @State private var router = AppRouter()
@@ -27,6 +28,10 @@ struct MovieBoxApp: App {
         }
     }
 
+    private func wireAppDelegate() {
+        appDelegate.appServices = appServices
+    }
+
     var body: some Scene {
         WindowGroup {
             RootView()
@@ -35,6 +40,7 @@ struct MovieBoxApp: App {
                 .environment(appServices)
                 .environment(errorCenter)
                 .modelContainer(sharedModelContainer)
+                .onAppear { wireAppDelegate() }
                 .onChange(of: playerState.isPresented) { _, presented in
                     if !presented, playerState.isStreamingTorrent {
                         Task { await appServices.cancelActiveStream() }
@@ -74,6 +80,7 @@ struct MovieBoxApp: App {
         Settings {
             SettingsView()
                 .modelContainer(sharedModelContainer)
+                .environment(appServices)
         }
     }
 

@@ -60,6 +60,25 @@ public struct MagnetURI: Sendable, Hashable {
         self.trackers = trackers
     }
 
+    /// Normalizes a 40-character hex info hash or 32-character base32 hash from APIs/indexers.
+    public static func normalizeInfoHash(_ raw: String) -> String? {
+        var trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmed.isEmpty else { return nil }
+
+        if trimmed.hasPrefix("urn:btih:") {
+            trimmed = String(trimmed.dropFirst(9))
+        }
+
+        if trimmed.count == 40,
+           trimmed.range(of: "^[a-f0-9]+$", options: .regularExpression) != nil {
+            return trimmed
+        }
+        if trimmed.count == 32, let decoded = decodeBase32(trimmed) {
+            return decoded
+        }
+        return nil
+    }
+
     private static func decodeBase32(_ input: String) -> String? {
         let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
         var bits = ""

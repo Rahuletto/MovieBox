@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import CoreMetadata
 import CorePlayer
 import CoreStorage
@@ -36,10 +37,10 @@ struct TorrentSection: View {
     @State private var sortMode: TorrentSortMode = .seeders
     @State private var streamBusyTorrentID: UUID?
     @State private var rowBufferingByID: [UUID: TorrentRowBufferingSnapshot] = [:]
-    @State private var downloadBusyTorrentID: UUID?
     @State private var cardErrors: [UUID: String] = [:]
     @State private var errorDismissTasks: [UUID: Task<Void, Never>] = [:]
     @State private var downloadWatchTask: Task<Void, Never>?
+    @State private var downloadTaskByTorrentID: [UUID: UUID] = [:]
     @State private var visibleCardModels: [TorrentCardModel] = []
 
     private let pageSize = 10
@@ -164,7 +165,6 @@ struct TorrentSection: View {
                     models: visibleCardModels,
                     mode: .detail(
                         streamBusyTorrentID: streamBusyTorrentID,
-                        downloadBusyTorrentID: downloadBusyTorrentID,
                         bufferingByID: rowBufferingByID,
                         cardErrors: cardErrors,
                         onStream: { startStream(for: $0) },
@@ -195,6 +195,9 @@ struct TorrentSection: View {
             rebuildVisibleCardModels()
         }
         .onChange(of: downloads.count) { _, _ in rebuildVisibleCardModels() }
+        .onReceive(downloadManager.objectWillChange) { _ in
+            rebuildVisibleCardModels()
+        }
         .onChange(of: settings.first?.proxyBaseURL) { _, _ in
             TorrentBackendSync.apply(from: settings.first)
         }
@@ -250,8 +253,48 @@ struct TorrentSection: View {
             TorrentCardModel(
                 torrent: torrent,
                 isDownloaded: isDownloaded(torrent),
-                showsResumePlay: torrent.id == resumeID
+                showsResumePlay: torrent.id == resumeID,
+                downloadActivity: downloadActivity(for: torrent)
             )
+        }
+    }
+
+    private func activeDownloadTask(for torrent: TorrentResult) -> DownloadManager.DownloadTask? {
+        if let taskId = downloadTaskByTorrentID[torrent.id],
+           let task = downloadManager.tasks.first(where: { $0.id == taskId }) {
+            return task
+        }
+        if let hash = torrent.resolvedInfoHash?.lowercased(),
+           let task = downloadManager.tasks.first(where: { ($0.infoHash ?? "").lowercased() == hash }) {
+            return task
+        }
+        return downloadManager.tasks.first(where: { task in
+            task.magnetURI == torrent.magnetURI
+                && (task.state == .queued || task.state == .downloading || task.state == .paused)
+        })
+    }
+
+    private func downloadActivity(for torrent: TorrentResult) -> TorrentDownloadActivity? {
+        guard let task = activeDownloadTask(for: torrent) else { return nil }
+        switch task.state {
+        case .queued:
+            return TorrentDownloadActivity(phase: .queued, progress: 0, label: "Starting…")
+        case .downloading:
+            let percent = task.progress > 0 ? "\(Int(task.progress * 100))%" : "…"
+            return TorrentDownloadActivity(
+                phase: .downloading,
+                progress: task.progress,
+                label: "Downloading \(percent)"
+            )
+        case .paused:
+            let percent = task.progress > 0 ? " \(Int(task.progress * 100))%" : ""
+            return TorrentDownloadActivity(
+                phase: .paused,
+                progress: task.progress,
+                label: "Paused\(percent)"
+            )
+        case .completed, .failed:
+            return nil
         }
     }
 
@@ -405,8 +448,16 @@ struct TorrentSection: View {
     }
 
     private func startDownload(_ torrent: TorrentResult) {
-        downloadBusyTorrentID = torrent.id
         clearError(for: torrent.id)
+        TorrentBackendSync.apply(from: settings.first)
+
+        guard DownloadIdentity.resolve(
+            magnetURI: torrent.magnetURI,
+            storedInfoHash: torrent.infoHash
+        ) != nil else {
+            presentError("This release has an invalid magnet link.", for: torrent.id)
+            return
+        }
 
         let taskId = downloadManager.startDownload(
             tmdbId: movie.id,
@@ -414,8 +465,12 @@ struct TorrentSection: View {
             title: torrent.title,
             magnetURI: torrent.magnetURI,
             quality: torrent.quality.rawValue,
-            hdrType: torrent.hdrType?.rawValue
+            hdrType: torrent.hdrType?.rawValue,
+            infoHash: torrent.infoHash
         )
+
+        downloadTaskByTorrentID[torrent.id] = taskId
+        rebuildVisibleCardModels()
 
         downloadWatchTask?.cancel()
         downloadWatchTask = Task {
@@ -424,27 +479,40 @@ struct TorrentSection: View {
     }
 
     private func watchDownload(taskId: UUID, torrentID: UUID) async {
-        while !Task.isCancelled, downloadBusyTorrentID == torrentID {
+        while !Task.isCancelled {
             guard let task = downloadManager.tasks.first(where: { $0.id == taskId }) else {
-                await MainActor.run { downloadBusyTorrentID = nil }
-                return
-            }
-            switch task.state {
-            case .downloading where task.totalBytes > 0:
-                await MainActor.run { downloadBusyTorrentID = nil }
-                return
-            case .completed, .paused:
-                await MainActor.run { downloadBusyTorrentID = nil }
-                return
-            case .failed:
                 await MainActor.run {
-                    downloadBusyTorrentID = nil
-                    presentError("Download failed for this release.", for: torrentID)
+                    downloadTaskByTorrentID.removeValue(forKey: torrentID)
+                    rebuildVisibleCardModels()
                 }
                 return
-            case .downloading, .queued:
+            }
+
+            await MainActor.run { rebuildVisibleCardModels() }
+
+            switch task.state {
+            case .failed:
+                await MainActor.run {
+                    let detail = task.failureMessage?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    let message = (detail?.isEmpty == false)
+                        ? detail!
+                        : "Download failed for this release."
+                    presentError(message, for: torrentID)
+                    downloadTaskByTorrentID.removeValue(forKey: torrentID)
+                    rebuildVisibleCardModels()
+                }
+                return
+            case .completed:
+                await MainActor.run {
+                    downloadTaskByTorrentID.removeValue(forKey: torrentID)
+                    rebuildVisibleCardModels()
+                }
+                return
+            case .queued, .downloading, .paused:
                 break
             }
+
             try? await Task.sleep(for: .milliseconds(300))
         }
     }
