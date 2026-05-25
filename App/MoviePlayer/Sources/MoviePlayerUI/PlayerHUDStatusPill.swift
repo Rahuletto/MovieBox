@@ -40,7 +40,7 @@ struct PlayerHUDStatusPillOverlay: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .padding(.top, 72)
+        .padding(.top, 40)
         .allowsHitTesting(false)
         .onAppear {
             sync(with: pill)
@@ -132,9 +132,11 @@ public struct PlayerHUDStatusPill: View {
                 Image(systemName: icon)
                     .font(.system(size: 14, weight: .bold))
                     .playerGlassSymbol()
+                    .foregroundStyle(.primary)
                     .contentTransition(.symbolEffect(.replace))
                 Text(title)
                     .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.primary)
                     .contentTransition(.interpolate)
             case .qualityBadges(let kinds):
                 HStack(spacing: 12) {

@@ -50,17 +50,105 @@ public actor RemuxService {
         return probe
     }
 
-    public func plan(inputURL: URL) async throws -> RemuxPlan {
+    public func plan(inputURL: URL, policy: PlaybackPreparePolicy = PlaybackPreparePolicy()) async throws -> RemuxPlan {
         let probe = try await probe(inputURL: inputURL)
-        return try Self.makePlan(inputURL: inputURL, probe: probe)
+        return try Self.makePlan(inputURL: inputURL, probe: probe, policy: policy)
+    }
+
+    public func prepareForPlayback(
+        inputURL: URL,
+        cacheKey: String,
+        policy: PlaybackPreparePolicy = PlaybackPreparePolicy()
+    ) async throws -> PlaybackPrepareResult {
+        let remuxPlan = try await plan(inputURL: inputURL, policy: policy)
+
+        switch remuxPlan.decision {
+        case .nativePassthrough:
+            MoviePlayerLog.info("[Remux] native passthrough file=\(inputURL.lastPathComponent)")
+            return PlaybackPrepareResult(
+                playbackURL: inputURL,
+                mode: .nativePassthrough,
+                durationSeconds: remuxPlan.probe.duration
+            )
+        case .unsupported:
+            throw RemuxError.unsupported(remuxPlan.unsupportedReason ?? "Unsupported media for AVPlayer.")
+        case .fmp4HLS, .tsHLS:
+            let remuxResult = try await runHLSPrepare(
+                inputURL: inputURL,
+                cacheKey: cacheKey,
+                remuxPlan: remuxPlan
+            )
+            return PlaybackPrepareResult(
+                playbackURL: remuxResult.playlistURL,
+                mode: .losslessHLS,
+                remuxResult: remuxResult,
+                durationSeconds: remuxResult.durationSeconds
+            )
+        case .transcodeFMP4HLS, .transcodeTSHLS:
+            let remuxResult = try await runHLSPrepare(
+                inputURL: inputURL,
+                cacheKey: cacheKey,
+                remuxPlan: remuxPlan
+            )
+            return PlaybackPrepareResult(
+                playbackURL: remuxResult.playlistURL,
+                mode: .transcodeHLS,
+                remuxResult: remuxResult,
+                durationSeconds: remuxResult.durationSeconds
+            )
+        }
+    }
+
+    public func prepareStreamingForPlayback(
+        inputURL: URL,
+        cacheKey: String,
+        policy: PlaybackPreparePolicy = PlaybackPreparePolicy()
+    ) async throws -> PlaybackPrepareResult {
+        let remuxPlan = try await plan(inputURL: inputURL, policy: policy)
+        switch remuxPlan.decision {
+        case .nativePassthrough:
+            return PlaybackPrepareResult(
+                playbackURL: inputURL,
+                mode: .nativePassthrough,
+                durationSeconds: remuxPlan.probe.duration
+            )
+        case .unsupported:
+            throw RemuxError.unsupported(remuxPlan.unsupportedReason ?? "Unsupported media for AVPlayer.")
+        case .fmp4HLS, .tsHLS, .transcodeFMP4HLS, .transcodeTSHLS:
+            let remuxResult = try await runStreamingHLSPrepare(
+                inputURL: inputURL,
+                cacheKey: cacheKey,
+                remuxPlan: remuxPlan
+            )
+            let mode: PlaybackPreparationMode = remuxPlan.decision.isTranscode ? .transcodeHLS : .losslessHLS
+            return PlaybackPrepareResult(
+                playbackURL: remuxResult.playlistURL,
+                mode: mode,
+                remuxResult: remuxResult,
+                durationSeconds: remuxResult.durationSeconds
+            )
+        }
     }
 
     public func remuxMKVToHLS(inputURL: URL, cacheKey: String) async throws -> RemuxResult {
-        guard inputURL.pathExtension.lowercased() == "mkv" else {
-            MoviePlayerLog.info("[Remux] bypass non-mkv file=\(inputURL.lastPathComponent)")
-            return RemuxResult(playlistURL: inputURL, outputDirectory: inputURL.deletingLastPathComponent(), state: .completed)
+        let prepared = try await prepareForPlayback(inputURL: inputURL, cacheKey: cacheKey)
+        if let remuxResult = prepared.remuxResult {
+            return remuxResult
         }
+        return RemuxResult(
+            playlistURL: prepared.playbackURL,
+            outputDirectory: prepared.playbackURL.deletingLastPathComponent(),
+            state: .completed,
+            durationSeconds: prepared.durationSeconds,
+            preparationMode: .nativePassthrough
+        )
+    }
 
+    private func runHLSPrepare(
+        inputURL: URL,
+        cacheKey: String,
+        remuxPlan: RemuxPlan
+    ) async throws -> RemuxResult {
         let ffprobeURL = try Self.resolveTool(named: "ffprobe")
         let ffmpegURL = try Self.resolveTool(named: "ffmpeg")
         let outputDirectory = try hlsOutputDirectory(cacheKey: cacheKey)
@@ -69,7 +157,6 @@ public actor RemuxService {
 
         if Self.isCompleteHLSPlaylist(playlistURL) {
             MoviePlayerLog.info("[Remux] cache hit complete playlist=\(playlistURL.path)")
-            let remuxPlan = try await plan(inputURL: inputURL)
             let verified = try await verifyRemuxMetadata(
                 remuxPlan: remuxPlan,
                 outputDirectory: outputDirectory
@@ -79,15 +166,15 @@ public actor RemuxService {
                 outputDirectory: outputDirectory,
                 state: .completed,
                 durationSeconds: remuxPlan.probe.duration,
-                verification: verified
+                verification: verified,
+                preparationMode: remuxPlan.decision.preparationMode
             )
         }
 
         try fileManager.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
         try removeStaleHLSFiles(in: outputDirectory)
-        MoviePlayerLog.info("[Remux] cache miss prepared out=\(outputDirectory.path)")
+        MoviePlayerLog.info("[Remux] cache miss prepared out=\(outputDirectory.path) plan=\(remuxPlan.decision.logLabel)")
 
-        let remuxPlan = try await plan(inputURL: inputURL)
         let arguments = try Self.buildFFmpegArguments(plan: remuxPlan)
         MoviePlayerLog.info("[Remux] plan=\(remuxPlan.decision.logLabel) video=\(remuxPlan.videoStream?.codecName ?? "none") copy audio=\(remuxPlan.audioStream?.index ?? -1):\(remuxPlan.audioStream?.codecName ?? "none") copy tag=\(remuxPlan.videoTag ?? "none")")
 
@@ -130,18 +217,20 @@ public actor RemuxService {
             outputDirectory: outputDirectory,
             state: .completed,
             durationSeconds: remuxPlan.probe.duration,
-            verification: verified
+            verification: verified,
+            preparationMode: remuxPlan.decision.preparationMode
         )
     }
 
-    public func remuxStreamingMKVToHLS(inputURL: URL, cacheKey: String) async throws -> RemuxResult {
-        MoviePlayerLog.info("[Remux] streaming request begin url=\(inputURL.absoluteString) cacheKey=\(Self.sanitizeCacheKey(cacheKey))")
-        let ffprobeURL = try Self.resolveTool(named: "ffprobe")
+    private func runStreamingHLSPrepare(
+        inputURL: URL,
+        cacheKey: String,
+        remuxPlan: RemuxPlan
+    ) async throws -> RemuxResult {
+        MoviePlayerLog.info("[Remux] streaming request begin url=\(inputURL.absoluteString) cacheKey=\(Self.sanitizeCacheKey(cacheKey)) plan=\(remuxPlan.decision.logLabel)")
         let ffmpegURL = try Self.resolveTool(named: "ffmpeg")
         let outputDirectory = try hlsOutputDirectory(cacheKey: "stream-\(cacheKey)")
         let safeKey = Self.sanitizeCacheKey(cacheKey)
-
-        let remuxPlan = try await plan(inputURL: inputURL)
 
         if let existing = activeStreamingProcesses[safeKey], existing.isRunning, Self.hasPlayableStreamingHLS(in: outputDirectory) {
             let playbackURL = try await ensureHLSServerURL(cacheKey: safeKey, outputDirectory: outputDirectory)
@@ -155,7 +244,8 @@ public actor RemuxService {
                 outputDirectory: outputDirectory,
                 state: .playable,
                 durationSeconds: remuxPlan.probe.duration,
-                verification: verified
+                verification: verified,
+                preparationMode: remuxPlan.decision.preparationMode
             )
         }
 
@@ -165,7 +255,7 @@ public actor RemuxService {
 
         try fileManager.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
         try removeStaleHLSFiles(in: outputDirectory)
-        MoviePlayerLog.info("[Remux] streaming request url=\(inputURL.absoluteString) cacheKey=\(safeKey) ffprobe=\(ffprobeURL.path) ffmpeg=\(ffmpegURL.path) out=\(outputDirectory.path)")
+        MoviePlayerLog.info("[Remux] streaming request url=\(inputURL.absoluteString) cacheKey=\(safeKey) ffmpeg=\(ffmpegURL.path) out=\(outputDirectory.path)")
 
         let arguments = try Self.buildStreamingFFmpegArguments(plan: remuxPlan)
         let stderrURL = outputDirectory.appendingPathComponent("ffmpeg.stderr.log")
@@ -197,7 +287,8 @@ public actor RemuxService {
                     outputDirectory: outputDirectory,
                     state: .playable,
                     durationSeconds: remuxPlan.probe.duration,
-                    verification: verified
+                    verification: verified,
+                    preparationMode: remuxPlan.decision.preparationMode
                 )
             }
             if !process.isRunning {
@@ -213,6 +304,20 @@ public actor RemuxService {
         let tail = Self.stderrTail(from: stderrURL)
         MoviePlayerLog.error("[Remux] streaming timed out waiting for first segment stderr=\(tail)")
         throw RemuxError.ffmpegFailed("Timed out waiting for HLS remux to become playable.\n\(tail)")
+    }
+
+    public func remuxStreamingMKVToHLS(inputURL: URL, cacheKey: String) async throws -> RemuxResult {
+        let prepared = try await prepareStreamingForPlayback(inputURL: inputURL, cacheKey: cacheKey)
+        if let remuxResult = prepared.remuxResult {
+            return remuxResult
+        }
+        return RemuxResult(
+            playlistURL: prepared.playbackURL,
+            outputDirectory: prepared.playbackURL.deletingLastPathComponent(),
+            state: .playable,
+            durationSeconds: prepared.durationSeconds,
+            preparationMode: .nativePassthrough
+        )
     }
 
     private func ensureHLSServerURL(cacheKey: String, outputDirectory: URL) async throws -> URL {
@@ -247,11 +352,11 @@ public actor RemuxService {
     }
 
     #if DEBUG
-    internal func injectProcess(_ process: Process, for cacheKey: String) {
+    public func injectProcess(_ process: Process, for cacheKey: String) {
         activeStreamingProcesses[cacheKey] = process
     }
 
-    internal func getActiveProcesses() -> [String: Process] {
+    public func getActiveProcesses() -> [String: Process] {
         activeStreamingProcesses
     }
     #endif
@@ -379,6 +484,22 @@ public actor RemuxService {
         remuxPlan: RemuxPlan,
         outputDirectory: URL
     ) async throws -> HDRVerificationOutcome {
+        if remuxPlan.decision == .nativePassthrough {
+            return HDRVerificationOutcome(
+                video: remuxPlan.videoStream?.colorMetadata,
+                atmos: remuxPlan.audioStream?.atmosInfo,
+                passed: true
+            )
+        }
+        if remuxPlan.decision.isTranscode {
+            return HDRVerificationOutcome(
+                video: nil,
+                atmos: nil,
+                passed: false,
+                warningSummary: "Transcoded for compatibility — HDR may differ from source."
+            )
+        }
+
         let probeURLs = Self.outputProbeURLs(in: outputDirectory, decision: remuxPlan.decision)
         guard !probeURLs.isEmpty else {
             MoviePlayerLog.warn("[Remux] hdr validate skipped — no probe target in \(outputDirectory.path)")
@@ -446,7 +567,8 @@ public actor RemuxService {
         outputDirectory: URL,
         state: RemuxSessionState,
         durationSeconds: Double?,
-        verification: HDRVerificationOutcome
+        verification: HDRVerificationOutcome,
+        preparationMode: PlaybackPreparationMode
     ) -> RemuxResult {
         let badgesVideo = verification.passed ? verification.video : nil
         let badgesAtmos = verification.passed ? verification.atmos : nil
@@ -458,7 +580,8 @@ public actor RemuxService {
             verifiedVideoColor: badgesVideo,
             verifiedAtmos: badgesAtmos,
             metadataValidationPassed: verification.passed,
-            metadataValidationWarning: verification.warningSummary
+            metadataValidationWarning: verification.warningSummary,
+            preparationMode: preparationMode
         )
     }
 }
@@ -540,17 +663,42 @@ public struct RemuxPlan: Sendable {
 }
 
 public enum RemuxPlanDecision: Sendable, Equatable {
+    /// Load the source file directly in AVPlayer (MP4/MOV/M4V with compatible codecs).
+    case nativePassthrough
     /// Fragmented MP4 segments — required for HEVC per Apple HLS authoring.
     case fmp4HLS
     /// MPEG-TS segments — lossless path for H.264 + AAC/AC-3/E-AC-3 (AVPlayer-friendly Dolby).
     case tsHLS
+    /// Hardware HEVC transcode to fMP4 HLS (HDR-capable).
+    case transcodeFMP4HLS
+    /// Hardware H.264 transcode to TS HLS (SDR / broad compatibility).
+    case transcodeTSHLS
     case unsupported
 
     var logLabel: String {
         switch self {
+        case .nativePassthrough: "native"
         case .fmp4HLS: "fmp4_hls"
         case .tsHLS: "ts_hls"
+        case .transcodeFMP4HLS: "transcode_fmp4_hls"
+        case .transcodeTSHLS: "transcode_ts_hls"
         case .unsupported: "unsupported"
+        }
+    }
+
+    var isTranscode: Bool {
+        switch self {
+        case .transcodeFMP4HLS, .transcodeTSHLS: true
+        default: false
+        }
+    }
+
+    var preparationMode: PlaybackPreparationMode {
+        switch self {
+        case .nativePassthrough: .nativePassthrough
+        case .fmp4HLS, .tsHLS: .losslessHLS
+        case .transcodeFMP4HLS, .transcodeTSHLS: .transcodeHLS
+        case .unsupported: .losslessHLS
         }
     }
 }
@@ -566,6 +714,7 @@ public struct RemuxResult: Sendable {
     public let verifiedAtmos: AtmosAudioInfo?
     public let metadataValidationPassed: Bool
     public let metadataValidationWarning: String?
+    public let preparationMode: PlaybackPreparationMode?
 
     public init(
         playlistURL: URL,
@@ -575,7 +724,8 @@ public struct RemuxResult: Sendable {
         verifiedVideoColor: VideoColorMetadata? = nil,
         verifiedAtmos: AtmosAudioInfo? = nil,
         metadataValidationPassed: Bool = true,
-        metadataValidationWarning: String? = nil
+        metadataValidationWarning: String? = nil,
+        preparationMode: PlaybackPreparationMode? = nil
     ) {
         self.playlistURL = playlistURL
         self.outputDirectory = outputDirectory
@@ -585,6 +735,7 @@ public struct RemuxResult: Sendable {
         self.verifiedAtmos = verifiedAtmos
         self.metadataValidationPassed = metadataValidationPassed
         self.metadataValidationWarning = metadataValidationWarning
+        self.preparationMode = preparationMode
     }
 }
 
@@ -657,7 +808,7 @@ public enum RemuxError: Error, LocalizedError, Equatable {
 }
 
 extension RemuxService {
-    static func decodeProbe(_ data: Data) throws -> MediaProbe {
+    public static func decodeProbe(_ data: Data) throws -> MediaProbe {
         let response: FFProbeResponse
         do {
             response = try JSONDecoder().decode(FFProbeResponse.self, from: data)
@@ -742,26 +893,57 @@ extension RemuxService {
         )
     }
 
-    static func makePlan(inputURL: URL, probe: MediaProbe) throws -> RemuxPlan {
+    public static func makePlan(inputURL: URL, probe: MediaProbe, policy: PlaybackPreparePolicy = PlaybackPreparePolicy()) throws -> RemuxPlan {
         guard let video = probe.videoStreams.first else {
             return unsupported(inputURL: inputURL, probe: probe, reason: "No video stream found.")
         }
-        guard ["h264", "hevc"].contains(video.codecName) else {
-            let reason = "Video codec \(video.codecName) cannot be remuxed losslessly for AVPlayer."
-            MoviePlayerLog.warn("[Remux] unsupported video=\(video.codecName) reason=\(reason)")
-            return unsupported(inputURL: inputURL, probe: probe, video: video, reason: reason)
-        }
 
         let compatibleAudio = probe.audioStreams.filter { ["aac", "ac3", "eac3"].contains($0.codecName) }
-        guard let audio = compatibleAudio.first(where: \.isDefault) ?? compatibleAudio.first else {
-            let codec = probe.audioStreams.first?.codecName ?? "none"
-            let reason = "Audio codec \(codec) is not AVPlayer-compatible in strict preservation mode."
-            MoviePlayerLog.warn("[Remux] unsupported audio=\(codec) reason=\(reason)")
+        let nativeContainerExtensions = ["mp4", "mov", "m4v"]
+        let ext = inputURL.pathExtension.lowercased()
+
+        if ["h264", "hevc"].contains(video.codecName),
+           let audio = compatibleAudio.first(where: \.isDefault) ?? compatibleAudio.first {
+            if inputURL.isFileURL, nativeContainerExtensions.contains(ext) {
+                MoviePlayerLog.info("[Remux] plan native passthrough ext=\(ext) video=\(video.codecName) audio=\(audio.codecName)")
+                return RemuxPlan(
+                    inputURL: inputURL,
+                    probe: probe,
+                    decision: .nativePassthrough,
+                    videoStream: video,
+                    audioStream: audio,
+                    videoTag: video.codecName == "hevc" ? "hvc1" : nil,
+                    unsupportedReason: nil
+                )
+            }
+
+            let decision: RemuxPlanDecision = video.codecName == "hevc" ? .fmp4HLS : .tsHLS
+            return RemuxPlan(
+                inputURL: inputURL,
+                probe: probe,
+                decision: decision,
+                videoStream: video,
+                audioStream: audio,
+                videoTag: video.codecName == "hevc" ? "hvc1" : nil,
+                unsupportedReason: nil
+            )
+        }
+
+        guard policy.allowTranscodeFallback else {
+            let videoCodec = video.codecName
+            let audioCodec = probe.audioStreams.first?.codecName ?? "none"
+            let reason = "Video \(videoCodec) / audio \(audioCodec) cannot be prepared losslessly. Enable transcode fallback in Settings."
+            MoviePlayerLog.warn("[Remux] unsupported policy=losslessOnly reason=\(reason)")
             return unsupported(inputURL: inputURL, probe: probe, video: video, reason: reason)
         }
 
-        // Apple requires fMP4 for HEVC; H.264 + Dolby is remuxed to MPEG-TS HLS (lossless).
-        let decision: RemuxPlanDecision = video.codecName == "hevc" ? .fmp4HLS : .tsHLS
+        guard let audio = probe.audioStreams.first(where: \.isDefault) ?? probe.audioStreams.first else {
+            return unsupported(inputURL: inputURL, probe: probe, video: video, reason: "No audio stream found.")
+        }
+
+        let useHEVCTranscode = video.dynamicRange != .sdr || video.hasDolbyVision || video.hasHDR10Plus
+        let decision: RemuxPlanDecision = useHEVCTranscode ? .transcodeFMP4HLS : .transcodeTSHLS
+        MoviePlayerLog.info("[Remux] plan transcode video=\(video.codecName) hdr=\(video.dynamicRange.rawValue) audio=\(audio.codecName) decision=\(decision.logLabel)")
 
         return RemuxPlan(
             inputURL: inputURL,
@@ -769,29 +951,37 @@ extension RemuxService {
             decision: decision,
             videoStream: video,
             audioStream: audio,
-            videoTag: video.codecName == "hevc" ? "hvc1" : nil,
+            videoTag: useHEVCTranscode ? "hvc1" : nil,
             unsupportedReason: nil
         )
     }
 
-    static func buildFFmpegArguments(plan: RemuxPlan) throws -> [String] {
+    public static func buildFFmpegArguments(plan: RemuxPlan) throws -> [String] {
         switch plan.decision {
         case .fmp4HLS:
             return buildFMP4HLSArguments(plan: plan, input: plan.inputURL.path, streaming: false)
         case .tsHLS:
             return buildTSHLSArguments(plan: plan, input: plan.inputURL.path, streaming: false)
-        case .unsupported:
+        case .transcodeFMP4HLS:
+            return buildTranscodeFMP4HLSArguments(plan: plan, input: plan.inputURL.path, streaming: false)
+        case .transcodeTSHLS:
+            return buildTranscodeTSHLSArguments(plan: plan, input: plan.inputURL.path, streaming: false)
+        case .nativePassthrough, .unsupported:
             throw RemuxError.unsupported(plan.unsupportedReason ?? "Unsupported media for AVPlayer remux.")
         }
     }
 
-    static func buildStreamingFFmpegArguments(plan: RemuxPlan) throws -> [String] {
+    public static func buildStreamingFFmpegArguments(plan: RemuxPlan) throws -> [String] {
         switch plan.decision {
         case .fmp4HLS:
             return buildFMP4HLSArguments(plan: plan, input: plan.inputURL.absoluteString, streaming: true)
         case .tsHLS:
             return buildTSHLSArguments(plan: plan, input: plan.inputURL.absoluteString, streaming: true)
-        case .unsupported:
+        case .transcodeFMP4HLS:
+            return buildTranscodeFMP4HLSArguments(plan: plan, input: plan.inputURL.absoluteString, streaming: true)
+        case .transcodeTSHLS:
+            return buildTranscodeTSHLSArguments(plan: plan, input: plan.inputURL.absoluteString, streaming: true)
+        case .nativePassthrough, .unsupported:
             throw RemuxError.unsupported(plan.unsupportedReason ?? "Unsupported media for AVPlayer remux.")
         }
     }
@@ -882,6 +1072,100 @@ extension RemuxService {
         return arguments
     }
 
+    private static func buildTranscodeStreamMaps(plan: RemuxPlan, videoEncoder: String, pixelFormat: String) -> [String] {
+        var arguments = ["-map_chapters", "-1", "-map", "0:v:0"]
+        if let audio = plan.audioStream {
+            arguments.append(contentsOf: ["-map", "0:\(audio.index)"])
+        }
+        arguments.append(contentsOf: [
+            "-c:v", videoEncoder,
+            "-pix_fmt", pixelFormat,
+            "-g", "48",
+            "-keyint_min", "48",
+            "-max_muxing_queue_size", "1024",
+            "-c:a", "aac",
+            "-b:a", "384k",
+            "-ac", "6",
+        ])
+        if let videoTag = plan.videoTag {
+            arguments.append(contentsOf: ["-tag:v", videoTag])
+        }
+        return arguments
+    }
+
+    private static func transcodePixelFormat(for video: VideoStream) -> String {
+        video.dynamicRange == .sdr ? "yuv420p" : "p010le"
+    }
+
+    private static func buildTranscodeFMP4HLSArguments(plan: RemuxPlan, input: String, streaming: Bool) -> [String] {
+        let pixelFormat = plan.videoStream.map(transcodePixelFormat(for:)) ?? "yuv420p"
+        var arguments = buildInputArguments(input: input)
+        arguments.append(contentsOf: buildTranscodeStreamMaps(
+            plan: plan,
+            videoEncoder: "hevc_videotoolbox",
+            pixelFormat: pixelFormat
+        ))
+        arguments.append(contentsOf: [
+            "-dn",
+            "-sn",
+            "-movflags", "+write_colr",
+            "-avoid_negative_ts", "make_zero",
+            "-reset_timestamps", "1",
+            "-f", "hls",
+            "-hls_segment_type", "fmp4",
+            "-hls_time", "4",
+            "-hls_fmp4_init_filename", "init.mp4",
+            "-hls_segment_filename", "segment_%05d.m4s",
+        ])
+        if streaming {
+            arguments.append(contentsOf: [
+                "-hls_list_size", "0",
+                "-hls_playlist_type", "event",
+                "-hls_flags", "append_list+independent_segments",
+            ])
+        } else {
+            arguments.append(contentsOf: [
+                "-hls_playlist_type", "vod",
+                "-hls_flags", "independent_segments",
+            ])
+        }
+        arguments.append(contentsOf: ["-y", "stream.m3u8"])
+        return arguments
+    }
+
+    private static func buildTranscodeTSHLSArguments(plan: RemuxPlan, input: String, streaming: Bool) -> [String] {
+        let pixelFormat = plan.videoStream.map(transcodePixelFormat(for:)) ?? "yuv420p"
+        var arguments = buildInputArguments(input: input)
+        arguments.append(contentsOf: buildTranscodeStreamMaps(
+            plan: plan,
+            videoEncoder: "h264_videotoolbox",
+            pixelFormat: pixelFormat
+        ))
+        arguments.append(contentsOf: [
+            "-dn",
+            "-sn",
+            "-avoid_negative_ts", "make_zero",
+            "-reset_timestamps", "1",
+            "-f", "hls",
+            "-hls_time", "4",
+            "-hls_segment_filename", "segment_%05d.ts",
+        ])
+        if streaming {
+            arguments.append(contentsOf: [
+                "-hls_list_size", "0",
+                "-hls_playlist_type", "event",
+                "-hls_flags", "append_list+independent_segments",
+            ])
+        } else {
+            arguments.append(contentsOf: [
+                "-hls_playlist_type", "vod",
+                "-hls_flags", "independent_segments",
+            ])
+        }
+        arguments.append(contentsOf: ["-y", "stream.m3u8"])
+        return arguments
+    }
+
     static func redactedArguments(_ arguments: [String]) -> String {
         arguments.map { argument in
             if argument.hasPrefix("/") {
@@ -899,7 +1183,7 @@ extension RemuxService {
         throw RemuxError.ffmpegNotFound
     }
 
-    static func hasPlayableStreamingHLS(in directory: URL) -> Bool {
+    public static func hasPlayableStreamingHLS(in directory: URL) -> Bool {
         guard hasPlayableHLS(in: directory) else { return false }
         let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
         let segmentCount = files.filter {
@@ -909,7 +1193,7 @@ extension RemuxService {
         return segmentCount >= 3
     }
 
-    static func normalizeStreamingPlaylist(at playlistURL: URL) {
+    public static func normalizeStreamingPlaylist(at playlistURL: URL) {
         guard var lines = try? String(contentsOf: playlistURL, encoding: .utf8)
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map(String.init)
@@ -933,7 +1217,7 @@ extension RemuxService {
         try? normalized.write(to: playlistURL, atomically: true, encoding: .utf8)
     }
 
-    static func hasPlayableHLS(in directory: URL) -> Bool {
+    public static func hasPlayableHLS(in directory: URL) -> Bool {
         let playlistURL = directory.appendingPathComponent("stream.m3u8")
         guard FileManager.default.fileExists(atPath: playlistURL.path),
               let playlist = try? String(contentsOf: playlistURL, encoding: .utf8)
@@ -1048,13 +1332,25 @@ extension RemuxService {
                 .prefix(2)
             urls.append(contentsOf: segments)
             return urls
-        case .tsHLS:
+        case .tsHLS, .transcodeTSHLS:
             return files
                 .filter { $0.pathExtension.lowercased() == "ts" }
                 .sorted { $0.lastPathComponent < $1.lastPathComponent }
                 .prefix(3)
                 .map { $0 }
-        case .unsupported:
+        case .transcodeFMP4HLS:
+            var urls: [URL] = []
+            let initURL = outputDirectory.appendingPathComponent("init.mp4")
+            if FileManager.default.fileExists(atPath: initURL.path) {
+                urls.append(initURL)
+            }
+            let segments = files
+                .filter { $0.pathExtension.lowercased() == "m4s" }
+                .sorted { $0.lastPathComponent < $1.lastPathComponent }
+                .prefix(2)
+            urls.append(contentsOf: segments)
+            return urls
+        case .nativePassthrough, .unsupported:
             return []
         }
     }

@@ -25,7 +25,9 @@ public enum HDRMetadataValidator {
         var issues: [HDRValidationIssue] = []
         var warnings: [HDRValidationIssue] = []
 
-        guard plan.decision != .unsupported else { return .ok }
+        guard plan.decision != .unsupported,
+              plan.decision != .nativePassthrough,
+              !plan.decision.isTranscode else { return .ok }
 
         if let sourceVideo, let outputVideo {
             issues.append(contentsOf: validateVideo(source: sourceVideo, output: outputVideo))

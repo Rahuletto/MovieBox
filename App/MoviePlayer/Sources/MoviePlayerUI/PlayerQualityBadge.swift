@@ -27,14 +27,11 @@ public enum PlayerQualityBadgeKind: String, Sendable, Equatable, Hashable {
         }
     }
 
-    var isDolbyLockup: Bool {
-        self == .dolbyVision || self == .dolbyAtmos
-    }
-
     func displayWidth() -> CGFloat {
         switch self {
         case .hdr: 36
-        case .dolbyVision: 46
+        // Source asset 372×138 — preserve aspect at 18pt height.
+        case .dolbyVision: 49
         case .dolbyAtmos: 42
         }
     }
@@ -70,16 +67,9 @@ struct PlayerQualityBadgeImage: View {
     let kind: PlayerQualityBadgeKind
 
     var body: some View {
-        if kind.isDolbyLockup {
-            dolbyLockup
-        } else {
-            bundleImage
-                .renderingMode(.template)
-                .resizable()
-                .scaledToFit()
-                .foregroundStyle(.white.opacity(0.92))
-                .frame(width: kind.displayWidth(), height: kind.displayHeight())
-        }
+        bundleImage
+            .playerGlassBadgeImage()
+            .frame(width: kind.displayWidth(), height: kind.displayHeight())
     }
 
     private var bundleImage: Image {
@@ -87,27 +77,6 @@ struct PlayerQualityBadgeImage: View {
             return Image(nsImage: nsImage)
         }
         return Image(systemName: "sparkles")
-    }
-
-    private var dolbyLockup: some View {
-        let width = kind.displayWidth()
-        let height = kind.displayHeight()
-        let horizontalPadding: CGFloat = 3.5
-        let verticalPadding: CGFloat = 2
-
-        return bundleImage
-            .renderingMode(.template)
-            .resizable()
-            .scaledToFit()
-            .foregroundStyle(.white)
-            .frame(width: width - horizontalPadding * 2, height: height - verticalPadding * 2)
-            .padding(.horizontal, horizontalPadding)
-            .padding(.vertical, verticalPadding)
-            .background(
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .fill(Color.black.opacity(0.45))
-            )
-            .frame(width: width, height: height)
     }
 
     private static func loadImage(named baseName: String) -> NSImage? {

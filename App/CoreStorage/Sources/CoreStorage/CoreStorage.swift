@@ -144,6 +144,8 @@ public final class AppSettings {
     public var preferHDR: Bool
     /// When true, remux blocks playback if HDR/DV/Atmos metadata is stripped. Default off (warn and play).
     public var strictHDRValidation: Bool
+    /// When true, FFmpeg hardware-transcodes unsupported codecs to HLS so more files play in AVPlayer.
+    public var allowTranscodeFallback: Bool
     public var subtitlesEnabled: Bool
     public var subtitleStyle: String
     public var subtitleFontSize: Double
@@ -185,6 +187,7 @@ public final class AppSettings {
         autoRemoveCompleted: Bool = false,
         preferHDR: Bool = true,
         strictHDRValidation: Bool = false,
+        allowTranscodeFallback: Bool = true,
         subtitlesEnabled: Bool = true,
         subtitleStyle: String = "cinematic",
         subtitleFontSize: Double = 20,
@@ -225,6 +228,7 @@ public final class AppSettings {
         self.autoRemoveCompleted = autoRemoveCompleted
         self.preferHDR = preferHDR
         self.strictHDRValidation = strictHDRValidation
+        self.allowTranscodeFallback = allowTranscodeFallback
         self.subtitlesEnabled = subtitlesEnabled
         self.subtitleStyle = subtitleStyle
         self.subtitleFontSize = subtitleFontSize
