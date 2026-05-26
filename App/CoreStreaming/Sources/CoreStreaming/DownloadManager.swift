@@ -55,8 +55,11 @@ public final class DownloadManager: ObservableObject {
 
     @Published public private(set) var tasks: [DownloadTask] = []
     @Published public private(set) var totalDownloadSpeed: Double = 0
+    @Published public private(set) var reexportingTaskIds: Set<UUID> = []
 
     public weak var persistenceDelegate: DownloadPersistenceDelegate?
+    /// Called on the main actor whenever the task list or progress changes (Dock tile, etc.).
+    public var onTasksUpdated: (@MainActor () -> Void)?
 
     private var activeEngines: [UUID: TorrentEngine] = [:]
     private var pieceStores: [UUID: PieceStore] = [:]
@@ -143,14 +146,71 @@ public final class DownloadManager: ObservableObject {
         task.totalBytes = totalBytes
         task.downloadedBytes = downloadedBytes
         task.outputPath = localFilePath
-        task.infoHash = infoHash
+        let normalizedHash = MagnetURI.normalizeInfoHash(infoHash) ?? infoHash.lowercased()
+        task.infoHash = normalizedHash
         task.storageDirectory = storageDirectory
+
+        if let existingIndex = tasks.firstIndex(where: {
+            ($0.infoHash ?? "").lowercased() == normalizedHash
+        }) {
+            let existingId = tasks[existingIndex].id
+            mutateTask(taskId: existingId) { existing in
+                existing.state = state
+                existing.progress = max(existing.progress, progress)
+                existing.totalBytes = max(existing.totalBytes, totalBytes)
+                existing.downloadedBytes = max(existing.downloadedBytes, downloadedBytes)
+                existing.outputPath = localFilePath ?? existing.outputPath
+                existing.storageDirectory = storageDirectory
+            }
+            if state == .downloading || state == .queued {
+                scheduleExecuteDownload(taskId: existingId, resume: true, existingBitmap: pieceBitmap)
+            }
+            return
+        }
+
         if !tasks.contains(where: { $0.id == id }) {
             tasks.append(task)
+            notifyTasksUpdated()
         }
         if state == .downloading || state == .queued {
             scheduleExecuteDownload(taskId: id, resume: true, existingBitmap: pieceBitmap)
         }
+    }
+
+    /// Collapses duplicate rows for the same torrent hash (keeps the one with the most data).
+    public func deduplicateTasks() {
+        var bestIndexByHash: [String: Int] = [:]
+        var indicesToRemove: Set<Int> = []
+
+        for (index, task) in tasks.enumerated() {
+            guard let hash = task.infoHash?.lowercased(), !hash.isEmpty else { continue }
+            if let existingIndex = bestIndexByHash[hash] {
+                let existing = tasks[existingIndex]
+                if task.downloadedBytes > existing.downloadedBytes {
+                    indicesToRemove.insert(existingIndex)
+                    bestIndexByHash[hash] = index
+                } else {
+                    indicesToRemove.insert(index)
+                }
+            } else {
+                bestIndexByHash[hash] = index
+            }
+        }
+
+        guard !indicesToRemove.isEmpty else { return }
+        let sorted = indicesToRemove.sorted(by: >)
+        for index in sorted where index < tasks.count {
+            let removed = tasks.remove(at: index)
+            if let engine = activeEngines[removed.id] {
+                engine.stop()
+                activeEngines.removeValue(forKey: removed.id)
+            }
+            pieceManagers.removeValue(forKey: removed.id)
+            pieceStores.removeValue(forKey: removed.id)
+            metadataByTask.removeValue(forKey: removed.id)
+            cancelExecution(for: removed.id)
+        }
+        notifyTasksUpdated()
     }
 
     @discardableResult
@@ -166,10 +226,21 @@ public final class DownloadManager: ObservableObject {
         let resolvedHash = infoHash.flatMap { MagnetURI.normalizeInfoHash($0) }
             ?? DownloadIdentity.resolve(magnetURI: magnetURI, storedInfoHash: infoHash)?.infoHash
 
-        if let resolvedHash,
-           let existingIndex = tasks.firstIndex(where: {
-               $0.infoHash == resolvedHash && $0.state != .completed && $0.state != .failed
-           }) {
+        if let resolvedHash {
+            DownloadStorage.clearDownloadCancelled(infoHash: resolvedHash)
+        }
+
+        if let existingIndex = tasks.firstIndex(where: { task in
+            guard task.state != .completed && task.state != .failed else { return false }
+            if let resolvedHash,
+               (task.infoHash ?? "").lowercased() == resolvedHash.lowercased() {
+                return true
+            }
+            if !magnetURI.isEmpty, task.magnetURI == magnetURI {
+                return true
+            }
+            return false
+        }) {
             let existing = tasks[existingIndex]
             switch existing.state {
             case .paused:
@@ -182,6 +253,49 @@ public final class DownloadManager: ObservableObject {
             return existing.id
         }
 
+        if let resolvedHash,
+           let artifact = DownloadDiskRecovery.findBest(
+               infoHash: resolvedHash,
+               roots: [downloadDirectory, DownloadStorage.defaultRootDirectory()],
+               preferredTitle: title,
+               preferredStorageDirectory: nil
+           ) {
+            TorrentLog.info(
+                "[DownloadManager] resuming from disk — hash=\(resolvedHash.prefix(8))… dir=\"\(artifact.title)\" bytes=\(artifact.streamByteCount)"
+            )
+            let task = DownloadTask(
+                tmdbId: tmdbId,
+                mediaKind: mediaKind,
+                title: title,
+                magnetURI: magnetURI,
+                quality: quality,
+                hdrType: hdrType,
+                infoHash: resolvedHash
+            )
+            var restored = task
+            restored.storageDirectory = artifact.storageDirectory
+            if let existingIndex = tasks.firstIndex(where: {
+                ($0.infoHash ?? "").lowercased() == resolvedHash.lowercased()
+            }) {
+                let existingId = tasks[existingIndex].id
+                mutateTask(taskId: existingId) { existing in
+                    existing.storageDirectory = artifact.storageDirectory
+                    existing.downloadedBytes = max(existing.downloadedBytes, artifact.streamByteCount)
+                }
+                resumeDownload(taskId: existingId)
+                return existingId
+            }
+            tasks.append(restored)
+            notifyTasksUpdated()
+            persist(restored)
+            scheduleExecuteDownload(
+                taskId: restored.id,
+                resume: true,
+                existingBitmap: artifact.bitmap
+            )
+            return restored.id
+        }
+
         let task = DownloadTask(
             tmdbId: tmdbId,
             mediaKind: mediaKind,
@@ -192,24 +306,81 @@ public final class DownloadManager: ObservableObject {
             infoHash: resolvedHash
         )
         tasks.append(task)
+        notifyTasksUpdated()
         persist(task)
         scheduleExecuteDownload(taskId: task.id, resume: false, existingBitmap: nil)
         return task.id
     }
 
+    public func isReexporting(taskId: UUID) -> Bool {
+        reexportingTaskIds.contains(taskId)
+    }
+
+    /// Fixes a broken export by re-assembling from on-disk stream data (no re-download when possible).
+    public func repairCompletedDownload(taskId: UUID) {
+        guard let task = currentTask(taskId: taskId) else { return }
+        guard task.state == .completed || isReexporting(taskId: taskId) else { return }
+
+        if let path = task.outputPath {
+            try? FileManager.default.removeItem(atPath: path)
+        }
+
+        reexportingTaskIds.insert(taskId)
+        mutateTask(taskId: taskId) { task in
+            task.state = .downloading
+            task.progress = 0.05
+            task.speed = 0
+            task.peerCount = 0
+            task.outputPath = nil
+            task.failureMessage = nil
+        }
+        if let task = currentTask(taskId: taskId) {
+            persist(task)
+        }
+
+        cancelExecution(for: taskId)
+        executionTasks[taskId] = Task { [weak self] in
+            guard let self else { return }
+            defer { self.reexportingTaskIds.remove(taskId) }
+            let fixed = await self.attemptLocalReexport(taskId: taskId)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.executionTasks.removeValue(forKey: taskId)
+                guard !fixed else { return }
+                guard let task = self.currentTask(taskId: taskId) else { return }
+                TorrentLog.warn("[DownloadManager] local re-export unavailable — resuming torrent for missing pieces")
+                self.mutateTask(taskId: taskId) { task in
+                    task.state = .queued
+                    task.failureMessage = nil
+                }
+                if let task = self.currentTask(taskId: taskId) {
+                    self.persist(task)
+                }
+                self.scheduleExecuteDownload(
+                    taskId: taskId,
+                    resume: true,
+                    existingBitmap: self.restoredBitmap(for: task)
+                )
+            }
+        }
+    }
+
     public func retryDownload(taskId: UUID) {
-        guard let index = tasks.firstIndex(where: { $0.id == taskId }) else { return }
-        guard tasks[index].state == .failed else { return }
+        guard let task = currentTask(taskId: taskId) else { return }
+        guard task.state == .failed else { return }
 
         if let engine = activeEngines[taskId] {
             engine.stop()
             activeEngines.removeValue(forKey: taskId)
         }
 
-        tasks[index].state = .queued
-        tasks[index].failureMessage = nil
-        let task = tasks[index]
-        persist(task)
+        mutateTask(taskId: taskId) { task in
+            task.state = .queued
+            task.failureMessage = nil
+        }
+        if let task = currentTask(taskId: taskId) {
+            persist(task)
+        }
         scheduleExecuteDownload(
             taskId: taskId,
             resume: true,
@@ -218,23 +389,28 @@ public final class DownloadManager: ObservableObject {
     }
 
     public func pauseDownload(taskId: UUID) {
-        guard let index = tasks.firstIndex(where: { $0.id == taskId }) else { return }
+        guard currentTask(taskId: taskId) != nil else { return }
         cancelExecution(for: taskId)
-        tasks[index].state = .paused
+        mutateTask(taskId: taskId) { $0.state = .paused }
         if let engine = activeEngines[taskId] {
             engine.stop()
             activeEngines.removeValue(forKey: taskId)
         }
-        persist(tasks[index])
+        if let task = currentTask(taskId: taskId) {
+            persist(task)
+        }
     }
 
     public func resumeDownload(taskId: UUID) {
-        guard let index = tasks.firstIndex(where: { $0.id == taskId }) else { return }
-        mutateTask(at: index) { $0.state = .downloading }
-        let task = tasks[index]
+        guard currentTask(taskId: taskId) != nil else { return }
+        mutateTask(taskId: taskId) { $0.state = .downloading }
+        guard let task = currentTask(taskId: taskId) else { return }
         persist(task)
-        let bitmap = restoredBitmap(for: task)
-        scheduleExecuteDownload(taskId: taskId, resume: true, existingBitmap: bitmap)
+        scheduleExecuteDownload(
+            taskId: taskId,
+            resume: true,
+            existingBitmap: restoredBitmap(for: task)
+        )
     }
 
     /// Writes piece bitmaps and SwiftData snapshots before the process exits.
@@ -251,21 +427,173 @@ public final class DownloadManager: ObservableObject {
     }
 
     private func restoredBitmap(for task: DownloadTask) -> Data? {
-        if let hash = task.infoHash, let dir = task.storageDirectory,
+        guard let hash = task.infoHash else { return nil }
+        if let dir = task.storageDirectory,
            let sidecar = DownloadBitmapPersistence.loadBitmap(infoHash: hash, in: dir) {
+            return sidecar
+        }
+        if let legacyDir = DownloadStorage.legacyContainerStreamsDirectory(),
+           let sidecar = DownloadBitmapPersistence.loadBitmap(infoHash: hash, in: legacyDir) {
             return sidecar
         }
         return nil
     }
 
+    /// Re-assembles the completed file from `moviebox_*.stream` on disk (legacy container or download folder).
+    private func finalizeCompletedDownload(
+        exportedURL: URL,
+        displayTitle: String,
+        infoHash: String,
+        storageDirectory: URL,
+        store: PieceStore
+    ) async {
+        await store.closeHandles()
+        DownloadStorage.purgeDownloadPayload(infoHash: infoHash, storageDirectory: storageDirectory)
+        TorrentLog.info(
+            "[DownloadManager] completed — \(exportedURL.lastPathComponent) (removed stream cache for \(infoHash.prefix(8))…)"
+        )
+    }
+
+    private func updateReexportProgress(taskId: UUID, progress: Double, downloadedBytes: Int64? = nil) {
+        mutateTask(taskId: taskId) { task in
+            task.state = .downloading
+            task.progress = min(0.98, max(0.05, progress))
+            if let downloadedBytes {
+                task.downloadedBytes = downloadedBytes
+            }
+        }
+    }
+
+    private func attemptLocalReexport(taskId: UUID) async -> Bool {
+        guard let task = currentTask(taskId: taskId) else { return false }
+
+        updateReexportProgress(taskId: taskId, progress: 0.08)
+
+        guard let identity = DownloadIdentity.resolve(
+            magnetURI: task.magnetURI,
+            storedInfoHash: task.infoHash
+        ) else { return false }
+
+        let infoHash = identity.infoHash
+        let safeTitle = task.title.replacingOccurrences(of: "/", with: "_")
+        let outputDir: URL
+        if let stored = task.storageDirectory {
+            outputDir = stored
+        } else {
+            outputDir = downloadDirectory.appendingPathComponent(safeTitle, isDirectory: true)
+            mutateTask(taskId: taskId) { $0.storageDirectory = outputDir }
+        }
+
+        do {
+            try DownloadStorage.prepareDirectory(at: outputDir)
+        } catch {
+            TorrentLog.warn("[DownloadManager] re-export directory not writable — \(outputDir.path)")
+            return false
+        }
+
+        adoptLegacyStreamIfNeeded(infoHash: infoHash, storageDirectory: outputDir)
+        updateReexportProgress(taskId: taskId, progress: 0.2)
+        guard let taskForBitmap = currentTask(taskId: taskId) else { return false }
+        let bitmap = restoredBitmap(for: taskForBitmap)
+        guard hasResumableStore(infoHash: infoHash, storageDirectory: outputDir, bitmap: bitmap) else {
+            return false
+        }
+
+        let metadata: TorrentMetadata
+        do {
+            metadata = try await Task.detached(priority: .userInitiated) {
+                try await TorrentMetadataFetcher.fetch(
+                    infoHash: infoHash,
+                    magnetTrackers: identity.magnetTrackers
+                )
+            }.value
+        } catch {
+            TorrentLog.warn("[DownloadManager] re-export metadata failed — \(error.localizedDescription)")
+            return false
+        }
+
+        let target = TorrentStreamTarget.selectPrimary(from: metadata)
+        mutateTask(taskId: taskId) { task in
+            task.infoHash = infoHash
+            task.storageDirectory = outputDir
+            task.totalBytes = target.byteLength
+        }
+        updateReexportProgress(
+            taskId: taskId,
+            progress: 0.35,
+            downloadedBytes: DownloadStorage.fileAllocatedBytes(
+                at: outputDir.appendingPathComponent("moviebox_\(infoHash.lowercased()).stream")
+            )
+        )
+
+        do {
+            let store = try await PieceStore(
+                infoHash: infoHash,
+                pieceCount: metadata.pieceCount,
+                pieceSize: metadata.pieceLength,
+                totalSize: metadata.totalSize,
+                storageDirectory: outputDir,
+                existingBitmap: bitmap,
+                recreateFile: false
+            )
+
+            TorrentLog.info(
+                "[DownloadManager] re-exporting from on-disk stream — \(DownloadStorage.fileAllocatedBytes(at: store.storageURL)) bytes"
+            )
+            updateReexportProgress(
+                taskId: taskId,
+                progress: 0.55,
+                downloadedBytes: DownloadStorage.fileAllocatedBytes(at: store.storageURL)
+            )
+
+            let displayTitle = currentTask(taskId: taskId)?.title ?? task.title
+            let fileURL = try await TorrentFileAssembler.exportPrimaryFile(
+                metadata: metadata,
+                pieceStore: store,
+                outputDirectory: outputDir,
+                displayTitle: displayTitle
+            )
+
+            updateReexportProgress(
+                taskId: taskId,
+                progress: 0.9,
+                downloadedBytes: target.byteLength
+            )
+            await finalizeCompletedDownload(
+                exportedURL: fileURL,
+                displayTitle: displayTitle,
+                infoHash: infoHash,
+                storageDirectory: outputDir,
+                store: store
+            )
+
+            mutateTask(taskId: taskId) { task in
+                task.state = .completed
+                task.outputPath = fileURL.path
+                task.progress = 1
+                task.downloadedBytes = target.byteLength
+                task.failureMessage = nil
+            }
+            if let task = currentTask(taskId: taskId) {
+                persist(task)
+            }
+            TorrentLog.info("[DownloadManager] re-export succeeded — \(fileURL.lastPathComponent)")
+            return true
+        } catch {
+            TorrentLog.warn("[DownloadManager] re-export failed — \(error.localizedDescription)")
+            return false
+        }
+    }
+
     private func persistSnapshot(task: DownloadTask, pieceBitmap: Data) {
         guard let infoHash = task.infoHash else { return }
+        let normalizedHash = infoHash.lowercased()
         let dir = task.storageDirectory?.path ?? downloadDirectory.path
         persistenceDelegate?.downloadManager(
             self,
             didUpdate: DownloadPersistenceSnapshot(
                 taskId: task.id,
-                infoHash: infoHash,
+                infoHash: normalizedHash,
                 tmdbId: task.tmdbId,
                 mediaKind: task.mediaKind,
                 title: task.title,
@@ -284,6 +612,9 @@ public final class DownloadManager: ObservableObject {
     }
 
     public func cancelDownload(taskId: UUID) {
+        guard let task = currentTask(taskId: taskId) else { return }
+        let infoHash = resolvedInfoHash(for: task)
+
         cancelExecution(for: taskId)
         if let engine = activeEngines[taskId] {
             engine.stop()
@@ -295,10 +626,30 @@ public final class DownloadManager: ObservableObject {
         }
         pieceManagers.removeValue(forKey: taskId)
         metadataByTask.removeValue(forKey: taskId)
-        if let hash = tasks.first(where: { $0.id == taskId })?.infoHash {
-            persistenceDelegate?.downloadManager(self, didRemove: hash)
+
+        if let infoHash {
+            DownloadStorage.purgeDownloadPayload(
+                infoHash: infoHash,
+                storageDirectory: task.storageDirectory
+            )
+            DownloadStorage.markDownloadCancelled(infoHash: infoHash)
+            persistenceDelegate?.downloadManager(self, didRemove: infoHash)
+        } else if let directory = task.storageDirectory {
+            try? FileManager.default.removeItem(at: directory)
         }
+
         tasks.removeAll(where: { $0.id == taskId })
+        notifyTasksUpdated()
+    }
+
+    private func resolvedInfoHash(for task: DownloadTask) -> String? {
+        if let hash = task.infoHash?.lowercased(), !hash.isEmpty {
+            return hash
+        }
+        if let directory = task.storageDirectory {
+            return DownloadStorage.infoHashFromStorageDirectory(directory)
+        }
+        return nil
     }
 
     public func removeCompleted(taskId: UUID) {
@@ -307,6 +658,7 @@ public final class DownloadManager: ObservableObject {
                 persistenceDelegate?.downloadManager(self, didRemove: hash)
             }
             tasks.removeAll(where: { $0.id == taskId })
+            notifyTasksUpdated()
         }
     }
 
@@ -316,7 +668,7 @@ public final class DownloadManager: ObservableObject {
         var task = tasks[index]
         guard isRunnableState(task.state) else { return }
 
-        mutateTask(at: index) { task in
+        mutateTask(taskId: taskId) { task in
             task.state = .downloading
             task.failureMessage = nil
         }
@@ -337,7 +689,7 @@ public final class DownloadManager: ObservableObject {
         }
 
         let infoHash = identity.infoHash
-        mutateTask(at: index) { $0.infoHash = infoHash }
+        mutateTask(taskId: taskId) { $0.infoHash = infoHash }
         task.infoHash = infoHash
 
         TorrentLog.info(
@@ -383,7 +735,7 @@ public final class DownloadManager: ObservableObject {
         metadataByTask[taskId] = metadata
 
         let safeTitle = task.title.replacingOccurrences(of: "/", with: "_")
-        let outputDir = downloadDirectory.appendingPathComponent(safeTitle, isDirectory: true)
+        let outputDir = resolvedOutputDirectory(for: task, safeTitle: safeTitle, resume: resume)
         do {
             try DownloadStorage.prepareDirectory(at: outputDir)
         } catch {
@@ -396,26 +748,41 @@ public final class DownloadManager: ObservableObject {
             )
             return
         }
-        mutateTask(at: index) { task in
+        let streamTarget = TorrentStreamTarget.selectPrimary(from: metadata)
+        mutateTask(taskId: taskId) { task in
             task.storageDirectory = outputDir
-            task.totalBytes = metadata.totalSize
+            task.totalBytes = streamTarget.byteLength
+        }
+        task.storageDirectory = outputDir
+
+        if let hash = task.infoHash {
+            adoptLegacyStreamIfNeeded(infoHash: hash, storageDirectory: outputDir)
         }
 
-        let storeBitmap: Data?
-        if let existingBitmap, !existingBitmap.isEmpty {
-            storeBitmap = existingBitmap
-        } else if resume, let hash = task.infoHash, let dir = task.storageDirectory,
-                  let sidecar = DownloadBitmapPersistence.loadBitmap(infoHash: hash, in: dir) {
-            storeBitmap = sidecar
-        } else if resume, let store = pieceStores[taskId] {
-            storeBitmap = await store.encodedBitmap()
-        } else {
-            storeBitmap = nil
+        let sidecarBitmap = task.infoHash.flatMap {
+            DownloadBitmapPersistence.loadBitmap(infoHash: $0, in: outputDir)
+        }
+        let storeBitmap = resolvedStoreBitmap(
+            resume: resume,
+            taskId: taskId,
+            task: task,
+            existingBitmap: existingBitmap
+        ) ?? sidecarBitmap
+        let hasResumeData = hasResumableStore(
+            infoHash: metadata.infoHash,
+            storageDirectory: outputDir,
+            bitmap: storeBitmap
+        )
+        let actuallyResume = resume || hasResumeData
+        if hasResumeData, !resume {
+            TorrentLog.info(
+                "[DownloadManager] found on-disk progress — resuming hash=\(metadata.infoHash.prefix(8))… at \(outputDir.path)"
+            )
         }
 
         do {
             let store: PieceStore
-            if resume, pieceStores[taskId] != nil, let existing = pieceStores[taskId] {
+            if actuallyResume, pieceStores[taskId] != nil, let existing = pieceStores[taskId] {
                 store = existing
             } else {
                 store = try await PieceStore(
@@ -425,22 +792,47 @@ public final class DownloadManager: ObservableObject {
                     totalSize: metadata.totalSize,
                     storageDirectory: outputDir,
                     existingBitmap: storeBitmap,
-                    recreateFile: !resume
+                    recreateFile: !actuallyResume
                 )
                 pieceStores[taskId] = store
             }
 
-            let manager: PieceManager
-            if let existing = pieceManagers[taskId] {
-                manager = existing
-            } else {
-                manager = PieceManager(
-                    pieceCount: metadata.pieceCount,
-                    pieceLength: metadata.pieceLength,
-                    totalSize: metadata.totalSize,
-                    piecesHash: metadata.pieces
+            let tailPieces = StreamTailPlanner.tailPieceIndicesForDownload(
+                target: streamTarget,
+                pieceLength: metadata.pieceLength,
+                pieceCount: metadata.pieceCount
+            )
+
+            // Always rebuild — stream-scoped piece selection must match the primary file.
+            let manager = PieceManager(
+                pieceCount: metadata.pieceCount,
+                pieceLength: metadata.pieceLength,
+                totalSize: metadata.totalSize,
+                piecesHash: metadata.pieces,
+                streamFirstPiece: streamTarget.firstPieceIndex,
+                streamLastPiece: streamTarget.lastPieceIndex,
+                streamTailPieces: tailPieces.isEmpty
+                    ? [streamTarget.lastPieceIndex]
+                    : tailPieces,
+                streamMediaByteOffset: streamTarget.byteOffset,
+                streamMediaByteLength: streamTarget.byteLength
+            )
+            pieceManagers[taskId] = manager
+
+            if actuallyResume {
+                let bitmapForSeed: Data
+                if let storeBitmap, !storeBitmap.isEmpty {
+                    bitmapForSeed = storeBitmap
+                } else {
+                    bitmapForSeed = await store.encodedBitmap()
+                }
+                await seedManagerFromResumedStore(
+                    manager: manager,
+                    store: store,
+                    metadata: metadata,
+                    taskId: taskId,
+                    bitmapData: bitmapForSeed
                 )
-                pieceManagers[taskId] = manager
             }
 
             let engine = TorrentEngine(
@@ -466,12 +858,22 @@ public final class DownloadManager: ObservableObject {
             activeEngines[taskId] = engine
             await engine.start()
 
+            // Resume or reconnect may already have every media piece on disk.
+            await handleProgress(
+                taskId: taskId,
+                metadata: metadata,
+                outputDir: outputDir,
+                progress: await manager.progress(),
+                speed: 0,
+                peers: engine.livePeerCount()
+            )
+
             guard shouldContinueExecution(for: taskId) else {
                 engine.stop()
                 activeEngines.removeValue(forKey: taskId)
                 return
             }
-            persist(tasks[index])
+            await persistCheckpoint(taskId: taskId)
         } catch {
             let message = error.localizedDescription
             markFailed(
@@ -484,21 +886,168 @@ public final class DownloadManager: ObservableObject {
         }
     }
 
+    private func resolvedOutputDirectory(for task: DownloadTask, safeTitle: String, resume: Bool) -> URL {
+        if resume, let stored = task.storageDirectory {
+            return stored
+        }
+        if let stored = task.storageDirectory {
+            if FileManager.default.fileExists(atPath: stored.path) {
+                return stored
+            }
+            if let hash = task.infoHash,
+               DownloadBitmapPersistence.loadBitmap(infoHash: hash, in: stored) != nil {
+                return stored
+            }
+        }
+        return downloadDirectory.appendingPathComponent(safeTitle, isDirectory: true)
+    }
+
+    private func resolvedStoreBitmap(
+        resume: Bool,
+        taskId: UUID,
+        task: DownloadTask,
+        existingBitmap: Data?
+    ) -> Data? {
+        if let existingBitmap, !existingBitmap.isEmpty {
+            return existingBitmap
+        }
+        if let hash = task.infoHash {
+            if let dir = task.storageDirectory,
+               let sidecar = DownloadBitmapPersistence.loadBitmap(infoHash: hash, in: dir) {
+                return sidecar
+            }
+            if let artifact = DownloadDiskRecovery.find(
+                infoHash: hash,
+                under: downloadDirectory,
+                preferredTitle: task.title
+            ) {
+                return artifact.bitmap
+            }
+        }
+        if resume, pieceStores[taskId] != nil {
+            return nil
+        }
+        return nil
+    }
+
+    private func hasResumableStore(
+        infoHash: String,
+        storageDirectory: URL,
+        bitmap: Data?
+    ) -> Bool {
+        let stream = storageDirectory.appendingPathComponent("moviebox_\(infoHash.lowercased()).stream")
+        guard FileManager.default.fileExists(atPath: stream.path) else { return false }
+        let allocated = DownloadStorage.fileAllocatedBytes(at: stream)
+        if allocated > 1_000_000 { return true }
+        return bitmap.map { !$0.isEmpty } ?? false
+    }
+
+    private func adoptLegacyStreamIfNeeded(infoHash: String, storageDirectory: URL) {
+        guard let legacyDir = DownloadStorage.legacyContainerStreamsDirectory() else { return }
+        let hash = infoHash.lowercased()
+        let destination = storageDirectory.appendingPathComponent("moviebox_\(hash).stream")
+        let legacy = legacyDir.appendingPathComponent("moviebox_\(hash).stream")
+        guard FileManager.default.fileExists(atPath: legacy.path) else { return }
+
+        let legacyBytes = DownloadStorage.fileAllocatedBytes(at: legacy)
+        let currentBytes = DownloadStorage.fileAllocatedBytes(at: destination)
+        guard legacyBytes > currentBytes + 10 * 1024 * 1024 else { return }
+
+        TorrentLog.info(
+            "[DownloadManager] adopting legacy stream — \(legacyBytes) bytes from container cache"
+        )
+        try? FileManager.default.createDirectory(at: storageDirectory, withIntermediateDirectories: true)
+        try? FileManager.default.removeItem(at: destination)
+        try? FileManager.default.copyItem(at: legacy, to: destination)
+
+        let legacyBitmap = DownloadBitmapPersistence.fileURL(infoHash: hash, in: legacyDir)
+        let destinationBitmap = DownloadBitmapPersistence.fileURL(infoHash: hash, in: storageDirectory)
+        if FileManager.default.fileExists(atPath: legacyBitmap.path) {
+            try? FileManager.default.removeItem(at: destinationBitmap)
+            try? FileManager.default.copyItem(at: legacyBitmap, to: destinationBitmap)
+        }
+    }
+
+    private func seedManagerFromResumedStore(
+        manager: PieceManager,
+        store: PieceStore,
+        metadata: TorrentMetadata,
+        taskId: UUID,
+        bitmapData: Data
+    ) async {
+        guard !bitmapData.isEmpty else { return }
+
+        let target = TorrentStreamTarget.selectPrimary(from: metadata)
+        let flags = PieceStore.decodeBitmap(bitmapData, pieceCount: metadata.pieceCount)
+        var downloaded = Set<UInt32>()
+        var verifiedInMediaSpan = 0
+        for (idx, complete) in flags.enumerated() where complete {
+            guard target.requiredPieceRange.contains(idx) else { continue }
+            guard await store.hasPiece(idx) else { continue }
+            downloaded.insert(UInt32(idx))
+            verifiedInMediaSpan += 1
+        }
+        guard !downloaded.isEmpty else { return }
+
+        await manager.setInitialDownloadedPieces(downloaded)
+        let span = max(1, target.requiredPieceCount)
+        let fraction = Double(verifiedInMediaSpan) / Double(span)
+        mutateTask(taskId: taskId) { task in
+            task.progress = max(task.progress, fraction)
+            task.totalBytes = metadata.totalSize
+            task.downloadedBytes = Int64(
+                fraction * Double(target.byteLength)
+            )
+        }
+        TorrentLog.info(
+            "[DownloadManager] resumed \(verifiedInMediaSpan)/\(span) media pieces (\(Int(fraction * 100))%)"
+        )
+    }
+
+    private func persistCheckpoint(taskId: UUID) async {
+        guard let task = currentTask(taskId: taskId) else { return }
+        guard let infoHash = task.infoHash, let dir = task.storageDirectory else {
+            persistSnapshot(task: task, pieceBitmap: Data())
+            return
+        }
+        guard let store = pieceStores[taskId] else {
+            persistSnapshot(task: task, pieceBitmap: Data())
+            return
+        }
+        let encoded = await store.encodedBitmap()
+        DownloadBitmapPersistence.save(encoded, infoHash: infoHash, in: dir)
+        persistSnapshot(task: task, pieceBitmap: encoded)
+    }
+
     private func markFailed(taskId: UUID, message: String, log: String) {
         TorrentLog.warn(log)
-        guard let index = tasks.firstIndex(where: { $0.id == taskId }) else { return }
-        mutateTask(at: index) { task in
+        guard currentTask(taskId: taskId) != nil else { return }
+        mutateTask(taskId: taskId) { task in
             task.state = .failed
             task.failureMessage = message
         }
-        persist(tasks[index])
+        if let task = currentTask(taskId: taskId) {
+            persist(task)
+        }
+    }
+
+    private func currentTask(taskId: UUID) -> DownloadTask? {
+        tasks.first(where: { $0.id == taskId })
     }
 
     /// Reassigns the task so `@Published` emits (in-place struct mutation does not).
-    private func mutateTask(at index: Int, _ body: (inout DownloadTask) -> Void) {
+    @discardableResult
+    private func mutateTask(taskId: UUID, _ body: (inout DownloadTask) -> Void) -> Bool {
+        guard let index = tasks.firstIndex(where: { $0.id == taskId }) else { return false }
         var task = tasks[index]
         body(&task)
         tasks[index] = task
+        notifyTasksUpdated()
+        return true
+    }
+
+    private func notifyTasksUpdated() {
+        onTasksUpdated?()
     }
 
     private func handleProgress(
@@ -509,80 +1058,178 @@ public final class DownloadManager: ObservableObject {
         speed: Double,
         peers: Int
     ) async {
-        guard let index = tasks.firstIndex(where: { $0.id == taskId }) else { return }
-        guard tasks[index].state == .downloading else { return }
+        guard currentTask(taskId: taskId)?.state == .downloading else { return }
 
-        var didComplete = false
-        mutateTask(at: index) { task in
-            task.progress = progress
+        let target = TorrentStreamTarget.selectPrimary(from: metadata)
+        let store = pieceStores[taskId]
+        let mediaProgress: Double
+        if let store {
+            mediaProgress = await store.progress(in: target.requiredPieceRange)
+        } else {
+            mediaProgress = progress
+        }
+
+        var shouldAssemble = false
+        var mediaReadyForAssembly = false
+        if mediaProgress >= 1.0, let store {
+            mediaReadyForAssembly = await isMediaReadyForAssembly(
+                store: store,
+                target: target,
+                metadata: metadata
+            )
+            if !mediaReadyForAssembly {
+                await reconcileInflatedResumeProgress(
+                    store: store,
+                    manager: pieceManagers[taskId],
+                    target: target,
+                    metadata: metadata
+                )
+            } else {
+                shouldAssemble = true
+            }
+        }
+
+        let effectiveMediaProgress: Double
+        if let store, mediaProgress >= 1.0, !mediaReadyForAssembly {
+            effectiveMediaProgress = await store.progress(in: target.requiredPieceRange)
+        } else {
+            effectiveMediaProgress = mediaProgress
+        }
+
+        guard currentTask(taskId: taskId)?.state == .downloading else { return }
+
+        mutateTask(taskId: taskId) { task in
+            task.progress = max(task.progress, effectiveMediaProgress)
             task.speed = speed
             task.peerCount = peers
-            task.downloadedBytes = Int64(progress * Double(metadata.totalSize))
-            task.totalBytes = metadata.totalSize
+            let byteProgress = Int64(effectiveMediaProgress * Double(target.byteLength))
+            task.downloadedBytes = max(task.downloadedBytes, byteProgress)
+            task.totalBytes = target.byteLength
+        }
 
-            if progress >= 1.0, task.state != .completed {
-                task.state = .completed
-                didComplete = true
+        if !shouldAssemble, effectiveMediaProgress > 0.98, effectiveMediaProgress < 1.0, let store {
+            let missing = await store.missingPieceIndices(in: target.requiredPieceRange)
+            if !missing.isEmpty {
+                TorrentLog.info(
+                    "[DownloadManager] awaiting \(missing.count) media piece(s): \(missing.prefix(8).map(String.init).joined(separator: ","))\(missing.count > 8 ? "…" : "")"
+                )
             }
         }
 
-        if didComplete {
-            if let store = pieceStores[taskId] {
-                do {
-                    let storePath = store.storageURL
-                    let fileURL = try TorrentFileAssembler.exportPrimaryFile(
-                        metadata: metadata,
-                        pieceStorePath: storePath,
-                        outputDirectory: outputDir
+        if shouldAssemble, let store = pieceStores[taskId] {
+            do {
+                await store.syncToDisk()
+                TorrentLog.info(
+                    "[DownloadManager] assembling primary file — \(target.file.relativePath)"
+                )
+                let displayTitle = currentTask(taskId: taskId)?.title ?? ""
+                let fileURL = try await TorrentFileAssembler.exportPrimaryFile(
+                    metadata: metadata,
+                    pieceStore: store,
+                    outputDirectory: outputDir,
+                    displayTitle: displayTitle
+                )
+                if let hash = tasks.first(where: { $0.id == taskId })?.infoHash {
+                    await finalizeCompletedDownload(
+                        exportedURL: fileURL,
+                        displayTitle: displayTitle,
+                        infoHash: hash,
+                        storageDirectory: outputDir,
+                        store: store
                     )
-                    mutateTask(at: index) { $0.outputPath = fileURL.path }
-                    if let hash = tasks[index].infoHash {
-                        DownloadBitmapPersistence.remove(
-                            infoHash: hash,
-                            in: outputDir
-                        )
-                    }
-                    await store.cleanup()
-                    pieceStores.removeValue(forKey: taskId)
-                } catch {
-                    let message = (error as? LocalizedError)?.errorDescription
-                        ?? error.localizedDescription
-                    mutateTask(at: index) { task in
-                        task.state = .failed
-                        task.failureMessage = message.isEmpty
-                            ? "Download finished but the file could not be assembled."
-                            : message
-                    }
-                    TorrentLog.warn("[DownloadManager] assembly failed — \(message)")
+                } else {
+                    await store.closeHandles()
+                }
+                pieceStores.removeValue(forKey: taskId)
+                mutateTask(taskId: taskId) { task in
+                    task.state = .completed
+                    task.outputPath = fileURL.path
+                    task.progress = 1
+                    task.downloadedBytes = target.byteLength
+                }
+                activeEngines[taskId]?.stop()
+                activeEngines.removeValue(forKey: taskId)
+                pieceManagers.removeValue(forKey: taskId)
+                metadataByTask.removeValue(forKey: taskId)
+            } catch {
+                let message = (error as? LocalizedError)?.errorDescription
+                    ?? error.localizedDescription
+                TorrentLog.warn("[DownloadManager] assembly failed — \(message)")
+                if let path = currentTask(taskId: taskId)?.outputPath {
+                    try? FileManager.default.removeItem(atPath: path)
+                }
+                await reconcileInflatedResumeProgress(
+                    store: store,
+                    manager: pieceManagers[taskId],
+                    target: target,
+                    metadata: metadata
+                )
+                let resumedProgress = await store.progress(in: target.requiredPieceRange)
+                mutateTask(taskId: taskId) { task in
+                    task.state = .downloading
+                    task.outputPath = nil
+                    task.failureMessage = nil
+                    task.progress = resumedProgress
+                    task.downloadedBytes = Int64(resumedProgress * Double(target.byteLength))
                 }
             }
-            activeEngines[taskId]?.stop()
-            activeEngines.removeValue(forKey: taskId)
-            pieceManagers.removeValue(forKey: taskId)
-            metadataByTask.removeValue(forKey: taskId)
         }
 
-        persist(tasks[index])
+        await persistCheckpoint(taskId: taskId)
     }
 
     private func persist(_ task: DownloadTask) {
-        guard let infoHash = task.infoHash else { return }
-        let dir = task.storageDirectory?.path ?? downloadDirectory.path
-        let bitmap: Data
-        if let store = pieceStores[task.id] {
-            let taskId = task.id
-            Task { [weak self] in
-                let encoded = await store.encodedBitmap()
-                await MainActor.run { [weak self] in
-                    guard let self, self.tasks.contains(where: { $0.id == taskId }) else { return }
-                    if let storageDir = task.storageDirectory {
-                        DownloadBitmapPersistence.save(encoded, infoHash: infoHash, in: storageDir)
-                    }
-                    self.persistSnapshot(task: task, pieceBitmap: encoded)
-                }
-            }
+        guard task.infoHash != nil else { return }
+        if pieceStores[task.id] != nil {
+            Task { await self.persistCheckpoint(taskId: task.id) }
         } else {
             persistSnapshot(task: task, pieceBitmap: Data())
         }
+    }
+
+    private func isMediaReadyForAssembly(
+        store: PieceStore,
+        target: TorrentStreamTarget,
+        metadata: TorrentMetadata
+    ) async -> Bool {
+        let missing = await store.missingPieceIndices(in: target.requiredPieceRange)
+        guard missing.isEmpty else { return false }
+
+        let allocated = DownloadStorage.fileAllocatedBytes(at: store.storageURL)
+        let minimum = DownloadStorage.minimumOnDiskBytesForPieceSpan(
+            firstPieceIndex: target.firstPieceIndex,
+            lastPieceIndex: target.lastPieceIndex,
+            pieceSize: metadata.pieceLength,
+            totalSize: metadata.totalSize
+        )
+        guard allocated >= minimum else {
+            TorrentLog.warn(
+                "[DownloadManager] media bitmap complete but stream has only \(allocated) of \(minimum) required bytes on disk"
+            )
+            return false
+        }
+        return true
+    }
+
+    private func reconcileInflatedResumeProgress(
+        store: PieceStore,
+        manager: PieceManager?,
+        target: TorrentStreamTarget,
+        metadata: TorrentMetadata
+    ) async {
+        let allocated = DownloadStorage.fileAllocatedBytes(at: store.storageURL)
+        let minimum = DownloadStorage.minimumOnDiskBytesForPieceSpan(
+            firstPieceIndex: target.firstPieceIndex,
+            lastPieceIndex: target.lastPieceIndex,
+            pieceSize: metadata.pieceLength,
+            totalSize: metadata.totalSize
+        )
+        guard allocated < minimum else { return }
+
+        TorrentLog.warn(
+            "[DownloadManager] clearing inflated resume bitmap — re-downloading \(target.requiredPieceCount) media piece(s)"
+        )
+        await store.clearVerifiedFlags(in: target.requiredPieceRange)
+        await manager?.clearDownloadedPieces(in: target.requiredPieceRange)
     }
 }

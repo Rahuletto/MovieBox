@@ -45,11 +45,19 @@ public enum AppBootstrap {
         MovieBoxFileLogger.isDebugLoggingEnabled = first.debugLogging
         PlaybackLog.isEnabled = first.debugLogging
         LogStore.shared.log("AppBootstrap: Loaded AppSettings.")
-        let moviesLegacy = first.defaultDownloadPath == "~/Movies/MovieBox"
-            || first.defaultDownloadPath.hasSuffix("/Movies/MovieBox")
-        if first.defaultDownloadPath.isEmpty || moviesLegacy {
+        if first.defaultDownloadPath.isEmpty {
             first.defaultDownloadPath = DownloadStorage.defaultRootDirectory().path
-            modelContext.saveOrReport(errorCenter, context: "Download path migration (sandbox)")
+            modelContext.saveOrReport(errorCenter, context: "Default download path")
+            return
+        }
+
+        let containerMovies = first.defaultDownloadPath.contains("/Containers/")
+            && first.defaultDownloadPath.contains("/Movies/MovieBox")
+        let legacyDownloads = first.defaultDownloadPath == DownloadStorage.legacySandboxRootDirectory().path
+            || first.defaultDownloadPath.hasSuffix("/Downloads/MovieBox")
+        if containerMovies || legacyDownloads {
+            first.defaultDownloadPath = DownloadStorage.defaultRootDirectory().path
+            modelContext.saveOrReport(errorCenter, context: "Download path migration (Movies)")
         }
     }
 }

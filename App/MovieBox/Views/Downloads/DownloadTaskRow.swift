@@ -31,6 +31,7 @@ enum DownloadRowModel: Identifiable {
 
 /// Apple TV–style landscape shelf card — same footprint as `FeaturedLandscapeRow`.
 struct DownloadTaskRow: View {
+    @Environment(AppServices.self) private var appServices
     @Environment(PlayerState.self) private var playerState
     @Environment(\.modelContext) private var modelContext
     @Query private var movieRecords: [MovieRecord]
@@ -172,17 +173,32 @@ struct DownloadTaskRow: View {
     private var topTrailingControls: some View {
         if let task = resolvedTask {
             HStack(spacing: 8) {
-                switch task.state {
-                case .downloading, .queued:
-                    shelfIconGlassButton(systemImage: "pause.fill", help: "Pause") {
-                        downloadManager.pauseDownload(taskId: task.id)
+                if canRevealInFinder(task) {
+                    shelfIconGlassButton(
+                        systemImage: showInFinderSystemImage,
+                        help: "Show in Finder"
+                    ) {
+                        revealDownloadInFinder(task)
                     }
-                    shelfIconGlassButton(systemImage: "xmark", help: "Cancel download") {
-                        downloadManager.cancelDownload(taskId: task.id)
+                }
+
+                switch task.state {
+                case .completed:
+                    EmptyView()
+                case .downloading, .queued:
+                    shelfGroupedGlassControls {
+                        shelfGroupedIconButton(systemImage: "pause.fill", help: "Pause") {
+                            downloadManager.pauseDownload(taskId: task.id)
+                        }
+                        shelfGroupedIconButton(systemImage: "xmark", help: "Cancel download") {
+                            downloadManager.cancelDownload(taskId: task.id)
+                        }
                     }
                 case .paused:
-                    shelfIconGlassButton(systemImage: "xmark", help: "Cancel download") {
-                        downloadManager.cancelDownload(taskId: task.id)
+                    shelfGroupedGlassControls {
+                        shelfGroupedIconButton(systemImage: "xmark", help: "Cancel download") {
+                            downloadManager.cancelDownload(taskId: task.id)
+                        }
                     }
                 default:
                     EmptyView()
@@ -215,6 +231,64 @@ struct DownloadTaskRow: View {
         .buttonStyle(.plain)
         .adaptiveGlass(shape: .roundedRect(cornerRadius: 16), strength: .regular)
         .help(help)
+    }
+
+    private func shelfGroupedGlassControls<Content: View>(
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        HStack(spacing: 2) {
+            content()
+        }
+        .padding(4)
+        .adaptiveGlass(shape: .roundedRect(cornerRadius: 16), strength: .regular)
+    }
+
+    private func shelfGroupedIconButton(
+        systemImage: String,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 32, height: 32)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+    private var showInFinderSystemImage: String {
+        NSImage(systemSymbolName: "finder", accessibilityDescription: nil) != nil
+            ? "finder"
+            : "folder"
+    }
+
+    private func canRevealInFinder(_ task: DownloadManager.DownloadTask) -> Bool {
+        if let path = task.outputPath, !path.isEmpty,
+           FileManager.default.fileExists(atPath: path) {
+            return true
+        }
+        if let dir = task.storageDirectory,
+           FileManager.default.fileExists(atPath: dir.path) {
+            return true
+        }
+        return false
+    }
+
+    private func revealDownloadInFinder(_ task: DownloadManager.DownloadTask) {
+        if let path = task.outputPath, !path.isEmpty {
+            let fileURL = URL(fileURLWithPath: path)
+            NSWorkspace.shared.selectFile(
+                fileURL.path,
+                inFileViewerRootedAtPath: fileURL.deletingLastPathComponent().path
+            )
+            return
+        }
+        if let dir = task.storageDirectory {
+            NSWorkspace.shared.open(dir)
+        }
     }
 
     // MARK: - Edge progress (poster-style, like `MoviePosterCard`)
@@ -374,7 +448,6 @@ struct DownloadTaskRow: View {
     private var actionRow: some View {
         HStack(spacing: 12) {
             primaryAction
-            secondaryActions
             Spacer(minLength: 0)
         }
     }
@@ -401,14 +474,25 @@ struct DownloadTaskRow: View {
         if let task = resolvedTask {
             switch task.state {
             case .completed:
-                DownloadPlayPill(
-                    title: completedWatchButtonTitle,
-                    systemImage: "play.fill",
-                    showsProgress: false,
-                    progress: 0,
-                    isEnabled: true,
-                    action: { watchCompletedTask(task) }
-                )
+                if completedFileIsPlayable(task) {
+                    DownloadPlayPill(
+                        title: completedWatchButtonTitle,
+                        systemImage: "play.fill",
+                        showsProgress: false,
+                        progress: 0,
+                        isEnabled: true,
+                        action: { watchCompletedTask(task) }
+                    )
+                } else if !isReexporting {
+                    DownloadPlayPill(
+                        title: "Fix export",
+                        systemImage: "arrow.clockwise",
+                        showsProgress: false,
+                        progress: 0,
+                        isEnabled: true,
+                        action: { downloadManager.repairCompletedDownload(taskId: task.id) }
+                    )
+                }
             case .downloading:
                 DownloadPlayPill(
                     title: primaryPillTitle,
@@ -449,42 +533,6 @@ struct DownloadTaskRow: View {
         }
     }
 
-    @ViewBuilder
-    private var secondaryActions: some View {
-        if case .hdrTest = model {
-            EmptyView()
-        } else if let task = resolvedTask, task.state == .completed {
-            completedTaskOverflowMenu(task)
-        }
-    }
-
-    @ViewBuilder
-    private func completedTaskOverflowMenu(_ task: DownloadManager.DownloadTask) -> some View {
-        Menu {
-            if let path = task.outputPath {
-                Button {
-                    let fileURL = URL(fileURLWithPath: path)
-                    NSWorkspace.shared.selectFile(
-                        fileURL.path,
-                        inFileViewerRootedAtPath: fileURL.deletingLastPathComponent().path
-                    )
-                } label: {
-                    Label("Show in Finder", systemImage: "folder")
-                }
-            }
-            Button("Remove", role: .destructive) {
-                downloadManager.removeCompleted(taskId: task.id)
-            }
-        } label: {
-            Image(systemName: "ellipsis.circle")
-                .font(.system(size: 22))
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(.white.opacity(0.85))
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-    }
-
     // MARK: - Model data
 
     private var title: String {
@@ -500,6 +548,11 @@ struct DownloadTaskRow: View {
         return title
     }
 
+    private var isReexporting: Bool {
+        guard let task = resolvedTask else { return false }
+        return downloadManager.isReexporting(taskId: task.id)
+    }
+
     private var primaryPillTitle: String {
         guard let task = resolvedTask else { return "Downloading" }
         switch task.state {
@@ -508,6 +561,11 @@ struct DownloadTaskRow: View {
         case .paused:
             return task.progress > 0 ? "Paused · \(Int(task.progress * 100))%" : "Paused"
         case .downloading:
+            if isReexporting {
+                return downloadProgressValue > 0
+                    ? "Fixing export · \(Int(downloadProgressValue * 100))%"
+                    : "Fixing export…"
+            }
             if downloadProgressValue > 0 {
                 return "Downloading · \(Int(downloadProgressValue * 100))%"
             }
@@ -524,6 +582,11 @@ struct DownloadTaskRow: View {
         }
         switch task.state {
         case .downloading:
+            if isReexporting {
+                return downloadProgressValue > 0
+                    ? "Fixing export · \(Int(downloadProgressValue * 100))%"
+                    : "Fixing export"
+            }
             if let speed = downloadSpeedCaption {
                 return downloadProgressValue > 0
                     ? "\(Int(downloadProgressValue * 100))% · \(speed)"
@@ -539,13 +602,23 @@ struct DownloadTaskRow: View {
         case .failed:
             return "Failed"
         case .completed:
+            if !completedFileIsPlayable(task) {
+                return "File incomplete"
+            }
             return showsDownloadedBadge ? "Ready" : nil
         }
     }
 
     private var showsTopTrailingControls: Bool {
         guard let task = resolvedTask else { return false }
-        return task.state == .downloading || task.state == .queued || task.state == .paused
+        switch task.state {
+        case .downloading, .queued, .paused:
+            return true
+        case .completed:
+            return canRevealInFinder(task)
+        default:
+            return false
+        }
     }
 
     private var downloadSpeedCaption: String? {
@@ -570,7 +643,9 @@ struct DownloadTaskRow: View {
                 parts.append(formattedTotalSize(task.totalBytes))
             }
 
-            if task.state == .downloading, task.peerCount > 0 {
+            if task.state == .downloading, isReexporting {
+                parts.append("Rebuilding video file from cached stream…")
+            } else if task.state == .downloading, task.peerCount > 0 {
                 parts.append("\(task.peerCount) peers")
             } else if task.state == .downloading, task.progress == 0 {
                 parts.append("Connecting to peers…")
@@ -578,6 +653,8 @@ struct DownloadTaskRow: View {
                 parts.append("Preparing download…")
             } else if task.state == .paused {
                 parts.append(task.progress > 0 ? "Paused" : "Waiting to resume")
+            } else if task.state == .completed, !completedFileIsPlayable(task) {
+                parts.append("Bad export — tap Fix export to rebuild from cached data")
             }
 
             return parts.isEmpty ? nil : parts.joined(separator: " · ")
@@ -723,13 +800,57 @@ struct DownloadTaskRow: View {
                 existing: movieRecords
             )
         }
-        playerState.load(
-            url: URL(fileURLWithPath: path),
-            title: task.title,
+
+        let torrent = torrentResult(for: task)
+        appServices.playbackCoordinator.playLocalFile(
+            localFilePath: path,
+            torrent: torrent,
+            allTorrents: [torrent],
+            playerState: playerState,
             movieId: task.tmdbId,
+            subtitleURL: nil,
             subtitleAppearance: playback.appearance,
             subtitleFontSize: playback.fontSize,
-            resumePosition: WatchProgressStore.resumePosition(for: task.tmdbId, in: movieRecords)
+            displayTitle: displayTitle,
+            resumePosition: WatchProgressStore.resumePosition(for: task.tmdbId, in: movieRecords),
+            posterURL: effectiveArtworkURL
+        )
+    }
+
+    private func completedFileIsPlayable(_ task: DownloadManager.DownloadTask) -> Bool {
+        guard let path = task.outputPath,
+              FileManager.default.fileExists(atPath: path)
+        else { return false }
+        let url = URL(fileURLWithPath: path)
+        guard task.totalBytes > 0 else { return true }
+        return (try? TorrentFileAssembler.validateExportedMedia(
+            at: url,
+            expectedLength: task.totalBytes
+        )) != nil
+    }
+
+    private func torrentResult(for task: DownloadManager.DownloadTask) -> TorrentResult {
+        let lowered = task.title.lowercased()
+        let codec: VideoCodec = lowered.contains("x265") || lowered.contains("hevc") ? .h265 : .h264
+        let audio: AudioFormat? = lowered.contains("atmos") ? .dolbyAtmos : .aac
+        let source: VideoSource = lowered.contains("web-dl") ? .webdl : .webrip
+        let magnet = task.magnetURI.isEmpty
+            ? "magnet:?xt=urn:btih:\(task.infoHash ?? task.id.uuidString)"
+            : task.magnetURI
+
+        return TorrentResult(
+            title: task.title,
+            magnetURI: magnet,
+            quality: VideoQuality(rawValue: task.quality) ?? .p1080,
+            hdrType: task.hdrType.flatMap { HDRType(rawValue: $0) },
+            codec: codec,
+            audioFormat: audio,
+            source: source,
+            sizeBytes: max(task.totalBytes, 0),
+            seeders: 0,
+            leechers: 0,
+            trackerSource: lowered.contains("yts") ? .yts : .native(site: "MovieBox"),
+            infoHash: task.infoHash
         )
     }
 }

@@ -2,6 +2,7 @@ import AppKit
 import CoreMetadata
 import CorePlayer
 import CoreStorage
+import CoreStreaming
 import MovieBoxCore
 import SwiftData
 import SwiftUI
@@ -30,6 +31,9 @@ struct MovieBoxApp: App {
 
     private func wireAppDelegate() {
         appDelegate.appServices = appServices
+        appServices.downloadManager.onTasksUpdated = { [appServices] in
+            DockDownloadPresenter.update(tasks: appServices.downloadManager.tasks)
+        }
     }
 
     var body: some Scene {

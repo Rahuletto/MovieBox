@@ -43,6 +43,15 @@ public struct TorrentStreamTarget: Sendable {
         return contentType.contains("mp4") || contentType.contains("quicktime")
     }
 
+    /// Inclusive piece indices that must be verified before a download can be assembled.
+    public var requiredPieceRange: ClosedRange<Int> {
+        firstPieceIndex...lastPieceIndex
+    }
+
+    public var requiredPieceCount: Int {
+        lastPieceIndex - firstPieceIndex + 1
+    }
+
     public static func selectPrimary(from metadata: TorrentMetadata) -> TorrentStreamTarget {
         let videoExtensions: Set<String> = ["mkv", "mp4", "m4v", "avi", "mov", "webm", "ts", "m2ts"]
 

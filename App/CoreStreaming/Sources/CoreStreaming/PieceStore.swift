@@ -44,7 +44,16 @@ public actor PieceStore {
         self.streamMediaByteOffset = streamMediaByteOffset
         let resolvedTotalSize = totalSize ?? Int64(pieceCount) * pieceSize
         self.totalSize = resolvedTotalSize
-        self.storageURL = storageDirectory.appendingPathComponent("moviebox_\(infoHash).stream")
+        let canonicalStream = storageDirectory.appendingPathComponent(
+            "moviebox_\(infoHash.lowercased()).stream"
+        )
+        let legacyStream = storageDirectory.appendingPathComponent("moviebox_\(infoHash).stream")
+        if !FileManager.default.fileExists(atPath: canonicalStream.path),
+           FileManager.default.fileExists(atPath: legacyStream.path),
+           legacyStream != canonicalStream {
+            try? FileManager.default.moveItem(at: legacyStream, to: canonicalStream)
+        }
+        self.storageURL = canonicalStream
 
         if let existingBitmap, !existingBitmap.isEmpty {
             self.bitmap = Self.decodeBitmap(existingBitmap, pieceCount: pieceCount)
@@ -55,7 +64,16 @@ public actor PieceStore {
         try FileManager.default.createDirectory(at: storageDirectory, withIntermediateDirectories: true)
 
         let fileExists = FileManager.default.fileExists(atPath: storageURL.path)
-        if recreateFile || !fileExists {
+        let allocatedBytes = fileExists ? DownloadStorage.fileAllocatedBytes(at: storageURL) : 0
+        let shouldRecreate: Bool
+        if !fileExists {
+            shouldRecreate = true
+        } else if recreateFile {
+            shouldRecreate = allocatedBytes < pieceSize
+        } else {
+            shouldRecreate = false
+        }
+        if shouldRecreate {
             if fileExists {
                 try FileManager.default.removeItem(at: storageURL)
             }
@@ -63,6 +81,10 @@ public actor PieceStore {
             let handle = try FileHandle(forWritingTo: storageURL)
             try handle.truncate(atOffset: UInt64(resolvedTotalSize))
             try handle.close()
+        } else if fileExists, allocatedBytes > pieceSize {
+            TorrentLog.info(
+                "[PieceStore] keeping existing stream — \(allocatedBytes) bytes on disk at \(storageURL.lastPathComponent)"
+            )
         }
 
         self.writeHandle = try FileHandle(forWritingTo: storageURL)
@@ -218,10 +240,38 @@ public actor PieceStore {
         return bitmap[index]
     }
 
+    public func missingPieceIndices(in range: ClosedRange<Int>) -> [Int] {
+        range.filter { !hasPiece($0) }
+    }
+
+    /// Clears resume bitmap flags so the engine re-downloads pieces that were marked done without data.
+    public func clearVerifiedFlags(in range: ClosedRange<Int>) {
+        for index in range where index >= 0 && index < bitmap.count {
+            bitmap[index] = false
+        }
+        recomputeStreamHeadContiguousEnd()
+    }
+
     public func progress() -> Double {
         guard pieceCount > 0 else { return 0 }
         let completed = bitmap.filter { $0 }.count
         return Double(completed) / Double(pieceCount)
+    }
+
+    /// Verified-piece fraction for the primary media span (excludes sample/NFO pieces).
+    public func progress(in range: ClosedRange<Int>) -> Double {
+        let span = range.upperBound - range.lowerBound + 1
+        guard span > 0 else { return 0 }
+        var completed = 0
+        for index in range where hasPiece(index) {
+            completed += 1
+        }
+        return Double(completed) / Double(span)
+    }
+
+    /// Ensures cached blocks are on disk before assembly or external reads.
+    public func syncToDisk() {
+        try? flushCache()
     }
 
     public func contiguousPiecesFromStart() -> Int {
