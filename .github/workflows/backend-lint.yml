@@ -1,0 +1,23 @@
+name: Backend lint
+
+on:
+  push:
+    paths:
+      - 'Backend/**'
+      - '.github/workflows/backend-lint.yml'
+  pull_request:
+    paths:
+      - 'Backend/**'
+      - '.github/workflows/backend-lint.yml'
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - run: bun run lint:strict

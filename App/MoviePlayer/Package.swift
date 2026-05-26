@@ -16,8 +16,11 @@ let package = Package(
     targets: [
         .target(
             name: "MoviePlayerUI",
-            dependencies: [],
-            resources: [.process("Resources")]
+            dependencies: ["MoviePlayerEngine"],
+            resources: [.process("Resources")],
+            swiftSettings: [
+                .swiftLanguageMode(.v5),
+            ]
         ),
         .target(
             name: "MoviePlayerEngine",

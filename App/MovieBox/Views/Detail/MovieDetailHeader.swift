@@ -5,7 +5,7 @@ import DesignSystem
 import SwiftData
 import SwiftUI
 
-struct DetailHeroHeader: View {
+struct MovieDetailHeader: View {
       @Environment(\.modelContext) private var modelContext
       @Query private var storedMovies: [MovieRecord]
       @State private var showIMDbSheet = false

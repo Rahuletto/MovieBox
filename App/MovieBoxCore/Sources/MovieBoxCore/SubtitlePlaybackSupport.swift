@@ -40,6 +40,79 @@ public struct SubtitleSearchContext: Sendable {
 
 @MainActor
 public enum SubtitlePlaybackSupport {
+    /// Wires catalog search, embedded extraction, and in-player subtitle switching after playback starts.
+    public static func attachToPlayback(
+        playerState: PlayerState,
+        catalog: [SubtitleInfo],
+        searchContext: SubtitleSearchContext?,
+        selectedSubtitleID: String? = nil,
+        localMediaPath: String? = nil,
+        session: TorrentStreamSession? = nil,
+        autoSelectRemote: Bool = false
+    ) {
+        configure(
+            playerState: playerState,
+            catalog: catalog,
+            searchContext: searchContext,
+            selectedSubtitleID: selectedSubtitleID,
+            autoSelectRemote: autoSelectRemote
+        )
+
+        let preferredLanguage = searchContext?.preferredLanguage ?? "en"
+        playerState.onEmbeddedLegibleTracksDiscovered = { tracks in
+            mergeEmbeddedLegibleTracks(
+                playerState: playerState,
+                tracks: tracks,
+                preferredLanguage: preferredLanguage
+            )
+        }
+
+        if let session {
+            playerState.resolveEmbeddedMediaURL = {
+                await session.mediaFileURLForSubtitleProbe()
+            }
+        } else if let localMediaPath {
+            let fileURL = URL(fileURLWithPath: localMediaPath)
+            playerState.resolveEmbeddedMediaURL = { fileURL }
+        }
+
+        Task {
+            if let localMediaPath {
+                await attachEmbeddedSubtitles(
+                    playerState: playerState,
+                    mediaFileURL: URL(fileURLWithPath: localMediaPath),
+                    preferredLanguage: preferredLanguage,
+                    isCompleteFile: true
+                )
+            } else if let session {
+                await attachEmbeddedFromSession(
+                    playerState: playerState,
+                    session: session,
+                    preferredLanguage: preferredLanguage
+                )
+            }
+            if let context = searchContext {
+                _ = await ensurePreferredSubtitleSelected(
+                    playerState: playerState,
+                    mode: context.metadataMode
+                )
+            }
+        }
+    }
+
+    /// Applies a user-downloaded `.srt` to the active player when it matches the current title.
+    public static func applyDownloadedFile(
+        _ fileURL: URL,
+        subtitleID: String,
+        to playerState: PlayerState,
+        movieId: Int
+    ) {
+        guard playerState.isPresented, playerState.movieId == movieId else { return }
+        playerState.selectedSubtitleID = subtitleID
+        playerState.loadSubtitleStream(from: fileURL)
+        playerState.setSubtitlesEnabled(true)
+    }
+
     public static func configure(
         playerState: PlayerState,
         catalog: [SubtitleInfo],
@@ -324,24 +397,12 @@ public enum SubtitlePlaybackSupport {
                 playerState.loadSubtitleStream(from: outputURL)
                 playerState.setSubtitlesEnabled(true)
             } catch {
-                NSLog("Embedded subtitle extract failed: \(error.localizedDescription)")
-                let avTracks = await playerState.discoverEmbeddedLegibleTracks()
-                if let fallback = avTracks.first(where: { $0.index == streamIndex })
-                    ?? avTracks.first(where: { $0.language.lowercased() == option.language.lowercased() })
-                    ?? avTracks.first {
-                    playerState.selectEmbeddedLegibleTrack(at: fallback.index)
-                    playerState.setSubtitlesEnabled(true)
-                    playerState.setSubtitleLoadProgress(nil)
-                    return
-                }
-                playerState.setSubtitleLoadProgress(
-                    SubtitleLoadProgress(
-                        title: "Extraction failed",
-                        detail: error.localizedDescription
-                    )
+                await handleEmbeddedExtractFailure(
+                    error: error,
+                    playerState: playerState,
+                    streamIndex: streamIndex,
+                    option: option
                 )
-                try? await Task.sleep(for: .seconds(3))
-                playerState.setSubtitleLoadProgress(nil)
             }
             return
         }
@@ -381,6 +442,32 @@ public enum SubtitlePlaybackSupport {
             try? await Task.sleep(for: .seconds(3))
             playerState.setSubtitleLoadProgress(nil)
         }
+    }
+
+    private static func handleEmbeddedExtractFailure(
+        error: Error,
+        playerState: PlayerState,
+        streamIndex: Int,
+        option: PlayerSubtitleOption
+    ) async {
+        NSLog("Embedded subtitle extract failed: \(error.localizedDescription)")
+        let avTracks = await playerState.discoverEmbeddedLegibleTracks()
+        if let fallback = avTracks.first(where: { $0.index == streamIndex })
+            ?? avTracks.first(where: { $0.language.lowercased() == option.language.lowercased() })
+            ?? avTracks.first {
+            playerState.selectEmbeddedLegibleTrack(at: fallback.index)
+            playerState.setSubtitlesEnabled(true)
+            playerState.setSubtitleLoadProgress(nil)
+            return
+        }
+        playerState.setSubtitleLoadProgress(
+            SubtitleLoadProgress(
+                title: "Extraction failed",
+                detail: error.localizedDescription
+            )
+        )
+        try? await Task.sleep(for: .seconds(3))
+        playerState.setSubtitleLoadProgress(nil)
     }
 
     private static func subtitleFileURL(for optionID: String) -> URL {

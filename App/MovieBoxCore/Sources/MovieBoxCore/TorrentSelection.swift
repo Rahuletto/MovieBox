@@ -13,12 +13,31 @@ public enum TorrentSelection {
         }
     }
 
-    /// Continue Watching: same release as last stream when still listed; otherwise top seeded.
+    /// Hero play: completed download on disk first, then continue-watching hash, then top seeded.
     public static func torrentForHeroPlay(
         from torrents: [TorrentResult],
         lastStreamInfoHash: String?,
-        hasContinueProgress: Bool
+        hasContinueProgress: Bool,
+        hasCompletedDownload: ((TorrentResult) -> Bool)? = nil
     ) -> TorrentResult? {
+        if let hasCompletedDownload {
+            let downloaded = torrents.filter(hasCompletedDownload)
+            if !downloaded.isEmpty {
+                if hasContinueProgress,
+                   let hash = lastStreamInfoHash?.lowercased(),
+                   !hash.isEmpty,
+                   let match = downloaded.first(where: {
+                       ($0.resolvedInfoHash ?? "").lowercased() == hash
+                   }) {
+                    return match
+                }
+                return downloaded.max { lhs, rhs in
+                    if lhs.quality != rhs.quality { return lhs.quality < rhs.quality }
+                    return lhs.sizeBytes < rhs.sizeBytes
+                }
+            }
+        }
+
         if hasContinueProgress,
            let hash = lastStreamInfoHash?.lowercased(),
            !hash.isEmpty,

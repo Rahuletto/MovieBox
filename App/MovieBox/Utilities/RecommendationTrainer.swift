@@ -75,16 +75,17 @@ final class RecommendationTrainer: NSObject, ObservableObject {
         let explicitSignals = signals.filter { $0.source == .explicitRating }
         let avgRating = explicitSignals.isEmpty ? 0 : explicitSignals.map(\.rating).reduce(0, +) / Float(explicitSignals.count)
 
-        metrics = TrainingMetrics(
+        let computedMetrics = TrainingMetrics(
             totalRatings: signals.count,
             avgRating: avgRating,
             genreDistribution: genreDistribution,
             affinityVector: affinity,
             trainedAt: Date()
         )
+        metrics = computedMetrics
 
         // Cache results
-        await cacheMetrics(metrics!)
+        await cacheMetrics(computedMetrics)
 
         isTraining = false
     }

@@ -1,4 +1,5 @@
-import type { SearchContext, TorrentIndexer, TorrentSearchHit } from '../types'
+
+import type { TorrentIndexer, TorrentSearchHit } from '../types'
 import { fetchJSON, magnetFor, normalizeImdb, resolveQualityLabel } from '../utils'
 
 const TORRENTIO_BASES = ['https://torrentio.strem.fun']

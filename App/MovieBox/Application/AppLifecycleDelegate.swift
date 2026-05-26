@@ -30,6 +30,8 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
         let semaphore = DispatchSemaphore(value: 0)
         Task { @MainActor in
             await appServices.downloadManager.flushPersistenceForTermination()
+            appServices.finishStreamCleanup()
+            _ = StorageCleanup.runMaintenance(streamBufferMaxAge: 0)
             DockDownloadPresenter.clear()
             semaphore.signal()
         }

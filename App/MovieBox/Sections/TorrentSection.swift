@@ -399,6 +399,13 @@ struct TorrentSection: View {
         rowBufferingByID[torrent.id] = .starting
         clearError(for: torrent.id)
 
+        if let localPath = appServices.resolvedCompletedMediaPath(for: torrent, downloadRecords: downloads) {
+            Task { @MainActor in
+                await playDownloadedFile(at: localPath, torrent: torrent)
+            }
+            return
+        }
+
         WatchProgressStore.ensureRecord(
             movie: movie,
             kind: isTV ? .tv : .movie,
@@ -445,6 +452,74 @@ struct TorrentSection: View {
             appServices: appServices,
             playerState: playerState
         )
+    }
+
+    private func playDownloadedFile(at localPath: String, torrent: TorrentResult) async {
+        defer {
+            streamBusyTorrentID = nil
+            rowBufferingByID = [:]
+        }
+
+        await appServices.prepareForLocalFilePlayback()
+
+        WatchProgressStore.ensureRecord(
+            movie: movie,
+            kind: isTV ? .tv : .movie,
+            genres: movie.genreIds,
+            in: modelContext,
+            existing: storedMovies
+        )
+
+        let playback = PlaybackSettings(
+            appearance: subtitleAppearance,
+            fontSize: subtitleFontSize
+        )
+        let posterURL = MetadataClient().posterDisplayURL(
+            posterPath: movie.posterPath,
+            backdropPath: movie.backdropPath
+        )
+
+        appServices.playbackCoordinator.playLocalFile(
+            localFilePath: localPath,
+            torrent: torrent,
+            allTorrents: torrents,
+            playerState: playerState,
+            movieId: movie.id,
+            subtitleURL: subtitleURL,
+            subtitleAppearance: playback.appearance,
+            subtitleFontSize: playback.fontSize,
+            episodeTitle: episodeLabel,
+            displayTitle: movie.title,
+            resumePosition: WatchProgressStore.resumePosition(for: movie.id, in: storedMovies),
+            knownDurationSeconds: movie.runtime.map { Double($0) * 60 },
+            posterURL: posterURL
+        )
+
+        if let context = subtitleSearchContext {
+            SubtitlePlaybackSupport.attachToPlayback(
+                playerState: playerState,
+                catalog: subtitleCatalog,
+                searchContext: context,
+                selectedSubtitleID: selectedSubtitleID,
+                localMediaPath: localPath,
+                autoSelectRemote: subtitleURL == nil
+            )
+        } else if subtitleURL != nil {
+            SubtitlePlaybackSupport.attachToPlayback(
+                playerState: playerState,
+                catalog: subtitleCatalog,
+                searchContext: nil,
+                selectedSubtitleID: selectedSubtitleID,
+                localMediaPath: localPath,
+                autoSelectRemote: false
+            )
+        }
+
+        if let hash = torrent.resolvedInfoHash,
+           let record = storedMovies.first(where: { $0.tmdbId == movie.id }) {
+            record.lastStreamInfoHash = hash.lowercased()
+            try? modelContext.save()
+        }
     }
 
     private func startDownload(_ torrent: TorrentResult) {
