@@ -428,11 +428,14 @@ public final class PersistentPlaybackController {
 
         if case .failed(let message) = session.state {
             phase = .failed(message)
+            publishFailureTick(message: message)
             await appServices.cancelActiveStreamWithoutPersistentReset()
             return
         }
         guard case .ready = session.state else {
-            phase = .failed("Stream did not become ready.")
+            let message = "Stream did not become ready."
+            phase = .failed(message)
+            publishFailureTick(message: message)
             await appServices.cancelActiveStreamWithoutPersistentReset()
             return
         }
@@ -537,6 +540,7 @@ public final class PersistentPlaybackController {
 
         let summary = lastError ?? "Could not prepare any release for streaming. Try another version."
         phase = .failed(summary)
+        publishFailureTick(message: summary)
         await appServices.cancelActiveStreamWithoutPersistentReset()
     }
 
@@ -574,7 +578,9 @@ public final class PersistentPlaybackController {
             scheduleShellReleaseWhenPlayerOpens(playerState: playerState)
         } catch {
             PlaybackLog.log("[MKVHLS] openPlayer failed: \(error.localizedDescription)")
-            phase = .failed(error.localizedDescription)
+            let message = error.localizedDescription
+            phase = .failed(message)
+            publishFailureTick(message: message)
             await session.cancel()
         }
     }
@@ -730,6 +736,21 @@ public final class PersistentPlaybackController {
         case .failed(let message): return message
         case .idle: return ""
         }
+    }
+
+    private func publishFailureTick(message: String) {
+        let tick = PersistentPlaybackUITick(
+            movieId: item?.movieId,
+            torrentId: activeTorrentID,
+            progressPercent: 0,
+            phaseLabel: "Failed",
+            phaseDetail: message,
+            statusLine: message,
+            rowPhase: "Failed",
+            rowDetail: message,
+            isActive: false
+        )
+        publishUITick(tick)
     }
 
     private func publishUITick(_ tick: PersistentPlaybackUITick) {

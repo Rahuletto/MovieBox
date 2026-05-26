@@ -47,38 +47,63 @@ extension PlayerState {
     public func seek(to time: Double) {
         pendingResumePosition = nil
         isApplyingResumeSeek = false
+        initialSeekApplied = true
         let clamped = max(0, min(time, duration > 0 ? duration : time))
-        let isTorrentPlayback = isStreamingTorrent || streamsFromLocalTorrentServer
-        if isTorrentPlayback, !isPlaybackTimeBuffered(clamped) {
+        
+        if isHLSTorrentPlayback, isStreamingTorrent {
+            // For HLS torrent playback, TorrentPlaybackCoordinator is the single point of truth.
             pendingUserSeekTime = clamped
             isBuffering = true
             Task {
                 await onPrioritizeTorrentPlayback?(clamped)
-                if isHLSTorrentPlayback, isStreamingTorrent, !isRestartingStreamingRemux {
-                    await onRestartStreamingHLSSeek?(clamped)
-                }
+                PlaybackLog.log("seek(to:) HLS Torrent triggering onRestartStreamingHLSSeek at \(clamped)")
+                await onRestartStreamingHLSSeek?(clamped)
             }
         } else {
-            pendingUserSeekTime = nil
-        }
-
-        let target = CMTime(seconds: clamped, preferredTimescale: 600)
-        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                let atTarget = abs(self.player.currentTime().seconds - clamped) < 1.5
-                if finished, atTarget, self.pendingUserSeekTime == clamped {
-                    self.pendingUserSeekTime = nil
+            let isTorrentPlayback = isStreamingTorrent || streamsFromLocalTorrentServer
+            let isBuffered = isPlaybackTimeBuffered(clamped)
+            PlaybackLog.log("seek(to:) non-HLS/local time=\(time) clamped=\(clamped) isTorrentPlayback=\(isTorrentPlayback) isBuffered=\(isBuffered)")
+            if isTorrentPlayback, !isBuffered {
+                pendingUserSeekTime = clamped
+                isBuffering = true
+                Task {
+                    await onPrioritizeTorrentPlayback?(clamped)
                 }
-                self.updateBufferingState()
+            } else {
+                pendingUserSeekTime = nil
+            }
+
+            if pendingUserSeekTime == nil {
+                performNormalSeek(to: clamped)
             }
         }
+        
         currentTime = clamped
         peakPlaybackTime = max(peakPlaybackTime, clamped)
         lastSubtitleSyncTime = -1
         updateSubtitle(at: clamped, force: true)
         publishNowPlayingIfNeeded(force: true)
         updateBufferingState()
+    }
+
+    public func performNormalSeek(to time: Double) {
+        let hlsRelativeTime = time - hlsStreamTimelineOffset
+        let target = CMTime(seconds: hlsRelativeTime, preferredTimescale: 600)
+        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let playerMovieTime = self.player.currentTime().seconds + self.hlsStreamTimelineOffset
+                let atTarget = abs(playerMovieTime - time) < 1.5
+                PlaybackLog.log("performNormalSeek AVPlayer seek finished=\(finished) atTarget=\(atTarget) playerMovieTime=\(playerMovieTime)")
+                if finished, atTarget {
+                    if self.pendingUserSeekTime == time {
+                        self.pendingUserSeekTime = nil
+                    }
+                    self.currentTime = time
+                }
+                self.updateBufferingState()
+            }
+        }
     }
 
     public func seek(by seconds: Double) {

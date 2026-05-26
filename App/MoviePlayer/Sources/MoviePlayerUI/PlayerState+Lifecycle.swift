@@ -88,9 +88,11 @@ extension PlayerState {
         cachedStreamBufferRanges = []
         activeTorrentInfoHash = nil
         streamBufferTimeRangesProvider = nil
+        streamPlaybackReadinessProvider = nil
         onPrioritizeTorrentPlayback = nil
         onRestartStreamingHLSSeek = nil
         isRestartingStreamingRemux = false
+        hlsStreamTimelineOffset = 0
         onPersistStreamBufferRanges = nil
         pendingUserSeekTime = nil
         isApplyingPendingUserSeek = false

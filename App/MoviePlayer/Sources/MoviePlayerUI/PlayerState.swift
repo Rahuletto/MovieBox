@@ -49,6 +49,7 @@ public final class PlayerState {
     public var peakPlaybackTime: Double = 0
     /// When set (torrent streams), polled to merge disk-backed ranges into the scrubber.
     public var streamBufferTimeRangesProvider: (@MainActor () async -> [ClosedRange<Double>])?
+    public var streamPlaybackReadinessProvider: (@MainActor (Double) async -> Bool)?
     public var volume: Float = 1.0
     public var isMuted: Bool = false
     public var playbackRate: Double = 1.0
@@ -114,6 +115,10 @@ public final class PlayerState {
     /// Restart live ffmpeg HLS remux when the user seeks ahead of generated segments.
     public var onRestartStreamingHLSSeek: (@MainActor (Double) async -> Void)?
     var isRestartingStreamingRemux = false
+    /// Offset (in seconds) between the HLS stream's 0-based timeline and the movie's real timeline.
+    /// For example, if ffmpeg starts remuxing at 5370s into the movie, this is 5370.
+    /// AVPlayer reports `currentTime = 17`, real movie time = `17 + hlsStreamTimelineOffset = 5387`.
+    var hlsStreamTimelineOffset: Double = 0
     /// Persists scrubber buffer spans for the active torrent (wired by MovieBoxCore).
     public var onPersistStreamBufferRanges: (
         @MainActor (_ tmdbId: Int, _ infoHash: String, _ duration: Double, _ ranges: [ClosedRange<Double>]) -> Void
