@@ -26,6 +26,8 @@ public actor RemuxService {
     private var activeStreamingProcesses: [String: Process] = [:]
     private var hlsServers: [String: HLSCacheServer] = [:]
     private var hlsServerURLs: [String: URL] = [:]
+    private var streamingRemuxPlans: [String: RemuxPlan] = [:]
+    private var streamingInputURLs: [String: URL] = [:]
 
     /// When false (default), HDR validation failures warn and playback continues without verified HDR badges.
     public var strictHDRValidation = false
@@ -270,6 +272,8 @@ public actor RemuxService {
 
         try process.run()
         activeStreamingProcesses[safeKey] = process
+        streamingRemuxPlans[safeKey] = remuxPlan
+        streamingInputURLs[safeKey] = inputURL
         MoviePlayerLog.info("[Remux] streaming started ffmpeg pid=\(process.processIdentifier) args=\(Self.redactedArguments(arguments))")
 
         let deadline = Date().addingTimeInterval(90)
@@ -304,6 +308,94 @@ public actor RemuxService {
         let tail = Self.stderrTail(from: stderrURL)
         MoviePlayerLog.error("[Remux] streaming timed out waiting for first segment stderr=\(tail)")
         throw RemuxError.ffmpegFailed("Timed out waiting for HLS remux to become playable.\n\(tail)")
+    }
+
+    /// How many seconds of timeline are covered by completed HLS segments (4s each).
+    public func estimatedStreamingHLSDuration(cacheKey: String) -> Double {
+        let safeKey = Self.sanitizeCacheKey(cacheKey)
+        guard let directory = try? hlsOutputDirectory(cacheKey: "stream-\(cacheKey)") else { return 0 }
+        let files = (try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        let segmentCount = files.filter {
+            let ext = $0.pathExtension.lowercased()
+            return (ext == "ts" || ext == "m4s") && !$0.lastPathComponent.hasSuffix(".tmp")
+        }.count
+        return Double(segmentCount) * 4.0
+    }
+
+    /// Stops the live ffmpeg remux and restarts from `seekSeconds` so AVPlayer can play that part of the movie.
+    public func restartStreamingRemux(
+        inputURL: URL,
+        cacheKey: String,
+        seekSeconds: Double
+    ) async throws -> RemuxResult {
+        let safeKey = Self.sanitizeCacheKey(cacheKey)
+        let remuxPlan = streamingRemuxPlans[safeKey] ?? streamingRemuxPlans[cacheKey]
+        guard let plan = remuxPlan else {
+            throw RemuxError.ffmpegFailed("No active streaming remux plan for this torrent.")
+        }
+        activeStreamingProcesses[safeKey]?.terminate()
+        activeStreamingProcesses[safeKey] = nil
+        await stopHLSServer(cacheKey: safeKey)
+
+        let outputDirectory = try hlsOutputDirectory(cacheKey: "stream-\(cacheKey)")
+        try fileManager.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+        try removeStaleHLSFiles(in: outputDirectory)
+
+        let ffmpegURL = try Self.resolveTool(named: "ffmpeg")
+        let seekPlan = RemuxPlan(
+            inputURL: inputURL,
+            probe: plan.probe,
+            decision: plan.decision,
+            videoStream: plan.videoStream,
+            audioStream: plan.audioStream,
+            videoTag: plan.videoTag,
+            unsupportedReason: plan.unsupportedReason
+        )
+        let arguments = try Self.buildStreamingFFmpegArguments(
+            plan: seekPlan,
+            seekSeconds: max(0, seekSeconds - 2)
+        )
+        let stderrURL = outputDirectory.appendingPathComponent("ffmpeg.stderr.log")
+        try Data().write(to: stderrURL)
+
+        let process = Process()
+        process.executableURL = ffmpegURL
+        process.currentDirectoryURL = outputDirectory
+        process.arguments = arguments
+        process.standardError = try FileHandle(forWritingTo: stderrURL)
+        process.standardOutput = Pipe()
+
+        try process.run()
+        activeStreamingProcesses[safeKey] = process
+        streamingRemuxPlans[safeKey] = plan
+        streamingInputURLs[safeKey] = inputURL
+        MoviePlayerLog.info(
+            "[Remux] streaming restart seek=\(Int(seekSeconds))s pid=\(process.processIdentifier) args=\(Self.redactedArguments(arguments))"
+        )
+
+        let deadline = Date().addingTimeInterval(90)
+        while Date() < deadline {
+            Self.normalizeStreamingPlaylist(at: outputDirectory.appendingPathComponent("stream.m3u8"))
+            if Self.hasPlayableStreamingHLS(in: outputDirectory), process.isRunning {
+                let playbackURL = try await ensureHLSServerURL(cacheKey: safeKey, outputDirectory: outputDirectory)
+                let verified = try await verifyRemuxMetadata(remuxPlan: plan, outputDirectory: outputDirectory)
+                return remuxResult(
+                    playlistURL: playbackURL,
+                    outputDirectory: outputDirectory,
+                    state: .playable,
+                    durationSeconds: plan.probe.duration,
+                    verification: verified,
+                    preparationMode: plan.decision.preparationMode
+                )
+            }
+            if !process.isRunning {
+                let tail = Self.stderrTail(from: stderrURL)
+                activeStreamingProcesses[safeKey] = nil
+                throw RemuxError.ffmpegFailed("Streaming remux restart failed.\n\(tail)")
+            }
+            try await Task.sleep(for: .milliseconds(500))
+        }
+        throw RemuxError.ffmpegFailed("Timed out waiting for HLS remux after seek restart.")
     }
 
     public func remuxStreamingMKVToHLS(inputURL: URL, cacheKey: String) async throws -> RemuxResult {
@@ -442,8 +534,8 @@ public actor RemuxService {
                 if let resourceValues = try? url.resourceValues(forKeys: [.contentModificationDateKey]),
                    let modDate = resourceValues.contentModificationDate {
                     let age = now.timeIntervalSince(modDate)
-                    // Clean directories older than 24 hours (86,400 seconds)
-                    if age > 86400 {
+                    // Clean directories older than 4 hours
+                    if age > 14_400 {
                         try? fileManager.removeItem(at: url)
                         prunedCount += 1
                     }
@@ -971,16 +1063,41 @@ extension RemuxService {
         }
     }
 
-    public static func buildStreamingFFmpegArguments(plan: RemuxPlan) throws -> [String] {
+    public static func buildStreamingFFmpegArguments(plan: RemuxPlan, seekSeconds: Double? = nil) throws -> [String] {
+        let preserveTimeline = seekSeconds != nil
         switch plan.decision {
         case .fmp4HLS:
-            return buildFMP4HLSArguments(plan: plan, input: plan.inputURL.absoluteString, streaming: true)
+            return buildFMP4HLSArguments(
+                plan: plan,
+                input: plan.inputURL.absoluteString,
+                streaming: true,
+                seekSeconds: seekSeconds,
+                preserveSourceTimeline: preserveTimeline
+            )
         case .tsHLS:
-            return buildTSHLSArguments(plan: plan, input: plan.inputURL.absoluteString, streaming: true)
+            return buildTSHLSArguments(
+                plan: plan,
+                input: plan.inputURL.absoluteString,
+                streaming: true,
+                seekSeconds: seekSeconds,
+                preserveSourceTimeline: preserveTimeline
+            )
         case .transcodeFMP4HLS:
-            return buildTranscodeFMP4HLSArguments(plan: plan, input: plan.inputURL.absoluteString, streaming: true)
+            return buildTranscodeFMP4HLSArguments(
+                plan: plan,
+                input: plan.inputURL.absoluteString,
+                streaming: true,
+                seekSeconds: seekSeconds,
+                preserveSourceTimeline: preserveTimeline
+            )
         case .transcodeTSHLS:
-            return buildTranscodeTSHLSArguments(plan: plan, input: plan.inputURL.absoluteString, streaming: true)
+            return buildTranscodeTSHLSArguments(
+                plan: plan,
+                input: plan.inputURL.absoluteString,
+                streaming: true,
+                seekSeconds: seekSeconds,
+                preserveSourceTimeline: preserveTimeline
+            )
         case .nativePassthrough, .unsupported:
             throw RemuxError.unsupported(plan.unsupportedReason ?? "Unsupported media for AVPlayer remux.")
         }
@@ -1009,20 +1126,40 @@ extension RemuxService {
         return arguments
     }
 
-    private static func buildInputArguments(input: String) -> [String] {
-        ["-hide_banner", "-fflags", "+genpts", "-i", input]
+    private static func buildInputArguments(input: String, seekSeconds: Double? = nil) -> [String] {
+        var arguments = ["-hide_banner", "-fflags", "+genpts"]
+        if let seekSeconds, seekSeconds >= 1 {
+            arguments.append(contentsOf: ["-ss", String(format: "%.3f", seekSeconds)])
+        }
+        arguments.append(contentsOf: ["-i", input])
+        return arguments
     }
 
-    private static func buildFMP4HLSArguments(plan: RemuxPlan, input: String, streaming: Bool) -> [String] {
-        var arguments = buildInputArguments(input: input)
+    private static func appendTimelineArguments(_ arguments: inout [String], preserveSourceTimeline: Bool) {
+        if preserveSourceTimeline {
+            arguments.append(contentsOf: ["-avoid_negative_ts", "make_zero"])
+        } else {
+            arguments.append(contentsOf: ["-avoid_negative_ts", "make_zero", "-reset_timestamps", "1"])
+        }
+    }
+
+    private static func buildFMP4HLSArguments(
+        plan: RemuxPlan,
+        input: String,
+        streaming: Bool,
+        seekSeconds: Double? = nil,
+        preserveSourceTimeline: Bool = false
+    ) -> [String] {
+        var arguments = buildInputArguments(input: input, seekSeconds: seekSeconds)
         arguments.append(contentsOf: buildLosslessStreamMaps(plan: plan))
         arguments.append(contentsOf: [
             "-dn",
             "-sn",
             "-movflags", "+write_colr",
-            "-avoid_negative_ts", "make_zero",
-            "-reset_timestamps", "1",
             "-f", "hls",
+        ])
+        appendTimelineArguments(&arguments, preserveSourceTimeline: preserveSourceTimeline)
+        arguments.append(contentsOf: [
             "-hls_segment_type", "fmp4",
             "-hls_time", "4",
             "-hls_fmp4_init_filename", "init.mp4",
@@ -1044,18 +1181,23 @@ extension RemuxService {
         return arguments
     }
 
-    private static func buildTSHLSArguments(plan: RemuxPlan, input: String, streaming: Bool) -> [String] {
-        var arguments = buildInputArguments(input: input)
+    private static func buildTSHLSArguments(
+        plan: RemuxPlan,
+        input: String,
+        streaming: Bool,
+        seekSeconds: Double? = nil,
+        preserveSourceTimeline: Bool = false
+    ) -> [String] {
+        var arguments = buildInputArguments(input: input, seekSeconds: seekSeconds)
         arguments.append(contentsOf: buildLosslessStreamMaps(plan: plan))
         arguments.append(contentsOf: [
             "-dn",
             "-sn",
-            "-avoid_negative_ts", "make_zero",
-            "-reset_timestamps", "1",
             "-f", "hls",
             "-hls_time", "4",
             "-hls_segment_filename", "segment_%05d.ts",
         ])
+        appendTimelineArguments(&arguments, preserveSourceTimeline: preserveSourceTimeline)
         if streaming {
             arguments.append(contentsOf: [
                 "-hls_list_size", "0",
@@ -1097,9 +1239,15 @@ extension RemuxService {
         video.dynamicRange == .sdr ? "yuv420p" : "p010le"
     }
 
-    private static func buildTranscodeFMP4HLSArguments(plan: RemuxPlan, input: String, streaming: Bool) -> [String] {
+    private static func buildTranscodeFMP4HLSArguments(
+        plan: RemuxPlan,
+        input: String,
+        streaming: Bool,
+        seekSeconds: Double? = nil,
+        preserveSourceTimeline: Bool = false
+    ) -> [String] {
         let pixelFormat = plan.videoStream.map(transcodePixelFormat(for:)) ?? "yuv420p"
-        var arguments = buildInputArguments(input: input)
+        var arguments = buildInputArguments(input: input, seekSeconds: seekSeconds)
         arguments.append(contentsOf: buildTranscodeStreamMaps(
             plan: plan,
             videoEncoder: "hevc_videotoolbox",
@@ -1109,9 +1257,10 @@ extension RemuxService {
             "-dn",
             "-sn",
             "-movflags", "+write_colr",
-            "-avoid_negative_ts", "make_zero",
-            "-reset_timestamps", "1",
             "-f", "hls",
+        ])
+        appendTimelineArguments(&arguments, preserveSourceTimeline: preserveSourceTimeline)
+        arguments.append(contentsOf: [
             "-hls_segment_type", "fmp4",
             "-hls_time", "4",
             "-hls_fmp4_init_filename", "init.mp4",
@@ -1133,9 +1282,15 @@ extension RemuxService {
         return arguments
     }
 
-    private static func buildTranscodeTSHLSArguments(plan: RemuxPlan, input: String, streaming: Bool) -> [String] {
+    private static func buildTranscodeTSHLSArguments(
+        plan: RemuxPlan,
+        input: String,
+        streaming: Bool,
+        seekSeconds: Double? = nil,
+        preserveSourceTimeline: Bool = false
+    ) -> [String] {
         let pixelFormat = plan.videoStream.map(transcodePixelFormat(for:)) ?? "yuv420p"
-        var arguments = buildInputArguments(input: input)
+        var arguments = buildInputArguments(input: input, seekSeconds: seekSeconds)
         arguments.append(contentsOf: buildTranscodeStreamMaps(
             plan: plan,
             videoEncoder: "h264_videotoolbox",
@@ -1144,12 +1299,11 @@ extension RemuxService {
         arguments.append(contentsOf: [
             "-dn",
             "-sn",
-            "-avoid_negative_ts", "make_zero",
-            "-reset_timestamps", "1",
             "-f", "hls",
             "-hls_time", "4",
             "-hls_segment_filename", "segment_%05d.ts",
         ])
+        appendTimelineArguments(&arguments, preserveSourceTimeline: preserveSourceTimeline)
         if streaming {
             arguments.append(contentsOf: [
                 "-hls_list_size", "0",

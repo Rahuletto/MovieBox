@@ -28,6 +28,7 @@ public protocol StreamingOrchestration: AnyObject, Sendable {
     func peerCount() async -> Int
     func transferringPeerCount() async -> Int
     func readableMediaTimeRanges(durationSeconds: Double) async -> [ClosedRange<Double>]
+    func prioritizePlayback(atSeconds time: Double, durationSeconds: Double) async
 }
 
 extension StreamingOrchestrator: StreamingOrchestration {}

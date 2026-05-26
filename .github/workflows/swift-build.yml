@@ -1,0 +1,22 @@
+name: Swift build
+
+on:
+  push:
+    paths:
+      - 'App/**'
+      - '.github/workflows/swift-build.yml'
+  pull_request:
+    paths:
+      - 'App/**'
+      - '.github/workflows/swift-build.yml'
+
+jobs:
+  xcodebuild:
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: App
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build MovieBox (macOS)
+        run: xcodebuild -project MovieBox.xcodeproj -scheme MovieBox -destination 'platform=macOS' -quiet build

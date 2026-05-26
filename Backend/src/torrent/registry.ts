@@ -1,4 +1,3 @@
-import { INDEXER_CATALOG } from './catalog'
 import { eztvIndexer } from './indexers/eztv'
 import { pirateBayIndexer } from './indexers/piratebay'
 import { torrentioIndexer } from './indexers/torrentio'

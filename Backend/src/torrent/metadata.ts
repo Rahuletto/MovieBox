@@ -44,8 +44,6 @@ export async function fetchTorrentFileBytes(infoHash: string): Promise<Uint8Arra
       const buf = new Uint8Array(await res.arrayBuffer())
       if (!isTorrentFileBytes(buf)) throw new Error('Invalid torrent file')
       return buf
-    } catch (e) {
-      throw e
     } finally {
       clearTimeout(timeoutId)
     }

@@ -8,6 +8,8 @@ export default defineConfig({
   },
   plugins: ['typescript', 'unicorn', 'import'],
   rules: {
+    // Sequential fallback/retry loops are intentional in indexers and fetch helpers.
+    'no-await-in-loop': 'off',
     'no-debugger': 'error',
     'no-alert': 'error',
     'no-eval': 'error',

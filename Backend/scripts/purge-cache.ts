@@ -23,8 +23,8 @@ type CliArgs = {
 
 type DevVars = Record<string, string>
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const backendRoot = join(__dirname, '..')
+const scriptDir = dirname(fileURLToPath(import.meta.url))
+const backendRoot = join(scriptDir, '..')
 
 function loadDevVars(): DevVars {
   try {

@@ -705,6 +705,14 @@ public final class HTTPRangeServer {
 
     private func notifyPlayerRead(mediaOffset: Int64, length: Int) async {
         await pieceManager?.notePlayerRead(mediaOffset: mediaOffset, length: length)
+        if let manager = pieceManager {
+            let pieces = await manager.pieceIndicesForMediaOffset(mediaOffset: mediaOffset, length: length)
+            if !pieces.isEmpty {
+                TorrentLog.info(
+                    "[RangeServer] player read mediaOffset=\(mediaOffset) len=\(length) pieces=\(pieces.prefix(6).map(String.init).joined(separator: ","))"
+                )
+            }
+        }
         await onPlayerRead?(mediaOffset, length)
     }
 
@@ -747,7 +755,9 @@ public final class HTTPRangeServer {
                 }
             }
             attempt += 1
-            if attempt % 100 == 0 {
+            if attempt % 50 == 0 {
+                let mediaOffset = max(0, offset - streamByteOffset)
+                await notifyPlayerRead(mediaOffset: mediaOffset, length: length)
                 TorrentLog.info(
                     "[HTTPRangeServer] Still waiting for readable span @ \(offset) len=\(length) suffix=\(preferSuffix) (\(attempt / 10)s)"
                 )
@@ -774,7 +784,9 @@ public final class HTTPRangeServer {
                 return data
             }
             waitLoops += 1
-            if waitLoops % 100 == 0 {
+            if waitLoops % 50 == 0 {
+                let mediaOffset = max(0, offset - streamByteOffset)
+                await notifyPlayerRead(mediaOffset: mediaOffset, length: length)
                 TorrentLog.info(
                     "[HTTPRangeServer] Still buffering range @ \(offset) need \(length) B (\(waitLoops / 10)s)"
                 )

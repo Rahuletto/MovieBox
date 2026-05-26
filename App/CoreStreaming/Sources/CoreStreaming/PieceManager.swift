@@ -28,11 +28,26 @@ public actor PieceManager {
     /// Pieces AVPlayer recently requested via range reads (newest first).
     private var playerHotPieces: [UInt32] = []
     private var playbackAnchorPiece: UInt32?
+    /// Scrubber target — kept separate so AVPlayer/FFmpeg sequential reads stay prioritized.
+    private var seekAnchorPiece: UInt32?
     private var indexBootstrapCompleted = false
+    /// Set only from scrubber `prioritizePlayback` — not AVPlayer tail/head range probes.
+    private var userInitiatedSeek = false
 
     private static let criticalReadAheadPieceCount = 4
     private static let warmReadAheadPieceCount = 16
     private static let maxHotPieces = criticalReadAheadPieceCount + warmReadAheadPieceCount + 8
+    /// After a scrubber seek, fetch this window around the anchor (not the whole file).
+    private static let maxSequentialAheadFromAnchor = 160
+    private static let maxSequentialBehindFromAnchor = 24
+    /// Pieces from file start still treated as "start" for bootstrap (not a mid-file seek).
+    private static let midFileSeekPieceThreshold = 4
+
+    private func midFilePlaybackWindow(for anchorInt: Int) -> ClosedRange<Int> {
+        let lower = max(streamFirstPiece, anchorInt - Self.maxSequentialBehindFromAnchor)
+        let upper = min(streamLastPiece, anchorInt + Self.maxSequentialAheadFromAnchor)
+        return lower...upper
+    }
 
     public init(
         pieceCount: Int,
@@ -111,24 +126,37 @@ public actor PieceManager {
         }
         
         appendFrom(buildPlaybackPriorityOrder())
-        
+
         if needsIndexBootstrap() {
             appendFrom(buildBootstrapPriorityOrder())
         }
-        
-        let start = playbackAnchorPiece.map { Int($0) } ?? streamFirstPiece
+
         let end = min(streamLastPiece, pieceCount - 1)
-        if start <= end {
-            let sequentialForward = (start...end).map { UInt32($0) }
-            appendFrom(sequentialForward)
+        if userInitiatedSeek,
+           let seekInt = seekAnchorPiece.map({ Int($0) }),
+           isMidFileSeekAnchor(seekInt),
+           seekInt <= end {
+            let window = midFilePlaybackWindow(for: seekInt)
+            appendFrom((window.lowerBound...seekInt).reversed().map { UInt32($0) })
+            appendFrom((seekInt...window.upperBound).map { UInt32($0) })
+            return result
         }
-        
-        if start > streamFirstPiece {
-            let sequentialBackward = (streamFirstPiece..<start).map { UInt32($0) }
-            appendFrom(sequentialBackward)
+
+        let anchorInt = playbackAnchorPiece.map { Int($0) } ?? streamFirstPiece
+        guard anchorInt <= end else { return result }
+
+        if anchorInt <= end {
+            appendFrom((anchorInt...end).map { UInt32($0) })
         }
-        
+        if anchorInt > streamFirstPiece {
+            appendFrom((streamFirstPiece..<anchorInt).map { UInt32($0) })
+        }
+
         return result
+    }
+
+    private func isMidFileSeekAnchor(_ anchorInt: Int) -> Bool {
+        anchorInt > streamFirstPiece + Self.midFileSeekPieceThreshold
     }
 
     public func getNextRequest(
@@ -202,7 +230,20 @@ public actor PieceManager {
         if downloadedPieces.contains(piece) { return false }
         if Set(buildPlaybackPriorityOrder()).contains(piece) { return true }
         if needsIndexBootstrap(), Set(buildBootstrapPriorityOrder()).contains(piece) { return true }
+        if userInitiatedSeek,
+           let seek = seekAnchorPiece,
+           isMidFileSeekAnchor(Int(seek)) {
+            return midFilePlaybackWindow(for: Int(seek)).contains(Int(piece))
+        }
         return false
+    }
+
+    public func playbackAnchorPieceIndex() -> UInt32? {
+        playbackAnchorPiece
+    }
+
+    public func pieceIndicesForMediaOffset(mediaOffset: Int64, length: Int) -> [UInt32] {
+        pieceIndicesCovering(mediaOffset: mediaOffset, length: length)
     }
 
     public func markBlockReceived(pieceIndex: UInt32, offset: UInt32, block: Data) -> PieceReceiveOutcome {
@@ -346,11 +387,49 @@ public actor PieceManager {
 
     private func needsIndexBootstrap() -> Bool {
         if indexBootstrapCompleted { return false }
-        if !downloadedPieces.contains(UInt32(streamFirstPiece)) { return true }
+        if !userInitiatedSeek, !downloadedPieces.contains(UInt32(streamFirstPiece)) {
+            return true
+        }
         for piece in streamTailPieces where !downloadedPieces.contains(UInt32(piece)) {
             return true
         }
         return false
+    }
+
+    /// Scrubber-only — does not move `playbackAnchorPiece` (FFmpeg/AVPlayer read cursor).
+    public func markUserSeekPlayback(atMediaOffset mediaOffset: Int64, length: Int) {
+        let indices = pieceIndicesCovering(mediaOffset: mediaOffset, length: length)
+        if let first = indices.first {
+            seekAnchorPiece = first
+        }
+        boostHotPieces(for: indices)
+        userInitiatedSeek = true
+    }
+
+    private func boostHotPieces(for indices: [UInt32]) {
+        guard !indices.isEmpty else { return }
+        var expanded: [UInt32] = []
+        for index in indices where !expanded.contains(index) {
+            expanded.append(index)
+        }
+        if let last = indices.last {
+            for ahead in 1...Self.warmReadAheadPieceCount {
+                let next = last + UInt32(ahead)
+                guard Int(next) <= streamLastPiece else { break }
+                expanded.append(next)
+            }
+        }
+        for index in expanded.reversed() {
+            playerHotPieces.removeAll { $0 == index }
+            playerHotPieces.insert(index, at: 0)
+        }
+        if playerHotPieces.count > Self.maxHotPieces {
+            playerHotPieces.removeLast(playerHotPieces.count - Self.maxHotPieces)
+        }
+    }
+
+    public func needsIndexBootstrapForLogging() -> Bool {
+        needsIndexBootstrap()
     }
 
     private func buildBootstrapPriorityOrder() -> [UInt32] {
@@ -363,7 +442,9 @@ public actor PieceManager {
         for index in playerHotPieces {
             append(index)
         }
-        append(UInt32(streamFirstPiece))
+        if !userInitiatedSeek {
+            append(UInt32(streamFirstPiece))
+        }
         for index in buildMissingTailPiecesNearestEOF() {
             append(index)
         }
@@ -395,8 +476,8 @@ public actor PieceManager {
 
         let torrentStart = streamMediaByteOffset + mediaOffset
         let torrentEnd = torrentStart + span - 1
-        let first = max(0, Int(torrentStart / pieceLength))
-        let last = min(pieceCount - 1, Int(torrentEnd / pieceLength))
+        let first = max(streamFirstPiece, min(streamLastPiece, Int(torrentStart / pieceLength)))
+        let last = max(streamFirstPiece, min(streamLastPiece, Int(torrentEnd / pieceLength)))
         guard first <= last else { return [] }
         return (first...last).map { UInt32($0) }
     }

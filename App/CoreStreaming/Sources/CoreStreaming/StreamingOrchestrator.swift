@@ -93,11 +93,14 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         )
         DebugSessionLog.purge(infoHash: String(metadata.infoHash.prefix(8)))
 
-        let storageDir = FileManager.default.temporaryDirectory.appendingPathComponent("moviebox_streams")
-        try? FileManager.default.createDirectory(at: storageDir, withIntermediateDirectories: true)
+        StreamSessionDiskStore.migrateLegacyTemporaryStoreIfNeeded(infoHash: metadata.infoHash)
+        let storageDir = try StreamSessionDiskStore.sessionDirectory(infoHash: metadata.infoHash)
 
         // Load existing bitmap if any (keyed by infoHash — same torrent reuses verified pieces)
-        let bitmapURL = storageDir.appendingPathComponent("moviebox_\(metadata.infoHash).bitmap")
+        let bitmapURL = try StreamSessionDiskStore.bitmapURL(
+            infoHash: metadata.infoHash,
+            in: storageDir
+        )
         let existingBitmap = try? Data(contentsOf: bitmapURL)
         let recreateFile = existingBitmap == nil
 
@@ -211,15 +214,10 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         torrentEngine = nil
         await rangeServer.stop()
         
-        if let store = pieceStore, let metadata = metadata {
-            let bitmapData = await store.encodedBitmap()
-            let storageDir = FileManager.default.temporaryDirectory.appendingPathComponent("moviebox_streams")
-            let bitmapURL = storageDir.appendingPathComponent("moviebox_\(metadata.infoHash).bitmap")
-            try? FileManager.default.createDirectory(at: storageDir, withIntermediateDirectories: true)
-            try? bitmapData.write(to: bitmapURL)
+        if let store = pieceStore {
             await store.closeHandles()
         }
-        
+
         pieceStore = nil
         pieceManager = nil
         metadata = nil
@@ -246,6 +244,96 @@ public final class StreamingOrchestrator: @unchecked Sendable {
 
     public func streamHeadContiguousBytes() async -> Int64 {
         await pieceStore?.streamHeadContiguousBytes() ?? 0
+    }
+
+    public func prioritizePlayback(atSeconds time: Double, durationSeconds: Double) async {
+        guard let target = streamTarget,
+              let manager = pieceManager,
+              durationSeconds.isFinite,
+              durationSeconds > 0,
+              time.isFinite,
+              time >= 0 else { return }
+
+        let fraction = max(0, min(1, time / durationSeconds))
+        let (anchor, offsetSource) = await mediaOffsetForScrubberSeek(
+            time: time,
+            fraction: fraction,
+            durationSeconds: durationSeconds,
+            target: target
+        )
+        let window = Int64(4 * 1024 * 1024)
+        let spans: [Int64] = [
+            max(0, anchor - window / 2),
+            anchor,
+            min(max(0, target.byteLength - window), anchor + window / 2),
+        ]
+        for mediaOffset in spans {
+            let remaining = max(0, target.byteLength - mediaOffset)
+            let readLength = min(Int(window), Int(remaining))
+            guard readLength > 0 else { continue }
+            await manager.markUserSeekPlayback(atMediaOffset: mediaOffset, length: readLength)
+        }
+        let anchorPiece = await manager.playbackAnchorPieceIndex()
+        let pieceSpan = await manager.pieceIndicesForMediaOffset(
+            mediaOffset: max(0, anchor - window / 2),
+            length: Int(window * 2)
+        )
+        TorrentLog.info(
+            "[Streaming] prioritizePlayback scrubber time=\(Int(time))s/\(Int(durationSeconds))s fraction=\(String(format: "%.3f", fraction)) mediaOffset=\(anchor) source=\(offsetSource) anchorPiece=\(anchorPiece.map { String($0) } ?? "nil") pieceSpan=\(pieceSpan.prefix(8).map(String.init).joined(separator: ",")) bootstrap=\(await manager.needsIndexBootstrapForLogging())"
+        )
+        torrentEngine?.refreshDownloadPriorities()
+    }
+
+    private func mediaOffsetForScrubberSeek(
+        time: Double,
+        fraction: Double,
+        durationSeconds: Double,
+        target: TorrentStreamTarget
+    ) async -> (Int64, String) {
+        let linear = Int64(Double(target.byteLength) * fraction)
+        let ext = (target.file.relativePath as NSString).pathExtension.lowercased()
+        let isMKV = ext == "mkv" || ext == "webm" || target.contentType.contains("matroska")
+        guard isMKV, let pieceStore else { return (linear, "linear") }
+
+        let headLen = min(1024 * 1024, Int(target.byteLength))
+        guard let headSpan = await pieceStore.readableSpan(
+            offset: target.byteOffset,
+            length: headLen,
+            preferSuffix: false
+        ), headSpan.length >= 32 * 1024 else {
+            return (linear, "linear")
+        }
+
+        do {
+            let headData = try await pieceStore.read(offset: headSpan.offset, length: headSpan.length)
+            let tailLen = min(4 * 1024 * 1024, Int(target.byteLength))
+            let tailMediaOffset = max(0, target.byteLength - Int64(tailLen))
+            let tailTorrentOffset = target.byteOffset + tailMediaOffset
+            let tailData: Data
+            if let tailSpan = await pieceStore.readableSpan(
+                offset: tailTorrentOffset,
+                length: tailLen,
+                preferSuffix: true
+            ), tailSpan.length > 0 {
+                tailData = try await pieceStore.read(offset: tailSpan.offset, length: tailSpan.length)
+            } else {
+                tailData = Data()
+            }
+
+            if let cueOffset = MKVSeekBootstrap.mediaOffsetForPlaybackTime(
+                seconds: time,
+                durationSeconds: durationSeconds,
+                head: headData,
+                tail: tailData,
+                tailMediaOffset: tailMediaOffset,
+                mediaByteLength: target.byteLength
+            ) {
+                return (cueOffset, "mkv-cues")
+            }
+        } catch {
+            TorrentLog.debug("[Streaming] MKV cue seek mapping failed: \(error.localizedDescription)")
+        }
+        return (linear, "linear")
     }
 
     public func readableMediaTimeRanges(durationSeconds: Double) async -> [ClosedRange<Double>] {

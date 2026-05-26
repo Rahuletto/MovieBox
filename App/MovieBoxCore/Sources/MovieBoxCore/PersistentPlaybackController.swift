@@ -383,11 +383,11 @@ public final class PersistentPlaybackController {
     ) async {
         guard !Task.isCancelled else { return }
 
-        if let infoHash = torrent.resolvedInfoHash,
-           let localPath = appServices.downloadPersistence?.completedFilePath(for: infoHash) {
+        if let localPath = appServices.resolvedCompletedMediaPath(for: torrent) {
+            await appServices.prepareForLocalFilePlayback()
             let localURL = URL(fileURLWithPath: localPath)
             PlaybackLog.log("runSingleAttempt -> playing local downloaded file: \(localPath)")
-            PlaybackLog.log("[MKVHLS] persistent single completed file hash=\(infoHash) ext=\(localURL.pathExtension.lowercased()) exists=\(FileManager.default.fileExists(atPath: localURL.path))")
+            PlaybackLog.log("[MKVHLS] persistent single completed file hash=\(torrent.resolvedInfoHash ?? "?") ext=\(localURL.pathExtension.lowercased()) exists=\(FileManager.default.fileExists(atPath: localURL.path))")
             phase = .openingPlayer
             coordinator.playLocalFile(
                 localFilePath: localPath,
@@ -411,12 +411,13 @@ public final class PersistentPlaybackController {
             )
             playerState.isStreamingTorrent = true
             request.onPlaybackOpened?(torrent)
-            resetToIdleAfterPlayerOpen()
+            scheduleShellReleaseWhenPlayerOpens(playerState: playerState)
             return
         }
 
         let session = await coordinator.startSession(for: torrent)
         appServices.registerActiveSession(session)
+        appServices.trackStreamForCleanup(torrent: torrent, movieId: request.movieId)
         request.onSessionStarted?(session)
         startMonitoring(session: session)
 
@@ -468,11 +469,11 @@ public final class PersistentPlaybackController {
             activeTorrentID = torrent.id
             phase = .preparing
 
-            if let infoHash = torrent.resolvedInfoHash,
-               let localPath = appServices.downloadPersistence?.completedFilePath(for: infoHash) {
+            if let localPath = appServices.resolvedCompletedMediaPath(for: torrent) {
+                await appServices.prepareForLocalFilePlayback()
                 let localURL = URL(fileURLWithPath: localPath)
                 PlaybackLog.log("runBestAvailableAttempts -> playing local downloaded file: \(localPath)")
-                PlaybackLog.log("[MKVHLS] persistent best completed file hash=\(infoHash) ext=\(localURL.pathExtension.lowercased()) exists=\(FileManager.default.fileExists(atPath: localURL.path)) attempt=\(attempt)")
+                PlaybackLog.log("[MKVHLS] persistent best completed file hash=\(torrent.resolvedInfoHash ?? "?") ext=\(localURL.pathExtension.lowercased()) exists=\(FileManager.default.fileExists(atPath: localURL.path)) attempt=\(attempt)")
                 phase = .openingPlayer
                 coordinator.playLocalFile(
                     localFilePath: localPath,
@@ -496,7 +497,7 @@ public final class PersistentPlaybackController {
                 )
                 playerState.isStreamingTorrent = true
                 request.onPlaybackOpened?(torrent)
-                resetToIdleAfterPlayerOpen()
+                scheduleShellReleaseWhenPlayerOpens(playerState: playerState)
                 return
             }
 
@@ -506,6 +507,7 @@ public final class PersistentPlaybackController {
 
             let session = await coordinator.startSession(for: torrent)
             appServices.registerActiveSession(session)
+            appServices.trackStreamForCleanup(torrent: torrent, movieId: request.movieId)
             request.onSessionStarted?(session)
             startMonitoring(session: session)
 
@@ -569,7 +571,7 @@ public final class PersistentPlaybackController {
             )
             playerState.isStreamingTorrent = true
             request.onPlaybackOpened?(torrent)
-            resetToIdleAfterPlayerOpen()
+            scheduleShellReleaseWhenPlayerOpens(playerState: playerState)
         } catch {
             PlaybackLog.log("[MKVHLS] openPlayer failed: \(error.localizedDescription)")
             phase = .failed(error.localizedDescription)
@@ -583,65 +585,40 @@ public final class PersistentPlaybackController {
         session: TorrentStreamSession? = nil,
         localMediaPath: String? = nil
     ) {
-        SubtitlePlaybackSupport.configure(
+        SubtitlePlaybackSupport.attachToPlayback(
             playerState: playerState,
             catalog: request.subtitleCatalog,
             searchContext: request.subtitleSearchContext,
             selectedSubtitleID: request.selectedSubtitleID,
+            localMediaPath: localMediaPath,
+            session: session,
             autoSelectRemote: false
         )
-
-        let preferredLanguage = request.subtitleSearchContext?.preferredLanguage ?? "en"
-        playerState.onEmbeddedLegibleTracksDiscovered = { tracks in
-            SubtitlePlaybackSupport.mergeEmbeddedLegibleTracks(
-                playerState: playerState,
-                tracks: tracks,
-                preferredLanguage: preferredLanguage
-            )
-        }
-
-        if let session {
-            playerState.resolveEmbeddedMediaURL = {
-                await session.mediaFileURLForSubtitleProbe()
-            }
-        } else if let localMediaPath {
-            let fileURL = URL(fileURLWithPath: localMediaPath)
-            playerState.resolveEmbeddedMediaURL = { fileURL }
-        }
-
-        Task {
-            if let localMediaPath {
-                await SubtitlePlaybackSupport.attachEmbeddedSubtitles(
-                    playerState: playerState,
-                    mediaFileURL: URL(fileURLWithPath: localMediaPath),
-                    preferredLanguage: preferredLanguage,
-                    isCompleteFile: true
-                )
-            } else if let session {
-                await SubtitlePlaybackSupport.attachEmbeddedFromSession(
-                    playerState: playerState,
-                    session: session,
-                    preferredLanguage: preferredLanguage
-                )
-            }
-            if let context = request.subtitleSearchContext {
-                _ = await SubtitlePlaybackSupport.ensurePreferredSubtitleSelected(
-                    playerState: playerState,
-                    mode: context.metadataMode
-                )
-            }
-        }
     }
 
-    private func resetToIdleAfterPlayerOpen() {
+    /// Keeps the bottom pill + row progress alive until AVPlayer is actually presented.
+    private func scheduleShellReleaseWhenPlayerOpens(playerState: PlayerState) {
         pipelineTask = nil
-        monitorTask = nil
-        activeTorrentID = nil
-        item = nil
-        phase = .idle
-        phaseLabel = ""
-        phaseDetail = ""
-        publishUITick(.inactive)
+        Task { @MainActor in
+            let deadline = ContinuousClock.now + .seconds(180)
+            while ContinuousClock.now < deadline {
+                if playerState.isPresented {
+                    activeTorrentID = nil
+                    item = nil
+                    phase = .idle
+                    phaseLabel = ""
+                    phaseDetail = ""
+                    publishUITick(.inactive)
+                    monitorTask?.cancel()
+                    monitorTask = nil
+                    return
+                }
+                if case .failed = phase {
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
     }
 
     private func startMonitoring(session: TorrentStreamSession) {

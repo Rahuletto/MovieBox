@@ -22,10 +22,9 @@ public final class DownloadPersistenceService: DownloadPersistenceDelegate {
 
     public func completedFilePath(for infoHash: String) -> String? {
         let cleanHash = infoHash.lowercased()
-        let descriptor = FetchDescriptor<DownloadRecord>(
-            predicate: #Predicate<DownloadRecord> { $0.infoHash == cleanHash }
-        )
-        guard let record = try? modelContext.fetch(descriptor).first else { return nil }
+        let descriptor = FetchDescriptor<DownloadRecord>()
+        guard let records = try? modelContext.fetch(descriptor) else { return nil }
+        guard let record = records.first(where: { $0.infoHash.lowercased() == cleanHash }) else { return nil }
         guard record.state == DownloadState.completed.rawValue else { return nil }
         guard let path = record.localFilePath, !path.isEmpty else { return nil }
         if FileManager.default.fileExists(atPath: path) {
