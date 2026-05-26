@@ -17,10 +17,15 @@ extension PlayerState {
             queue: .main
         ) { [weak self] time in
             guard let self else { return }
-            let seconds = time.seconds
+            // Translate AVPlayer's HLS-relative time to absolute movie time.
+            let rawSeconds = time.seconds
+            let seconds = rawSeconds.isFinite ? rawSeconds + self.hlsStreamTimelineOffset : rawSeconds
             let subtitleTime: Double
             if self.isApplyingResumeSeek {
                 // Keep scrubber at the resume target while the seek is in flight.
+                subtitleTime = self.currentTime
+            } else if self.isRestartingStreamingRemux {
+                // Keep scrubber at the seek target while the remux is restarting.
                 subtitleTime = self.currentTime
             } else if let userSeek = self.pendingUserSeekTime {
                 subtitleTime = userSeek
@@ -30,7 +35,9 @@ extension PlayerState {
                     self.currentTime = seconds
                     self.peakPlaybackTime = max(self.peakPlaybackTime, seconds)
                 } else if self.isPlaybackTimeBuffered(userSeek) {
-                    self.retryPendingUserSeekIfNeeded(target: userSeek)
+                    Task { @MainActor in
+                        await self.retryPendingUserSeekIfNeeded(target: userSeek)
+                    }
                 }
             } else if let pending = self.pendingResumePosition, pending > 20, seconds.isFinite, seconds < min(pending - 2, 10) {
                 // Ignore head-of-file position until resume seek completes.
@@ -249,7 +256,21 @@ extension PlayerState {
                 }
             }
         } else if (streamsFromLocalTorrentServer || isStreamingTorrent), !initialSeekApplied {
+            PlaybackLog.log("tryApplyPendingResume initialSeekApplied=false -> true, pendingUserSeekTime=\(pendingUserSeekTime ?? -1)")
             initialSeekApplied = true
+            if let pendingSeek = pendingUserSeekTime, pendingSeek > 20 {
+                isBuffering = true
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    PlaybackLog.log("applying early scrub seek target=\(pendingSeek)")
+                    await self.onPrioritizeTorrentPlayback?(pendingSeek)
+                    if self.isHLSTorrentPlayback, self.isStreamingTorrent, !self.isRestartingStreamingRemux {
+                        await self.onRestartStreamingHLSSeek?(pendingSeek)
+                    }
+                    await self.retryPendingUserSeekIfNeeded(target: pendingSeek)
+                }
+                return
+            }
             isApplyingResumeSeek = true
             isBuffering = true
             player.pause()
@@ -280,7 +301,16 @@ extension PlayerState {
     }
 
     func isPlaybackTimeBuffered(_ seconds: Double) -> Bool {
-        isResumePositionBuffered(seconds, allowPlayedThrough: true)
+        if isStreamingTorrent || streamsFromLocalTorrentServer {
+            // Never treat scrub targets as buffered just because peakPlaybackTime was updated.
+            // HLS remux playlists also report loaded ranges ahead of downloaded torrent bytes.
+            let hasTorrentBytes = isResumePositionBuffered(seconds, allowPlayedThrough: false)
+            if isHLSTorrentPlayback {
+                return hasTorrentBytes && cachedStreamBufferRanges.contains { $0.contains(seconds) }
+            }
+            return hasTorrentBytes
+        }
+        return isResumePositionBuffered(seconds, allowPlayedThrough: true)
     }
 
     /// Stricter check for continue-watching seeks — requires real byte ranges, not UI-only peak time.
@@ -291,6 +321,8 @@ extension PlayerState {
                 if range.contains(seconds) { return true }
             }
             if allowPlayedThrough, seconds <= peakPlaybackTime + 2 { return true }
+            // For torrent streams, we only trust cachedStreamBufferRanges. Do not fall through to loadedTimeRanges.
+            return false
         }
         guard let item = observedPlayerItem else { return false }
         for value in item.loadedTimeRanges {
@@ -402,11 +434,12 @@ extension PlayerState {
 
     public func refreshBufferedTimeRangesFromPlayer() {
         var ranges: [ClosedRange<Double>] = []
+        let offset = hlsStreamTimelineOffset
         if let item = player.currentItem {
             ranges = item.loadedTimeRanges.compactMap { value in
                 let range = value.timeRangeValue
-                let start = CMTimeGetSeconds(range.start)
-                let end = CMTimeGetSeconds(CMTimeAdd(range.start, range.duration))
+                let start = CMTimeGetSeconds(range.start) + offset
+                let end = CMTimeGetSeconds(CMTimeAdd(range.start, range.duration)) + offset
                 guard start.isFinite, end.isFinite, end > start else { return nil }
                 return start...end
             }
@@ -459,8 +492,7 @@ extension PlayerState {
                 self.updateBufferingState()
                 self.tryApplyPendingResume()
                 if let pendingSeek = self.pendingUserSeekTime {
-                    await self.onPrioritizeTorrentPlayback?(pendingSeek)
-                    self.retryPendingUserSeekIfNeeded(target: pendingSeek)
+                    await self.retryPendingUserSeekIfNeeded(target: pendingSeek)
                 }
                 try? await Task.sleep(for: .milliseconds(500))
             }
@@ -473,16 +505,37 @@ extension PlayerState {
     }
 
     /// Re-issue AVPlayer seek once torrent bytes at `target` are readable (scrubber-driven, not sequential).
-    func retryPendingUserSeekIfNeeded(target: Double) {
-        guard let pending = pendingUserSeekTime, abs(pending - target) < 0.5 else { return }
+    func retryPendingUserSeekIfNeeded(target: Double) async {
+        guard !isRestartingStreamingRemux else { return }
+        guard let pending = pendingUserSeekTime, abs(pending - target) < 0.5 else {
+            PlaybackLog.log("retryPendingUserSeekIfNeeded skip: target \(target) does not match pending \(pendingUserSeekTime ?? -1)")
+            return
+        }
         guard isStreamingTorrent || streamsFromLocalTorrentServer else { return }
-        guard isPlaybackTimeBuffered(target) else { return }
-        guard let item = observedPlayerItem, item.status == .readyToPlay else { return }
-        guard !isApplyingResumeSeek, !isApplyingPendingUserSeek else { return }
+        let isBuffered = isPlaybackTimeBuffered(target)
+        PlaybackLog.log("retryPendingUserSeekIfNeeded target=\(target) isBuffered=\(isBuffered)")
+        guard isBuffered else { return }
+        if let readinessProvider = streamPlaybackReadinessProvider {
+            let isReady = await readinessProvider(target)
+            PlaybackLog.log("retryPendingUserSeekIfNeeded readinessProvider returned \(isReady)")
+            guard isReady else { return }
+        } else if isHLSTorrentPlayback {
+            PlaybackLog.log("retryPendingUserSeekIfNeeded skip: HLS torrent playback without readiness provider")
+            return
+        }
+        guard let item = observedPlayerItem, item.status == .readyToPlay else {
+            PlaybackLog.log("retryPendingUserSeekIfNeeded skip: player item status not readyToPlay")
+            return
+        }
+        guard !isApplyingResumeSeek, !isApplyingPendingUserSeek else {
+            PlaybackLog.log("retryPendingUserSeekIfNeeded skip: already applying seek (resume=\(isApplyingResumeSeek), pending=\(isApplyingPendingUserSeek))")
+            return
+        }
 
-        let playerSeconds = player.currentTime().seconds
+        let playerSeconds = player.currentTime().seconds + hlsStreamTimelineOffset
         guard playerSeconds.isFinite else { return }
         if abs(playerSeconds - target) < 1.5 {
+            PlaybackLog.log("retryPendingUserSeekIfNeeded: player already at target \(playerSeconds)")
             pendingUserSeekTime = nil
             currentTime = target
             peakPlaybackTime = max(peakPlaybackTime, target)
@@ -504,12 +557,16 @@ extension PlayerState {
             player.pause()
         }
 
-        let seekTarget = CMTime(seconds: target, preferredTimescale: 600)
+        let hlsRelativeTarget = target - hlsStreamTimelineOffset
+        PlaybackLog.log("retryPendingUserSeekIfNeeded: executing AVPlayer seek to \(target) (hlsRelative=\(hlsRelativeTarget))")
+        let seekTarget = CMTime(seconds: hlsRelativeTarget, preferredTimescale: 600)
         player.seek(to: seekTarget, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] finished in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.isApplyingPendingUserSeek = false
-                let atTarget = abs(self.player.currentTime().seconds - target) < 1.5
+                let playerMovieTime = self.player.currentTime().seconds + self.hlsStreamTimelineOffset
+                let atTarget = abs(playerMovieTime - target) < 1.5
+                PlaybackLog.log("retryPendingUserSeekIfNeeded seek callback finished=\(finished) atTarget=\(atTarget) playerMovieTime=\(playerMovieTime)")
                 if finished, atTarget {
                     self.pendingUserSeekTime = nil
                     self.currentTime = target

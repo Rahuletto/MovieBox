@@ -121,14 +121,24 @@ public enum MKVSeekBootstrap {
     }
 
     private static func findElementStart(id: [UInt8], in data: Data, searchRange: Range<Int>) -> Int? {
-        let bytes = [UInt8](data)
-        guard searchRange.lowerBound >= 0, searchRange.upperBound <= bytes.count else { return nil }
-        var i = searchRange.lowerBound
-        while i + id.count <= searchRange.upperBound {
-            if Array(bytes[i..<(i + id.count)]) == id { return i }
-            i += 1
+        guard searchRange.lowerBound >= 0, searchRange.upperBound <= data.count else { return nil }
+        let m = id.count
+        return data.withUnsafeBytes { rawBuffer -> Int? in
+            guard let baseAddress = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return nil }
+            var i = searchRange.lowerBound
+            while i + m <= searchRange.upperBound {
+                var match = true
+                for j in 0..<m {
+                    if baseAddress[i + j] != id[j] {
+                        match = false
+                        break
+                    }
+                }
+                if match { return i }
+                i += 1
+            }
+            return nil
         }
-        return nil
     }
 
     private static func elementDataRange(in data: Data, elementStart: Int, elementID: [UInt8]) -> Range<Int>? {
@@ -196,43 +206,57 @@ public enum MKVSeekBootstrap {
     private static func seekHeadCuePositions(in head: Data) -> [Int64] {
         guard head.count >= 64 else { return [] }
         var results: [Int64] = []
-        let bytes = [UInt8](head)
-        var i = 0
-        while i + 12 < bytes.count {
-            if bytes[i] == 0x53, bytes[i + 1] == 0xAB,
-               i + 8 < bytes.count,
-               bytes[i + 3] == 0x84,
-               bytes[i + 4] == 0x1C, bytes[i + 5] == 0x53,
-               bytes[i + 6] == 0xBB, bytes[i + 7] == 0x6B {
-                for j in (i + 8)..<min(bytes.count, i + 32) {
-                    if bytes[j] == 0x53, bytes[j + 1] == 0xAC, j + 3 < bytes.count {
-                        let size = Int(bytes[j + 2])
-                        if size > 0, size <= 8, j + 3 + size <= bytes.count {
-                            var value: UInt64 = 0
-                            for k in 0..<size {
-                                value = (value << 8) | UInt64(bytes[j + 3 + k])
+        head.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+            let count = head.count
+            var i = 0
+            while i + 12 < count {
+                if baseAddress[i] == 0x53, baseAddress[i + 1] == 0xAB,
+                   i + 8 < count,
+                   baseAddress[i + 3] == 0x84,
+                   baseAddress[i + 4] == 0x1C, baseAddress[i + 5] == 0x53,
+                   baseAddress[i + 6] == 0xBB, baseAddress[i + 7] == 0x6B {
+                    for j in (i + 8)..<min(count, i + 32) {
+                        if baseAddress[j] == 0x53, baseAddress[j + 1] == 0xAC, j + 3 < count {
+                            let size = Int(baseAddress[j + 2])
+                            if size > 0, size <= 8, j + 3 + size <= count {
+                                var value: UInt64 = 0
+                                for k in 0..<size {
+                                    value = (value << 8) | UInt64(baseAddress[j + 3 + k])
+                                }
+                                results.append(Int64(value))
                             }
-                            results.append(Int64(value))
                         }
                     }
                 }
+                i += 1
             }
-            i += 1
         }
         return results
     }
 
     private static func findAll(elementID: [UInt8], in data: Data) -> [Int] {
         guard !elementID.isEmpty, data.count >= elementID.count else { return [] }
-        let bytes = [UInt8](data)
         var positions: [Int] = []
-        var i = 0
-        while i + elementID.count <= bytes.count {
-            if Array(bytes[i..<(i + elementID.count)]) == elementID {
-                positions.append(i)
-                i += elementID.count
-            } else {
-                i += 1
+        let n = data.count
+        let m = elementID.count
+        data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+            var i = 0
+            while i + m <= n {
+                var match = true
+                for j in 0..<m {
+                    if baseAddress[i + j] != elementID[j] {
+                        match = false
+                        break
+                    }
+                }
+                if match {
+                    positions.append(i)
+                    i += m
+                } else {
+                    i += 1
+                }
             }
         }
         return positions

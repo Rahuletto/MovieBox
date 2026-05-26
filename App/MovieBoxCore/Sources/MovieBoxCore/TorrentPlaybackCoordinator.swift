@@ -460,6 +460,13 @@ public final class TorrentPlaybackCoordinator {
         playerState.onRestartStreamingHLSSeek = { @MainActor [weak self] time in
             await self?.scheduleStreamingRemuxRestart(to: time, playerState: playerState)
         }
+        playerState.streamPlaybackReadinessProvider = { @MainActor [weak self] time in
+            guard let self else { return false }
+            return await self.orchestrator.hasReadablePlaybackData(
+                atSeconds: time,
+                durationSeconds: playerState.duration
+            )
+        }
         playerState.onPersistStreamBufferRanges = { tmdbId, infoHash, duration, ranges in
             PlaybackDiskCache.saveStreamBufferRanges(
                 tmdbId: tmdbId,
@@ -553,8 +560,15 @@ public final class TorrentPlaybackCoordinator {
         guard let sourceURL = activeStreamingSourceURL,
               let cacheKey = activeStreamingHLSCacheKey else { return }
         let remuxedSeconds = await moviePlayer.estimatedStreamingHLSDuration(cacheKey: cacheKey)
-        guard time > remuxedSeconds - 12 else { return }
-        if lastStreamingRemuxRestartTarget >= 0, abs(lastStreamingRemuxRestartTarget - time) < 20 {
+        let currentStartSeek = lastStreamingRemuxRestartTarget >= 30 ? lastStreamingRemuxRestartTarget - 30 : 0
+        let remuxedAbsoluteEnd = lastStreamingRemuxRestartTarget >= 0 ? (currentStartSeek + remuxedSeconds) : remuxedSeconds
+
+        let needsRestart = lastStreamingRemuxRestartTarget < 0 || time < currentStartSeek || time > remuxedAbsoluteEnd + 2
+        guard needsRestart else {
+            PlaybackLog.log(
+                "[MKVHLS] skip remux restart — target \(Int(time))s within remuxed playlist [\(Int(currentStartSeek)), \(Int(remuxedAbsoluteEnd))]s"
+            )
+            playerState.performNormalSeek(to: time)
             return
         }
 
@@ -562,21 +576,24 @@ public final class TorrentPlaybackCoordinator {
         guard duration.isFinite, duration > 0 else { return }
         lastStreamingRemuxRestartTarget = time
         PlaybackLog.log(
-            "[MKVHLS] restart remux at \(Int(time))s — only \(Int(remuxedSeconds))s segmented so far"
+            "[MKVHLS] restart remux at \(Int(time))s — only \(Int(remuxedSeconds))s segmented so far (playlist start \(Int(currentStartSeek))s)"
         )
-        playerState.updateBufferingDetail("Seeking — rebuilding stream at \(formatSeekClock(time))…")
-        playerState.isBuffering = true
+        playerState.updateBufferingDetail(nil)
+        playerState.isBuffering = false
 
         let durationForPrioritize = duration
-        await orchestrator.prioritizePlayback(atSeconds: time, durationSeconds: durationForPrioritize)
+        let startPrioritize = time >= 30 ? time - 30 : 0
+        await orchestrator.prioritizePlayback(atSeconds: startPrioritize, durationSeconds: durationForPrioritize)
 
         do {
+            // The HLS stream starts at this offset into the movie (matches the -ss value in restartStreamingRemux).
+            let hlsStartOffset = time >= 30 ? time - 30 : 0.0
             let remux = try await moviePlayer.restartStreamingRemux(
                 inputURL: sourceURL,
                 cacheKey: cacheKey,
                 seekSeconds: time
             )
-            playerState.reloadStreamingHLSPlaylist(remux.playlistURL, seekTo: time)
+            playerState.reloadStreamingHLSPlaylist(remux.playlistURL, seekTo: time, hlsOffset: hlsStartOffset)
             playerState.updateBufferingDetail(nil)
         } catch {
             lastStreamingRemuxRestartTarget = -1

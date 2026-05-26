@@ -15,6 +15,7 @@ public final class StreamingOrchestrator: @unchecked Sendable {
     private var peerId: String = ""
     private var dht: KademliaDHT?
     private var playbackRegistrationID: UUID?
+    private var lastScrubberSeekAnchor: Int64?
 
     public init() {}
 
@@ -259,19 +260,15 @@ public final class StreamingOrchestrator: @unchecked Sendable {
             time: time,
             fraction: fraction,
             durationSeconds: durationSeconds,
-            target: target
+            target: target,
+            pieceStore: pieceStore
         )
-        let window = Int64(4 * 1024 * 1024)
-        let spans: [Int64] = [
-            max(0, anchor - window / 2),
-            anchor,
-            min(max(0, target.byteLength - window), anchor + window / 2),
-        ]
-        for mediaOffset in spans {
-            let remaining = max(0, target.byteLength - mediaOffset)
-            let readLength = min(Int(window), Int(remaining))
-            guard readLength > 0 else { continue }
-            await manager.markUserSeekPlayback(atMediaOffset: mediaOffset, length: readLength)
+        lastScrubberSeekAnchor = anchor
+        let window = Int64(32 * 1024 * 1024)
+        let remaining = max(0, target.byteLength - anchor)
+        let readLength = min(Int(window), Int(remaining))
+        if readLength > 0 {
+            await manager.markUserSeekPlayback(atMediaOffset: anchor, length: readLength)
         }
         let anchorPiece = await manager.playbackAnchorPieceIndex()
         let pieceSpan = await manager.pieceIndicesForMediaOffset(
@@ -284,11 +281,12 @@ public final class StreamingOrchestrator: @unchecked Sendable {
         torrentEngine?.refreshDownloadPriorities()
     }
 
-    private func mediaOffsetForScrubberSeek(
+    nonisolated private func mediaOffsetForScrubberSeek(
         time: Double,
         fraction: Double,
         durationSeconds: Double,
-        target: TorrentStreamTarget
+        target: TorrentStreamTarget,
+        pieceStore: PieceStore?
     ) async -> (Int64, String) {
         let linear = Int64(Double(target.byteLength) * fraction)
         let ext = (target.file.relativePath as NSString).pathExtension.lowercased()
@@ -352,6 +350,23 @@ public final class StreamingOrchestrator: @unchecked Sendable {
             guard end.isFinite, start.isFinite, end > start else { return nil }
             return max(0, start)...min(durationSeconds, end)
         }
+    }
+
+    public func hasReadablePlaybackData(atSeconds time: Double, durationSeconds: Double) async -> Bool {
+        guard durationSeconds.isFinite, durationSeconds > 0,
+              let target = streamTarget,
+              let pieceStore else { return false }
+        let fallback = Int64(Double(target.byteLength) * max(0, min(1, time / durationSeconds)))
+        let mediaOffset = lastScrubberSeekAnchor ?? fallback
+        let torrentOffset = target.byteOffset + max(0, min(target.byteLength, mediaOffset))
+        let requiredBytes = min(2 * 1024 * 1024, Int(max(0, target.byteLength - mediaOffset)))
+        guard requiredBytes > 0,
+              let span = await pieceStore.readableSpan(
+                offset: torrentOffset,
+                length: requiredBytes,
+                preferSuffix: false
+              ) else { return false }
+        return span.offset <= torrentOffset && span.offset + Int64(span.length) >= torrentOffset + Int64(requiredBytes)
     }
 
     public func isStreamTailPieceReady() async -> Bool {

@@ -97,6 +97,9 @@ extension PlayerState {
             || url.host.map { $0 == "127.0.0.1" || $0 == "localhost" } == true
         isHLSTorrentPlayback = url.pathExtension.lowercased() == "m3u8"
             || url.absoluteString.lowercased().contains(".m3u8")
+        if streamsFromLocalTorrentServer {
+            isStreamingTorrent = true
+        }
 
         self.title = title
         self.movieId = movieId
@@ -400,7 +403,12 @@ extension PlayerState {
     }
 
     /// Replaces the HLS item after ffmpeg restarts from a mid-stream seek (`-ss`).
-    public func reloadStreamingHLSPlaylist(_ url: URL, seekTo time: Double) {
+    /// - Parameters:
+    ///   - url: The HLS playlist URL served by the local cache server.
+    ///   - time: The **movie** time the user wants to seek to (e.g. 5400s).
+    ///   - hlsOffset: The timeline offset — the `-ss` value passed to ffmpeg (e.g. 5370s).
+    ///     The HLS stream starts at 0 but represents content starting at `hlsOffset` in the movie.
+    public func reloadStreamingHLSPlaylist(_ url: URL, seekTo time: Double, hlsOffset: Double) {
         isRestartingStreamingRemux = true
         pendingResumePosition = nil
         pendingUserSeekTime = time
@@ -408,6 +416,7 @@ extension PlayerState {
         isBuffering = true
         currentTime = time
         peakPlaybackTime = max(peakPlaybackTime, time)
+        hlsStreamTimelineOffset = hlsOffset
 
         let assetOptions: [String: Any] = [
             AVURLAssetAllowsExpensiveNetworkAccessKey: true,
@@ -421,14 +430,18 @@ extension PlayerState {
         player.volume = volume
         player.isMuted = isMuted
 
-        PlaybackLog.log("[MKVHLS] reload playlist after seek restart → \(Int(time))s")
+        // Seek to the position within the HLS stream (movie time minus HLS start offset).
+        let hlsRelativeTime = time - hlsOffset
+        PlaybackLog.log("[MKVHLS] reload playlist after seek restart → movie \(Int(time))s hlsOffset=\(Int(hlsOffset))s hlsRelative=\(Int(hlsRelativeTime))s")
 
         setupObservers()
-        let target = CMTime(seconds: time, preferredTimescale: 600)
+        let target = CMTime(seconds: hlsRelativeTime, preferredTimescale: 600)
         player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.isRestartingStreamingRemux = false
+                self.pendingUserSeekTime = nil
+                self.currentTime = time
                 if self.userWantsPlayback {
                     self.player.playImmediately(atRate: Float(self.playbackRate))
                 }

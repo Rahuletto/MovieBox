@@ -217,16 +217,6 @@ public struct PlayerView<
                 .tint(.white)
                 .shadow(color: .black.opacity(0.9), radius: 10, y: 2)
                 .shadow(color: .black.opacity(0.55), radius: 2, y: 0)
-            if let detail = state.bufferingDetail?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !detail.isEmpty {
-                Text(detail)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.white)
-                    .shadow(color: .black.opacity(0.85), radius: 6, y: 2)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: 520)
-            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .allowsHitTesting(false)
