@@ -72,6 +72,14 @@ public actor PieceManager {
         downloadedPieces = pieces
     }
 
+    public func clearDownloadedPieces(in range: ClosedRange<Int>) {
+        for index in range {
+            let piece = UInt32(index)
+            downloadedPieces.remove(piece)
+            resetPiece(piece)
+        }
+    }
+
     public func setIndexBootstrapCompleted() {
         indexBootstrapCompleted = true
     }
@@ -200,8 +208,10 @@ public actor PieceManager {
     public func markBlockReceived(pieceIndex: UInt32, offset: UInt32, block: Data) -> PieceReceiveOutcome {
         pendingRequests.removeValue(forKey: BlockRequest(pieceIndex: pieceIndex, offset: offset, length: 0))
 
+        // Allow re-download when a resume seed marked a piece done but verification never landed.
         if downloadedPieces.contains(pieceIndex) {
-            return .incomplete
+            downloadedPieces.remove(pieceIndex)
+            resetPiece(pieceIndex)
         }
 
         let expectedSize = Int(pieceSize(for: pieceIndex))

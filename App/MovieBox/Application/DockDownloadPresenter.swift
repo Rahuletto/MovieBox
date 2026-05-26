@@ -3,11 +3,15 @@ import CoreStorage
 import CoreStreaming
 import Foundation
 
-/// macOS-style Dock tile: app icon with a thin horizontal progress bar underneath (like Launchpad downloads).
+/// macOS Dock download bar (same approach as system/Launchpad: icon + bar overlay on `dockTile`).
+///
+/// `Progress.publish()` alone does not reliably show a Dock bar on current macOS releases.
 @MainActor
 enum DockDownloadPresenter {
-    private static var progressView: DockTileProgressView?
-    private static var publishedProgress: Progress?
+    private static let tileSize: CGFloat = 128
+    private static var tileView = DockTileOverlayView(
+        frame: NSRect(x: 0, y: 0, width: tileSize, height: tileSize)
+    )
 
     static func update(tasks: [DownloadManager.DownloadTask]) {
         let active = tasks.filter { task in
@@ -30,122 +34,70 @@ enum DockDownloadPresenter {
             ? Double(completedUnits) / Double(totalUnits)
             : 0
 
-        publishFoundationProgress(
-            completedUnits: completedUnits,
-            totalUnits: totalUnits,
-            label: active.count == 1
-                ? active[0].title
-                : "Downloading \(active.count) items"
-        )
+        tileView.progress = max(fraction, active.contains(where: { $0.state == .queued }) ? 0.04 : 0)
+        tileView.needsDisplay = true
 
         let dockTile = NSApplication.shared.dockTile
+        dockTile.contentView = tileView
         dockTile.badgeLabel = active.count > 1 ? "\(active.count)" : nil
-
-        let view = progressView ?? DockTileProgressView(frame: NSRect(x: 0, y: 0, width: 128, height: 128))
-        progressView = view
-        view.progress = fraction
-        view.isIndeterminate = fraction <= 0.001 && active.contains(where: { $0.state == .queued })
-        dockTile.contentView = view
         dockTile.display()
     }
 
     static func clear() {
-        if let publishedProgress {
-            publishedProgress.completedUnitCount = publishedProgress.totalUnitCount
-            publishedProgress.cancel()
-        }
-        publishedProgress = nil
-        progressView = nil
+        tileView.progress = 0
         let dockTile = NSApplication.shared.dockTile
         dockTile.contentView = nil
         dockTile.badgeLabel = nil
         dockTile.display()
     }
-
-    private static func publishFoundationProgress(
-        completedUnits: Int64,
-        totalUnits: Int64,
-        label: String
-    ) {
-        let progress: Progress
-        if let existing = publishedProgress, existing.totalUnitCount == max(totalUnits, 1) {
-            progress = existing
-        } else {
-            progress = Progress(totalUnitCount: max(totalUnits, 1))
-            progress.kind = .file
-            progress.publish()
-            progress.becomeCurrent(withPendingUnitCount: 0)
-            publishedProgress = progress
-        }
-        progress.completedUnitCount = min(completedUnits, totalUnits)
-        progress.localizedDescription = label
-    }
 }
 
-private final class DockTileProgressView: NSView {
+/// Draws the unmodified app icon, then the standard white/black Dock progress bar on top.
+private final class DockTileOverlayView: NSView {
     var progress: Double = 0
-    var isIndeterminate = false
 
-    private enum Metrics {
-        static let barHeight: CGFloat = 5
-        static let barBottomInset: CGFloat = 11
-        static let barHorizontalInset: CGFloat = 15
-        static let iconInset: CGFloat = 10
-        static let iconGapAboveBar: CGFloat = 7
-    }
-
-    override var isFlipped: Bool { true }
+    override var isFlipped: Bool { false }
 
     override func draw(_ dirtyRect: NSRect) {
-        guard let icon = NSApplication.shared.applicationIconImage else { return }
+        NSGraphicsContext.current?.imageInterpolation = .high
 
-        let barWidth = bounds.width - Metrics.barHorizontalInset * 2
-        let barY = bounds.height - Metrics.barBottomInset - Metrics.barHeight
-        let iconHeight = max(0, barY - Metrics.iconInset - Metrics.iconGapAboveBar)
-        let iconRect = NSRect(
-            x: Metrics.iconInset,
-            y: Metrics.iconInset,
-            width: bounds.width - Metrics.iconInset * 2,
-            height: iconHeight
-        )
-        icon.draw(in: iconRect)
-
-        let barRect = NSRect(
-            x: Metrics.barHorizontalInset,
-            y: barY,
-            width: barWidth,
-            height: Metrics.barHeight
-        )
-        let trackPath = NSBezierPath(
-            roundedRect: barRect,
-            xRadius: Metrics.barHeight / 2,
-            yRadius: Metrics.barHeight / 2
-        )
-        NSColor(white: 0.32, alpha: 0.95).setFill()
-        trackPath.fill()
-
-        let fillFraction: CGFloat
-        if isIndeterminate {
-            fillFraction = 0.18
-        } else {
-            fillFraction = CGFloat(min(1, max(0, progress)))
+        if let icon = NSApplication.shared.applicationIconImage {
+            icon.draw(in: bounds)
         }
 
-        guard fillFraction > 0.001 else { return }
+        guard progress > 0.001 else { return }
 
-        let fillWidth = max(Metrics.barHeight, barWidth * fillFraction)
+        let barInset: CGFloat = 8
+        let barHeight: CGFloat = 10
+        // Match Launchpad-style placement (near bottom of tile; AppKit origin is bottom-left).
+        let barRect = NSRect(
+            x: barInset,
+            y: 8,
+            width: bounds.width - (barInset * 2),
+            height: barHeight
+        )
+
+        let outer = NSBezierPath(roundedRect: barRect, xRadius: 5, yRadius: 5)
+        NSColor.white.withAlphaComponent(0.8).setFill()
+        outer.fill()
+
+        let inner = barRect.insetBy(dx: 0.5, dy: 0.5)
+        let innerPath = NSBezierPath(roundedRect: inner, xRadius: 4.5, yRadius: 4.5)
+        NSColor.black.withAlphaComponent(0.8).setFill()
+        innerPath.fill()
+
+        let clamped = min(1, max(0, progress))
+        let fillWidth = max(0, (barRect.width - 2) * clamped)
+        guard fillWidth > 0.5 else { return }
+
         let fillRect = NSRect(
-            x: barRect.minX,
-            y: barRect.minY,
+            x: barRect.minX + 1,
+            y: barRect.minY + 1,
             width: fillWidth,
-            height: Metrics.barHeight
+            height: barRect.height - 2
         )
-        let fillPath = NSBezierPath(
-            roundedRect: fillRect,
-            xRadius: Metrics.barHeight / 2,
-            yRadius: Metrics.barHeight / 2
-        )
-        NSColor(white: 0.9, alpha: 1).setFill()
+        let fillPath = NSBezierPath(roundedRect: fillRect, xRadius: 4, yRadius: 4)
+        NSColor.white.setFill()
         fillPath.fill()
     }
 }

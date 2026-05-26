@@ -384,9 +384,19 @@ private struct DownloadSettingsSection: View {
                         Button("Choose…", action: chooseFolder)
                     }
                 }
-                Text("Use Choose… to grant access (required for folders outside Downloads). Default: Downloads/MovieBox.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Text(
+                    """
+                    Default: ~/Movies/MovieBox (App Sandbox → Movies Folder read/write). \
+                    Choose… is only needed for a custom folder outside Movies.
+                    """
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                if DownloadFolderAccess.hasStoredBookmark {
+                    Label("Custom folder access granted", systemImage: "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                }
             }
 
             Section("Speed Limits") {
@@ -419,9 +429,20 @@ private struct DownloadSettingsSection: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
+        panel.message = "Select the folder where MovieBox should save downloads (e.g. Movies or MovieBox)."
+        panel.prompt = "Grant Access"
+        let movies = DownloadStorage.realUserHomeDirectory().appendingPathComponent("Movies", isDirectory: true)
+        if FileManager.default.fileExists(atPath: movies.path) {
+            panel.directoryURL = movies
+        }
         if panel.runModal() == .OK, let url = panel.url {
-            draft.defaultDownloadPath = url.path
             DownloadFolderAccess.storeUserSelectedFolder(url)
+            let movieBox = url.lastPathComponent == "MovieBox"
+                ? url
+                : url.appendingPathComponent("MovieBox", isDirectory: true)
+            draft.defaultDownloadPath = movieBox.path
+            _ = DownloadFolderAccess.beginAccess(to: movieBox)
+            try? DownloadStorage.prepareDirectory(at: movieBox)
         }
     }
 }

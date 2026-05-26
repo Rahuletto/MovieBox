@@ -1,11 +1,16 @@
+import CoreStreaming
 import Foundation
 
-/// Retains security-scoped access for a user-picked download folder (App Sandbox).
+/// Retains security-scoped access for user-picked folders outside entitlement-backed library paths.
 @MainActor
 public enum DownloadFolderAccess {
     private static let bookmarkKey = "com.moviebox.downloadFolderBookmark"
     private static var scopedURL: URL?
     private static var isAccessing = false
+
+    public static var hasStoredBookmark: Bool {
+        UserDefaults.standard.data(forKey: bookmarkKey) != nil
+    }
 
     public static func storeUserSelectedFolder(_ url: URL) {
         do {
@@ -21,31 +26,40 @@ public enum DownloadFolderAccess {
         }
     }
 
-    /// Starts security-scoped access when the active download path matches a stored bookmark.
-    public static func activate(for directory: URL) {
-        deactivate()
-        guard let data = UserDefaults.standard.data(forKey: bookmarkKey) else { return }
-
+    public static func resolvedBookmarkURL() -> URL? {
+        guard let data = UserDefaults.standard.data(forKey: bookmarkKey) else { return nil }
         var stale = false
         guard let resolved = try? URL(
             resolvingBookmarkData: data,
             options: [.withSecurityScope],
             relativeTo: nil,
             bookmarkDataIsStale: &stale
-        ) else { return }
-
-        let target = directory.standardizedFileURL
-        let granted = resolved.standardizedFileURL
-        guard target.path == granted.path || target.path.hasPrefix(granted.path + "/") else { return }
-
+        ) else { return nil }
         if stale {
-            storeUserSelectedFolder(granted)
+            storeUserSelectedFolder(resolved)
+        }
+        return resolved.standardizedFileURL
+    }
+
+    /// Begins access for entitlement-backed library paths or a stored security-scoped bookmark.
+    @discardableResult
+    public static func beginAccess(to directory: URL) -> Bool {
+        deactivate()
+        let target = directory.standardizedFileURL
+
+        if DownloadStorage.isEntitlementBackedPath(target) {
+            return true
         }
 
-        if granted.startAccessingSecurityScopedResource() {
-            scopedURL = granted
-            isAccessing = true
+        if let granted = resolvedBookmarkURL(), directoriesOverlap(target, granted) {
+            if granted.startAccessingSecurityScopedResource() {
+                scopedURL = granted
+                isAccessing = true
+                return true
+            }
         }
+
+        return !DownloadStorage.isRunningInAppSandbox
     }
 
     public static func deactivate() {
@@ -54,5 +68,9 @@ public enum DownloadFolderAccess {
         }
         scopedURL = nil
         isAccessing = false
+    }
+
+    private static func directoriesOverlap(_ a: URL, _ b: URL) -> Bool {
+        DownloadStorage.isContained(a, in: b) || DownloadStorage.isContained(b, in: a)
     }
 }

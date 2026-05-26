@@ -470,7 +470,7 @@ public final class StreamingOrchestrator: @unchecked Sendable {
             .appendingPathComponent("moviebox_embedded_probe", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
-            return try TorrentFileAssembler.exportPrimaryFile(
+            return try await TorrentFileAssembler.exportPrimaryFile(
                 metadata: metadata,
                 pieceStorePath: pieceStore.storageURL,
                 outputDirectory: workDir,

@@ -52,28 +52,39 @@ public final class AppServices {
         moviePlayerSession.allowTranscodeFallback = settings.allowTranscodeFallback
     }
 
-    /// Applies Settings → Downloads folder (sandbox bookmark + writable probe).
-    public func applyDownloadDirectory(from settings: AppSettings) {
+    /// Applies Settings → Downloads folder (security-scoped bookmark + writable probe).
+    @discardableResult
+    public func applyDownloadDirectory(from settings: AppSettings) -> URL {
         let preferred = DownloadStorage.resolveRootDirectory(path: settings.defaultDownloadPath)
-        DownloadFolderAccess.activate(for: preferred)
-        do {
-            try downloadManager.configureDownloadRoot(preferred)
-            return
-        } catch {
+        if DownloadFolderAccess.beginAccess(to: preferred) {
+            do {
+                try downloadManager.configureDownloadRoot(preferred)
+                NSLog("MovieBox: download folder — %@", preferred.path)
+                return preferred
+            } catch {
+                NSLog(
+                    "MovieBox: download folder unavailable at %@ — %@",
+                    preferred.path,
+                    error.localizedDescription
+                )
+            }
+        } else if DownloadStorage.isRunningInAppSandbox {
             NSLog(
-                "MovieBox: download folder unavailable at %@ — %@",
-                preferred.path,
-                error.localizedDescription
+                "MovieBox: no folder access for %@ — use Settings → Downloads → Choose…",
+                preferred.path
             )
         }
 
         DownloadFolderAccess.deactivate()
-        let fallback = DownloadStorage.defaultRootDirectory()
-        DownloadFolderAccess.activate(for: fallback)
+        let fallback = DownloadStorage.sandboxDownloadsRootDirectory()
+        _ = DownloadFolderAccess.beginAccess(to: fallback)
         do {
             try downloadManager.configureDownloadRoot(fallback)
+            NSLog("MovieBox: using sandbox Downloads folder — %@", fallback.path)
+            return fallback
         } catch {
             NSLog("MovieBox: fallback download folder failed — %@", error.localizedDescription)
+            return fallback
         }
     }
 
