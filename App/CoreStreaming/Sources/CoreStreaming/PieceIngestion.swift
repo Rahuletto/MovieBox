@@ -46,8 +46,8 @@ enum PieceIngestion {
 
         switch outcome {
         case .verified:
-            _ = await pieceManager.takePieceData(pieceIndex)
-            await pieceStore.markPieceVerified(pieceIndex: Int(pieceIndex))
+            let data = await pieceManager.takePieceData(pieceIndex)
+            await pieceStore.markPieceVerified(pieceIndex: Int(pieceIndex), pieceData: data)
             return true
         case .rejected:
             try? await pieceStore.invalidatePiece(Int(pieceIndex))

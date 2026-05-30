@@ -23,8 +23,15 @@ public actor PieceStore {
         let data: Data
     }
     private var writeCache: [CachedBlock] = []
-    private let maxCacheSize = 2 * 1024 * 1024 // 2 MB
-    private var currentCacheBytes = 0
+    private let maxWriteCacheSize = 2 * 1024 * 1024 // 2 MB
+    private var currentWriteCacheBytes = 0
+
+    /// Verified piece data cache — avoids re-reading from disk during remux.
+    private var verifiedPieceCache: [Int: Data] = [:]
+    /// LRU order (front = most recently used).
+    private var verifiedPieceLRU: [Int] = []
+    private var currentVerifiedCacheBytes: Int64 = 0
+    private static let maxVerifiedCacheBytes: Int64 = 256 * 1024 * 1024 // 256 MB
 
     public init(
         infoHash: String,
@@ -44,16 +51,20 @@ public actor PieceStore {
         self.streamMediaByteOffset = streamMediaByteOffset
         let resolvedTotalSize = totalSize ?? Int64(pieceCount) * pieceSize
         self.totalSize = resolvedTotalSize
-        let canonicalStream = storageDirectory.appendingPathComponent(
-            "moviebox_\(infoHash.lowercased()).stream"
+        self.storageURL = storageDirectory.appendingPathComponent(
+            ".moviebox_\(infoHash.lowercased()).stream"
         )
-        let legacyStream = storageDirectory.appendingPathComponent("moviebox_\(infoHash).stream")
-        if !FileManager.default.fileExists(atPath: canonicalStream.path),
-           FileManager.default.fileExists(atPath: legacyStream.path),
-           legacyStream != canonicalStream {
-            try? FileManager.default.moveItem(at: legacyStream, to: canonicalStream)
+        let legacyOld = storageDirectory.appendingPathComponent("moviebox_\(infoHash).stream")
+        let legacyNew = storageDirectory.appendingPathComponent("moviebox_\(infoHash.lowercased()).stream")
+        if !FileManager.default.fileExists(atPath: self.storageURL.path),
+           FileManager.default.fileExists(atPath: legacyNew.path),
+           legacyNew != self.storageURL {
+            try? FileManager.default.moveItem(at: legacyNew, to: self.storageURL)
+        } else if !FileManager.default.fileExists(atPath: self.storageURL.path),
+                  FileManager.default.fileExists(atPath: legacyOld.path),
+                  legacyOld != self.storageURL {
+            try? FileManager.default.moveItem(at: legacyOld, to: self.storageURL)
         }
-        self.storageURL = canonicalStream
 
         if let existingBitmap, !existingBitmap.isEmpty {
             self.bitmap = Self.decodeBitmap(existingBitmap, pieceCount: pieceCount)
@@ -133,9 +144,9 @@ public actor PieceStore {
 
     private func queueWrite(torrentOffset: Int64, data: Data) throws {
         writeCache.append(CachedBlock(torrentOffset: torrentOffset, data: data))
-        currentCacheBytes += data.count
+        currentWriteCacheBytes += data.count
 
-        if currentCacheBytes >= maxCacheSize {
+        if currentWriteCacheBytes >= maxWriteCacheSize {
             try flushCache()
         }
     }
@@ -152,7 +163,54 @@ public actor PieceStore {
         }
 
         writeCache.removeAll(keepingCapacity: true)
-        currentCacheBytes = 0
+        currentWriteCacheBytes = 0
+    }
+
+    // MARK: - Verified Piece Cache
+
+    private func cacheVerifiedPiece(pieceIndex: Int, data: Data) {
+        assert(pieceIndex >= 0 && pieceIndex < pieceCount)
+
+        if verifiedPieceCache[pieceIndex] != nil {
+            bumpLRU(pieceIndex)
+            return
+        }
+
+        let dataSize = Int64(data.count)
+        while currentVerifiedCacheBytes + dataSize > Self.maxVerifiedCacheBytes,
+              let evict = verifiedPieceLRU.last {
+            verifiedPieceLRU.removeLast()
+            if let removed = verifiedPieceCache.removeValue(forKey: evict) {
+                currentVerifiedCacheBytes -= Int64(removed.count)
+            }
+        }
+
+        verifiedPieceCache[pieceIndex] = data
+        currentVerifiedCacheBytes += dataSize
+        verifiedPieceLRU.insert(pieceIndex, at: 0)
+    }
+
+    private func cachedPieceData(pieceIndex: Int) -> Data? {
+        guard let data = verifiedPieceCache[pieceIndex] else { return nil }
+        bumpLRU(pieceIndex)
+        return data
+    }
+
+    private func bumpLRU(_ pieceIndex: Int) {
+        verifiedPieceLRU.removeAll { $0 == pieceIndex }
+        verifiedPieceLRU.insert(pieceIndex, at: 0)
+    }
+
+    private func removeFromVerifiedCache(pieceIndex: Int) {
+        guard let data = verifiedPieceCache.removeValue(forKey: pieceIndex) else { return }
+        currentVerifiedCacheBytes -= Int64(data.count)
+        verifiedPieceLRU.removeAll { $0 == pieceIndex }
+    }
+
+    private func clearVerifiedCache() {
+        verifiedPieceCache.removeAll()
+        verifiedPieceLRU.removeAll()
+        currentVerifiedCacheBytes = 0
     }
 
     /// Writes a block to disk immediately for progressive playback (before hash verification).
@@ -181,7 +239,7 @@ public actor PieceStore {
         }
     }
 
-    public func markPieceVerified(pieceIndex: Int) {
+    public func markPieceVerified(pieceIndex: Int, pieceData: Data? = nil) {
         guard pieceIndex >= 0, pieceIndex < pieceCount else { return }
         // Flush BEFORE setting bitmap — any reader that checks hasPiece()
         // after this call will find the data on disk, not in the cache.
@@ -189,6 +247,10 @@ public actor PieceStore {
         // flush boundary and pile up as 300s read-timeout waiters.
         try? flushCache()
         bitmap[pieceIndex] = true
+
+        if let data = pieceData, data.count == pieceSize(for: pieceIndex) {
+            cacheVerifiedPiece(pieceIndex: pieceIndex, data: data)
+        }
     }
 
     public func write(pieceIndex: Int, data: Data) async throws {
@@ -202,6 +264,7 @@ public actor PieceStore {
         let offset = Int64(pieceIndex) * pieceSize
         try queueWrite(torrentOffset: offset, data: data)
         bitmap[pieceIndex] = true
+        cacheVerifiedPiece(pieceIndex: pieceIndex, data: data)
 
         let blockStart = offset
         let blockEnd = offset + Int64(data.count)
@@ -222,6 +285,16 @@ public actor PieceStore {
             throw PieceStoreError.outOfRange(offset, totalSize)
         }
 
+        // Check verified piece cache — serve from memory when possible.
+        let firstPiece = Int(offset / pieceSize)
+        let lastPiece = Int((offset + Int64(clampedLength) - 1) / pieceSize)
+        if firstPiece == lastPiece, let cached = cachedPieceData(pieceIndex: firstPiece) {
+            let pieceOffset = Int(offset - Int64(firstPiece) * pieceSize)
+            if pieceOffset + clampedLength <= cached.count {
+                return cached[pieceOffset..<pieceOffset + clampedLength]
+            }
+        }
+
         try flushCache()
 
         try await waitForReadable(offset: offset, length: clampedLength)
@@ -232,7 +305,24 @@ public actor PieceStore {
             throw PieceStoreError.ioError("Read handle unavailable")
         }
         try readHandle.seek(toOffset: UInt64(offset))
-        return readHandle.readData(ofLength: clampedLength)
+        let data = readHandle.readData(ofLength: clampedLength)
+
+        // Cache full-piece reads on the way out — covers pieces that were on disk
+        // before the cache existed (resume, app upgrade, etc.).
+        for piece in firstPiece...lastPiece {
+            let pStart = Int64(piece) * pieceSize
+            let pEnd = pStart + pieceSize(for: piece)
+            let readStart = max(offset, pStart)
+            let readEnd = min(offset + Int64(clampedLength), pEnd)
+            if readEnd - readStart == pEnd - pStart {
+                let sliceStart = Int(readStart - offset)
+                let sliceLen = Int(readEnd - readStart)
+                let pieceData = data[sliceStart..<sliceStart + sliceLen]
+                cacheVerifiedPiece(pieceIndex: piece, data: Data(pieceData))
+            }
+        }
+
+        return data
     }
 
     public func hasPiece(_ index: Int) -> Bool {
@@ -374,6 +464,7 @@ public actor PieceStore {
     }
 
     public func cleanup() async {
+        clearVerifiedCache()
         try? writeHandle?.close()
         try? readHandle?.close()
         writeHandle = nil
@@ -382,6 +473,7 @@ public actor PieceStore {
     }
 
     public func closeHandles() async {
+        clearVerifiedCache()
         try? writeHandle?.close()
         try? readHandle?.close()
         writeHandle = nil
@@ -452,7 +544,9 @@ public actor PieceStore {
         writeCache.removeAll { block in
             block.torrentOffset >= pieceStart && block.torrentOffset < pieceEnd
         }
-        currentCacheBytes = writeCache.reduce(0) { $0 + $1.data.count }
+        currentWriteCacheBytes = writeCache.reduce(0) { $0 + $1.data.count }
+
+        removeFromVerifiedCache(pieceIndex: pieceIndex)
 
         guard let writeHandle else {
             throw PieceStoreError.ioError("Write handle unavailable")

@@ -244,7 +244,7 @@ public final class DownloadManager: ObservableObject {
             let existing = tasks[existingIndex]
             switch existing.state {
             case .paused:
-                resumeDownload(taskId: existing.id)
+                break // Don't auto-resume — user explicitly paused it.
             case .queued, .downloading:
                 break
             default:
@@ -522,7 +522,7 @@ public final class DownloadManager: ObservableObject {
             taskId: taskId,
             progress: 0.35,
             downloadedBytes: DownloadStorage.fileAllocatedBytes(
-                at: outputDir.appendingPathComponent("moviebox_\(infoHash.lowercased()).stream")
+                at: outputDir.appendingPathComponent(".moviebox_\(infoHash.lowercased()).stream")
             )
         )
 
@@ -935,8 +935,13 @@ public final class DownloadManager: ObservableObject {
         storageDirectory: URL,
         bitmap: Data?
     ) -> Bool {
-        let stream = storageDirectory.appendingPathComponent("moviebox_\(infoHash.lowercased()).stream")
-        guard FileManager.default.fileExists(atPath: stream.path) else { return false }
+        let stream = storageDirectory.appendingPathComponent(".moviebox_\(infoHash.lowercased()).stream")
+        if !FileManager.default.fileExists(atPath: stream.path) {
+            let oldStream = storageDirectory.appendingPathComponent("moviebox_\(infoHash.lowercased()).stream")
+            if FileManager.default.fileExists(atPath: oldStream.path) {
+                try? FileManager.default.moveItem(at: oldStream, to: stream)
+            }
+        }
         let allocated = DownloadStorage.fileAllocatedBytes(at: stream)
         if allocated > 1_000_000 { return true }
         return bitmap.map { !$0.isEmpty } ?? false
@@ -945,8 +950,8 @@ public final class DownloadManager: ObservableObject {
     private func adoptLegacyStreamIfNeeded(infoHash: String, storageDirectory: URL) {
         guard let legacyDir = DownloadStorage.legacyContainerStreamsDirectory() else { return }
         let hash = infoHash.lowercased()
-        let destination = storageDirectory.appendingPathComponent("moviebox_\(hash).stream")
-        let legacy = legacyDir.appendingPathComponent("moviebox_\(hash).stream")
+        let destination = storageDirectory.appendingPathComponent(".moviebox_\(hash).stream")
+        let legacy = legacyDir.appendingPathComponent(".moviebox_\(hash).stream")
         guard FileManager.default.fileExists(atPath: legacy.path) else { return }
 
         let legacyBytes = DownloadStorage.fileAllocatedBytes(at: legacy)

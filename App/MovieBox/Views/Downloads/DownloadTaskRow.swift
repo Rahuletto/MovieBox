@@ -752,7 +752,30 @@ struct DownloadTaskRow: View {
     }
 
     private func loadBannerArtwork() async {
-        guard tmdbId > 0, case .task = model else {
+        guard case .task = model else {
+            bannerArtworkURL = artworkURL
+            return
+        }
+
+        let task = resolvedTask
+
+        if tmdbId <= 0, let title = task?.title, !title.isEmpty {
+            if let mode = MetadataSettings.mode(from: settings) {
+                let client = MetadataClient(mode: mode)
+                do {
+                    let results = try await client.searchMovies(query: title, kind: mediaKind)
+                    guard !Task.isCancelled, let first = results.first else {
+                        bannerArtworkURL = artworkURL
+                        return
+                    }
+                    if let path = first.backdropPath ?? first.posterPath {
+                        bannerArtworkURL = client.imageURL(path: path, width: 1280)
+                        return
+                    }
+                } catch {
+                    NSLog("DownloadTaskRow: title search fallback failed — \(error.localizedDescription)")
+                }
+            }
             bannerArtworkURL = artworkURL
             return
         }

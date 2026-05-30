@@ -22,6 +22,9 @@ public actor PieceManager {
 
     private var pieceHashes: [Data] = []
     private var downloadedPieces: Set<UInt32> = []
+    /// Pieces loaded from a resume bitmap — data may not actually be on disk, so
+    /// the first incoming block must re-verify. Once verified they are removed here.
+    private var resumeSeededPieces: Set<UInt32> = []
     private var pendingRequests: [BlockRequest: Date] = [:]
     private var pieceBuffers: [UInt32: Data] = [:]
     private var receivedBlockOffsets: [UInt32: Set<UInt32>] = [:]
@@ -85,12 +88,14 @@ public actor PieceManager {
 
     public func setInitialDownloadedPieces(_ pieces: Set<UInt32>) {
         downloadedPieces = pieces
+        resumeSeededPieces = pieces
     }
 
     public func clearDownloadedPieces(in range: ClosedRange<Int>) {
         for index in range {
             let piece = UInt32(index)
             downloadedPieces.remove(piece)
+            resumeSeededPieces.remove(piece)
             resetPiece(piece)
         }
     }
@@ -278,10 +283,17 @@ public actor PieceManager {
     public func markBlockReceived(pieceIndex: UInt32, offset: UInt32, block: Data) -> PieceReceiveOutcome {
         pendingRequests.removeValue(forKey: BlockRequest(pieceIndex: pieceIndex, offset: offset, length: 0))
 
-        // Allow re-download when a resume seed marked a piece done but verification never landed.
         if downloadedPieces.contains(pieceIndex) {
-            downloadedPieces.remove(pieceIndex)
-            resetPiece(pieceIndex)
+            // A resume-seeded piece might not actually be on disk — re-download to verify.
+            // A genuinely verified piece means a peer sent a block late (e.g. after seek).
+            // Ignore it — the data is already on disk and correct.
+            if resumeSeededPieces.contains(pieceIndex) {
+                downloadedPieces.remove(pieceIndex)
+                resumeSeededPieces.remove(pieceIndex)
+                resetPiece(pieceIndex)
+            } else {
+                return .incomplete
+            }
         }
 
         let expectedSize = Int(pieceSize(for: pieceIndex))
@@ -573,10 +585,38 @@ public actor PieceManager {
         }
 
         downloadedPieces.insert(pieceIndex)
+        resumeSeededPieces.remove(pieceIndex)
         pieceBuffers.removeValue(forKey: pieceIndex)
         receivedBlockOffsets.removeValue(forKey: pieceIndex)
         trimPieceBuffers(keeping: pieceIndex)
+        advancePlaybackAnchor()
         return true
+    }
+
+    /// After a verified piece extends the contiguous downloaded region ahead of the anchor,
+    /// advance the anchor so the next undownloaded frontier gets critical priority.
+    private func advancePlaybackAnchor() {
+        guard let anchor = playbackAnchorPiece else { return }
+        let end = min(UInt32(streamLastPiece), UInt32(pieceCount - 1))
+        var newAnchor = anchor
+        while newAnchor <= end && downloadedPieces.contains(newAnchor) {
+            newAnchor += 1
+        }
+        guard newAnchor > anchor else { return }
+
+        playbackAnchorPiece = newAnchor
+
+        // Seed the hot list with the next frontier pieces so they get duplicate-request
+        // hot-swapping in Loop 2 of getNextRequest.
+        let hotEnd = min(end, newAnchor + UInt32(Self.warmReadAheadPieceCount))
+        for piece in newAnchor...hotEnd {
+            guard !downloadedPieces.contains(piece) else { continue }
+            playerHotPieces.removeAll { $0 == piece }
+            playerHotPieces.insert(piece, at: 0)
+        }
+        if playerHotPieces.count > Self.maxHotPieces {
+            playerHotPieces.removeLast(playerHotPieces.count - Self.maxHotPieces)
+        }
     }
 
     private func trimPieceBuffers(keeping current: UInt32) {
