@@ -196,8 +196,34 @@ private struct GeneralSettingsSection: View {
                 Text("Affects trending and popular content rankings.")
                     .foregroundStyle(.secondary)
             }
+
+            UpdatesSettingsSection()
         }
         .formStyle(.grouped)
+    }
+}
+
+// MARK: - Updates
+
+private struct UpdatesSettingsSection: View {
+    @State private var automaticChecks = AppUpdater.shared.automaticallyChecksForUpdates
+
+    var body: some View {
+        Section("Updates") {
+            LabeledContent("Version", value: AppVersion.display)
+
+            Toggle("Check for updates automatically", isOn: $automaticChecks)
+                .onChange(of: automaticChecks) { _, value in
+                    AppUpdater.shared.automaticallyChecksForUpdates = value
+                }
+
+            Button("Check for Updates…") {
+                AppUpdater.shared.checkForUpdates()
+            }
+            .disabled(!AppUpdater.shared.canCheckForUpdates)
+
+            Link("View releases on GitHub", destination: AppUpdater.releasesPage)
+        }
     }
 }
 

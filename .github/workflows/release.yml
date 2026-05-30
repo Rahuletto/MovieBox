@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+    defaults:
+      run:
+        working-directory: App
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '26.5'
+
+      - name: Stub development secrets
+        run: cp MovieBox/Configuration/DevelopmentSecrets.swift.example MovieBox/Configuration/DevelopmentSecrets.swift
+
+      - name: Resolve version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "marketing=$TAG" >> "$GITHUB_OUTPUT"
+          BUILD="${GITHUB_RUN_NUMBER}"
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+
+      - name: Build MovieBox (Release)
+        env:
+          MARKETING_VERSION: ${{ steps.version.outputs.marketing }}
+          CURRENT_PROJECT_VERSION: ${{ steps.version.outputs.build }}
+        run: |
+          xcodebuild -project MovieBox.xcodeproj -scheme MovieBox \
+            -configuration Release \
+            -destination 'platform=macOS' \
+            -derivedDataPath ../build/DerivedData \
+            MARKETING_VERSION="$MARKETING_VERSION" \
+            CURRENT_PROJECT_VERSION="$CURRENT_PROJECT_VERSION" \
+            build
+
+      - name: Export .app
+        run: |
+          APP="../build/DerivedData/Build/Products/Release/MovieBox.app"
+          test -d "$APP"
+          mkdir -p ../build/export
+          ditto "$APP" ../build/export/MovieBox.app
+
+      - name: Zip for distribution
+        run: |
+          cd ../build/export
+          ditto -c -k --sequesterRsrc --keepParent MovieBox.app MovieBox.zip
+
+      - name: Download Sparkle tools
+        run: |
+          SPARKLE_VERSION=2.9.1
+          curl -fsSL -o /tmp/Sparkle.tar.xz \
+            "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-${SPARKLE_VERSION}.tar.xz"
+          mkdir -p ../build/sparkle
+          tar -xf /tmp/Sparkle.tar.xz -C ../build/sparkle
+
+      - name: Sign update archive
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
+            echo "::warning::SPARKLE_PRIVATE_KEY not set — skipping sign_update (appcast will be unsigned)"
+            exit 0
+          fi
+          KEY_FILE=$(mktemp)
+          echo "$SPARKLE_PRIVATE_KEY" > "$KEY_FILE"
+          ../build/sparkle/bin/sign_update ../build/export/MovieBox.zip --ed-key-file "$KEY_FILE"
+          rm -f "$KEY_FILE"
+
+      - name: Generate appcast
+        run: |
+          ../build/sparkle/bin/generate_appcast ../build/export -o ../appcast.xml
+          cat ../appcast.xml
+
+      - name: Commit appcast
+        working-directory: ${{ github.workspace }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add appcast.xml
+          git diff --staged --quiet || git commit -m "chore: update appcast for ${GITHUB_REF_NAME}"
+          git push
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/export/MovieBox.zip
+          generate_release_notes: true

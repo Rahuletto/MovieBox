@@ -50,6 +50,7 @@ dist/
 .env.local
 .env.*.local
 App/MovieBox/Configuration/DevelopmentSecrets.swift
+.sparkle-private-key
 
 # Editors / IDE
 .vscode/

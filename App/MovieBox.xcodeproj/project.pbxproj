@@ -16,6 +16,7 @@
 		AB0000010000000000000007 /* CoreStreaming in Frameworks */ = {isa = PBXBuildFile; productRef = AB0000010000000000001007 /* CoreStreaming */; };
 		AB0000010000000000000008 /* MovieBoxCore in Frameworks */ = {isa = PBXBuildFile; productRef = AB0000010000000000001008 /* MovieBoxCore */; };
 		AB0000010000000000000009 /* MovieBoxDetail in Frameworks */ = {isa = PBXBuildFile; productRef = AB0000010000000000001009 /* MovieBoxDetail */; };
+		E7SP00032FB9961F005174D0 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = E7SP00022FB9961F005174D0 /* Sparkle */; };
 		D23E0D542FBB6FA400526BEF /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = D23E0D532FBB6FA400526BEF /* AppIcon.icon */; };
 /* End PBXBuildFile section */
 
@@ -59,6 +60,7 @@
 				AB0000010000000000000007 /* CoreStreaming in Frameworks */,
 				AB0000010000000000000008 /* MovieBoxCore in Frameworks */,
 				AB0000010000000000000009 /* MovieBoxDetail in Frameworks */,
+				E7SP00032FB9961F005174D0 /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -112,6 +114,7 @@
 				AB0000010000000000001007 /* CoreStreaming */,
 				AB0000010000000000001008 /* MovieBoxCore */,
 				AB0000010000000000001009 /* MovieBoxDetail */,
+				E7SP00022FB9961F005174D0 /* Sparkle */,
 			);
 			productName = MovieBox;
 			productReference = D2898CB22FB9961F005174CF /* MovieBox.app */;
@@ -151,6 +154,7 @@
 				AB0000010000000000002007 /* XCLocalSwiftPackageReference "CoreStreaming" */,
 				AB0000010000000000002008 /* XCLocalSwiftPackageReference "MovieBoxCore" */,
 				AB0000010000000000002009 /* XCLocalSwiftPackageReference "MovieBoxDetail" */,
+				E7SP00012FB9961F005174D0 /* XCRemoteSwiftPackageReference "Sparkle" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = D2898CB32FB9961F005174CF /* Products */;
@@ -450,6 +454,17 @@
 		};
 /* End XCLocalSwiftPackageReference section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		E7SP00012FB9961F005174D0 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.7.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
 		AB0000010000000000001001 /* CoreMetadata */ = {
 			isa = XCSwiftPackageProductDependency;
@@ -495,6 +510,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AB0000010000000000002009 /* XCLocalSwiftPackageReference "MovieBoxDetail" */;
 			productName = MovieBoxDetail;
+		};
+		E7SP00022FB9961F005174D0 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E7SP00012FB9961F005174D0 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

@@ -29,6 +29,18 @@
 			</array>
 		</dict>
 	</array>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUEnableInstallerLauncherService</key>
+	<true/>
+	<key>SUAutomaticallyUpdate</key>
+	<false/>
+	<key>SUFeedURL</key>
+	<string>https://raw.githubusercontent.com/Rahuletto/moviebox/main/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>alGuZLvXkfWGlQDNuLIkAm9H17OBmgui1Kuar5AAey4=</string>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
