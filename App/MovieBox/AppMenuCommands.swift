@@ -105,6 +105,13 @@ struct AppMenuCommands: Commands {
             .disabled(!playerState.isPresented && !router.isShowingDetail)
         }
 
+        CommandGroup(after: .appInfo) {
+            Button("Check for Updates…") {
+                AppUpdater.shared.checkForUpdates()
+            }
+            .disabled(!AppUpdater.shared.canCheckForUpdates)
+        }
+
         CommandMenu("Help") {
             Button("Open Log File") {
                 LogFileActions.openLogFile()
