@@ -1,11 +1,12 @@
 name: Swift build
 
 on:
-  push:
+  pull_request:
     paths:
       - 'App/**'
       - '.github/workflows/swift-build.yml'
-  pull_request:
+  push:
+    branches: [main]
     paths:
       - 'App/**'
       - '.github/workflows/swift-build.yml'
@@ -22,5 +23,8 @@ jobs:
       - uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: '26.5'
+      # DevelopmentSecrets.swift is gitignored; the .example file is enough for compile-only CI.
+      - name: Stub development secrets
+        run: cp MovieBox/Configuration/DevelopmentSecrets.swift.example MovieBox/Configuration/DevelopmentSecrets.swift
       - name: Build MovieBox (macOS)
         run: xcodebuild -project MovieBox.xcodeproj -scheme MovieBox -destination 'platform=macOS' -quiet build
