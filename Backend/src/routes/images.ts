@@ -20,12 +20,10 @@ export function registerImageRoutes(app: Hono<AppEnv>): void {
   app.use('/img', async (c, next) => {
     const clientIp = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || 'unknown'
     const cacheKey = `img_rate:${clientIp}:${Math.floor(Date.now() / IMG_RATE_WINDOW_MS)}`
-    const current = await kvGet(c.env.MOVIEBOX_CACHE, cacheKey)
-    const count = current ? parseInt(current) : 0
-    if (count >= IMG_RATE_MAX) {
+    const { allowed } = await consumeKvRateLimit(c.env.MOVIEBOX_CACHE, cacheKey, IMG_RATE_MAX, 60)
+    if (!allowed) {
       return new Response('rate limit exceeded', { status: 429 })
     }
-    await kvPut(c.env.MOVIEBOX_CACHE, cacheKey, String(count + 1), { expirationTtl: 60 })
     await next()
   })
 
@@ -38,6 +36,10 @@ export function registerImageRoutes(app: Hono<AppEnv>): void {
       parsed = new URL(query.u)
     } catch {
       return new Response('invalid url', { status: 400 })
+    }
+
+    if (isUnsafeProxyTarget(parsed)) {
+      return new Response('url not allowed', { status: 403 })
     }
 
     if (!ALLOWED_IMG_HOSTS.has(parsed.hostname)) {
