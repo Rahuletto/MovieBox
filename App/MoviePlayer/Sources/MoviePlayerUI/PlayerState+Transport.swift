@@ -49,11 +49,15 @@ extension PlayerState {
         isApplyingResumeSeek = false
         initialSeekApplied = true
         let clamped = max(0, min(time, duration > 0 ? duration : time))
+
+        // Pause playback and show loading state while the seek is in flight.
+        player.pause()
+        isPlaying = false
+        isBuffering = true
         
         if isHLSTorrentPlayback, isStreamingTorrent {
             // For HLS torrent playback, TorrentPlaybackCoordinator is the single point of truth.
             pendingUserSeekTime = clamped
-            isBuffering = true
             Task {
                 await onPrioritizeTorrentPlayback?(clamped)
                 PlaybackLog.log("seek(to:) HLS Torrent triggering onRestartStreamingHLSSeek at \(clamped)")
@@ -65,7 +69,6 @@ extension PlayerState {
             PlaybackLog.log("seek(to:) non-HLS/local time=\(time) clamped=\(clamped) isTorrentPlayback=\(isTorrentPlayback) isBuffered=\(isBuffered)")
             if isTorrentPlayback, !isBuffered {
                 pendingUserSeekTime = clamped
-                isBuffering = true
                 Task {
                     await onPrioritizeTorrentPlayback?(clamped)
                 }
@@ -100,6 +103,11 @@ extension PlayerState {
                         self.pendingUserSeekTime = nil
                     }
                     self.currentTime = time
+                }
+                // Resume playback after the seek lands.
+                if self.userWantsPlayback {
+                    self.player.playImmediately(atRate: Float(self.playbackRate))
+                    self.isPlaying = true
                 }
                 self.updateBufferingState()
             }

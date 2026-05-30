@@ -27,12 +27,12 @@ public enum StreamSessionDiskStore {
 
     public static func bitmapURL(infoHash: String, in directory: URL? = nil) throws -> URL {
         let dir = try directory ?? sessionDirectory(infoHash: infoHash)
-        return dir.appendingPathComponent("moviebox_\(infoHash.lowercased()).bitmap")
+        return dir.appendingPathComponent(".moviebox_\(infoHash.lowercased()).bitmap")
     }
 
     public static func streamFileURL(infoHash: String, in directory: URL? = nil) throws -> URL {
         let dir = try directory ?? sessionDirectory(infoHash: infoHash)
-        return dir.appendingPathComponent("moviebox_\(infoHash.lowercased()).stream")
+        return dir.appendingPathComponent(".moviebox_\(infoHash.lowercased()).stream")
     }
 
     /// Deletes one stream session folder (sparse `.stream` + bitmap). Returns bytes reclaimed.
@@ -87,10 +87,10 @@ public enum StreamSessionDiskStore {
 
         guard let targetDir = try? sessionDirectory(infoHash: hash) else { return 0 }
 
-        let legacyBitmap = legacyDir.appendingPathComponent("moviebox_\(hash).bitmap")
-        let legacyStream = legacyDir.appendingPathComponent("moviebox_\(hash).stream")
-        let targetBitmap = targetDir.appendingPathComponent("moviebox_\(hash).bitmap")
-        let targetStream = targetDir.appendingPathComponent("moviebox_\(hash).stream")
+        let legacyBitmap = legacyDir.appendingPathComponent(".moviebox_\(hash).bitmap")
+        let legacyStream = legacyDir.appendingPathComponent(".moviebox_\(hash).stream")
+        let targetBitmap = targetDir.appendingPathComponent(".moviebox_\(hash).bitmap")
+        let targetStream = targetDir.appendingPathComponent(".moviebox_\(hash).stream")
 
         if FileManager.default.fileExists(atPath: legacyBitmap.path),
            !FileManager.default.fileExists(atPath: targetBitmap.path) {
@@ -122,7 +122,7 @@ public enum StreamSessionDiskStore {
         guard let enumerator = fm.enumerator(
             at: directory,
             includingPropertiesForKeys: [.fileAllocatedSizeKey, .totalFileAllocatedSizeKey, .fileSizeKey],
-            options: [.skipsHiddenFiles]
+            options: []
         ) else { return 0 }
 
         var total: Int64 = 0

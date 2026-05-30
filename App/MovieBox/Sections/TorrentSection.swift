@@ -94,6 +94,16 @@ struct TorrentSection: View {
     private func isDownloaded(_ torrent: TorrentResult) -> Bool {
         guard let hash = torrent.resolvedInfoHash else { return false }
         let lowerHash = hash.lowercased()
+
+        // Check in-memory tasks first (no SwiftData persistence lag).
+        if downloadManager.tasks.contains(where: {
+            ($0.infoHash ?? "").lowercased() == lowerHash
+                && $0.state == .completed
+                && ($0.outputPath.map { FileManager.default.fileExists(atPath: $0) } ?? false)
+        }) {
+            return true
+        }
+
         return downloads.contains {
             $0.infoHash == lowerHash
                 && $0.state == DownloadState.completed.rawValue
@@ -537,7 +547,7 @@ struct TorrentSection: View {
         let taskId = downloadManager.startDownload(
             tmdbId: movie.id,
             mediaKind: (isTV ? MediaKind.tv : .movie).storageValue,
-            title: torrent.title,
+            title: movie.title,
             magnetURI: torrent.magnetURI,
             quality: torrent.quality.rawValue,
             hdrType: torrent.hdrType?.rawValue,
@@ -546,6 +556,16 @@ struct TorrentSection: View {
 
         downloadTaskByTorrentID[torrent.id] = taskId
         rebuildVisibleCardModels()
+
+        if storedMovies.first(where: { $0.tmdbId == movie.id }) == nil {
+            let record = MovieRecord(
+                tmdbId: movie.id,
+                title: movie.title,
+                posterPath: movie.posterPath
+            )
+            modelContext.insert(record)
+            try? modelContext.save()
+        }
 
         downloadWatchTask?.cancel()
         downloadWatchTask = Task {

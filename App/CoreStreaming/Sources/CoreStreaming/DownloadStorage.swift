@@ -187,12 +187,21 @@ public enum DownloadStorage {
         guard let files = try? FileManager.default.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
+            options: []
         ) else { return nil }
         for file in files where file.pathExtension == "stream" {
             let base = file.deletingPathExtension().lastPathComponent
-            guard base.hasPrefix("moviebox_") else { continue }
-            let hash = String(base.dropFirst("moviebox_".count)).lowercased()
+            let newPrefix = ".moviebox_"
+            let oldPrefix = "moviebox_"
+            let prefix: String
+            if base.hasPrefix(newPrefix) {
+                prefix = newPrefix
+            } else if base.hasPrefix(oldPrefix) {
+                prefix = oldPrefix
+            } else {
+                continue
+            }
+            let hash = String(base.dropFirst(prefix.count)).lowercased()
             if MagnetURI.normalizeInfoHash(hash) != nil {
                 return hash
             }
@@ -201,10 +210,15 @@ public enum DownloadStorage {
     }
 
     private static func removePayloadFiles(infoHash: String, in directory: URL) {
-        let stream = directory.appendingPathComponent("moviebox_\(infoHash).stream")
-        let bitmap = directory.appendingPathComponent("moviebox_\(infoHash).bitmap")
+        let hash = infoHash.lowercased()
+        let stream = directory.appendingPathComponent(".moviebox_\(hash).stream")
+        let bitmap = directory.appendingPathComponent(".moviebox_\(hash).bitmap")
         try? FileManager.default.removeItem(at: stream)
         try? FileManager.default.removeItem(at: bitmap)
+        let oldStream = directory.appendingPathComponent("moviebox_\(hash).stream")
+        let oldBitmap = directory.appendingPathComponent("moviebox_\(hash).bitmap")
+        try? FileManager.default.removeItem(at: oldStream)
+        try? FileManager.default.removeItem(at: oldBitmap)
     }
 
     private static func loadCancelledHashes() -> Set<String> {

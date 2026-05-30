@@ -3,7 +3,7 @@ import Foundation
 /// Sidecar bitmap files so downloads can resume after a force-quit (SwiftData blob may lag).
 public enum DownloadBitmapPersistence {
     public static func fileURL(infoHash: String, in storageDirectory: URL) -> URL {
-        storageDirectory.appendingPathComponent("moviebox_\(infoHash.lowercased()).bitmap")
+        storageDirectory.appendingPathComponent(".moviebox_\(infoHash.lowercased()).bitmap")
     }
 
     public static func save(_ data: Data, infoHash: String, in storageDirectory: URL) {
@@ -114,7 +114,7 @@ public enum DownloadDiskRecovery {
     ) -> RecoveredDownloadArtifact? {
         guard let legacyDir = DownloadStorage.legacyContainerStreamsDirectory() else { return nil }
         let hash = infoHash.lowercased()
-        let stream = legacyDir.appendingPathComponent("moviebox_\(hash).stream")
+        let stream = legacyDir.appendingPathComponent(".moviebox_\(hash).stream")
         guard FileManager.default.fileExists(atPath: stream.path) else { return nil }
 
         let allocated = DownloadStorage.fileAllocatedBytes(at: stream)
@@ -148,8 +148,17 @@ public enum DownloadDiskRecovery {
 
         for file in files where file.pathExtension == "stream" {
             let base = file.deletingPathExtension().lastPathComponent
-            guard base.hasPrefix("moviebox_") else { continue }
-            let hash = String(base.dropFirst("moviebox_".count)).lowercased()
+            let newPrefix = ".moviebox_"
+            let oldPrefix = "moviebox_"
+            let prefix: String
+            if base.hasPrefix(newPrefix) {
+                prefix = newPrefix
+            } else if base.hasPrefix(oldPrefix) {
+                prefix = oldPrefix
+            } else {
+                continue
+            }
+            let hash = String(base.dropFirst(prefix.count)).lowercased()
             guard MagnetURI.normalizeInfoHash(hash) != nil else { continue }
 
             let bitmapURL = DownloadBitmapPersistence.fileURL(infoHash: hash, in: directory)
