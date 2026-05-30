@@ -87,6 +87,22 @@ public final class MoviePlayerSession {
         await remuxService.stopAll()
     }
 
+    public func estimatedStreamingHLSDuration(cacheKey: String) async -> Double {
+        await remuxService.estimatedStreamingHLSDuration(cacheKey: cacheKey)
+    }
+
+    public func restartStreamingRemux(
+        inputURL: URL,
+        cacheKey: String,
+        seekSeconds: Double
+    ) async throws -> RemuxResult {
+        try await remuxService.restartStreamingRemux(
+            inputURL: inputURL,
+            cacheKey: cacheKey,
+            seekSeconds: seekSeconds
+        )
+    }
+
     public func applyRemuxPlaybackSignals(_ remux: RemuxResult, to playerState: PlayerState) {
         playerState.updatePlaybackQualityWarning(remux.metadataValidationWarning)
     }

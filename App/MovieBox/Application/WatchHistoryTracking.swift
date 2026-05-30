@@ -38,7 +38,7 @@ struct WatchHistoryTracking: ViewModifier {
         guard movieId > 0 else { return }
         let duration = playerState.duration
         guard duration > 0 else { return }
-        let position = playerState.currentTime
+        let position = playerState.reportedPlaybackPosition
         let fraction = position / duration
         updateWatchHistory(
             tmdbId: movieId,

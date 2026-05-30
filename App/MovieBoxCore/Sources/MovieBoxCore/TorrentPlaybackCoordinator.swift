@@ -12,6 +12,10 @@ public final class TorrentPlaybackCoordinator {
     private(set) var session: TorrentStreamSession?
     public private(set) var torrents: [TorrentResult] = []
     public var downloadPersistence: DownloadPersistenceService?
+    private var activeStreamingSourceURL: URL?
+    private var activeStreamingHLSCacheKey: String?
+    private var streamingRemuxRestartTask: Task<Void, Never>?
+    private var lastStreamingRemuxRestartTarget: Double = -1
 
     public var strictHDRValidation: Bool {
         get { moviePlayer.strictHDRValidation }
@@ -28,6 +32,11 @@ public final class TorrentPlaybackCoordinator {
     }
 
     public func cancel() async {
+        streamingRemuxRestartTask?.cancel()
+        streamingRemuxRestartTask = nil
+        activeStreamingSourceURL = nil
+        activeStreamingHLSCacheKey = nil
+        lastStreamingRemuxRestartTarget = -1
         await session?.cancel()
         session = nil
         await moviePlayer.cancelRemux()
@@ -72,7 +81,7 @@ public final class TorrentPlaybackCoordinator {
         posterURL: URL? = nil
     ) async throws {
         configureSources(on: playerState, torrents: allTorrents, selected: torrent)
-        installStreamBufferProvider(on: playerState)
+        installStreamBufferProvider(on: playerState, torrent: torrent, movieId: movieId)
         await syncRemuxPolicy()
         playerState.updatePlaybackQualityWarning(nil)
 
@@ -98,11 +107,10 @@ public final class TorrentPlaybackCoordinator {
             remuxResult = prepared.remuxResult
             playbackURL = prepared.playbackURL
             PlaybackLog.log("[Prepare] finishPlayback mode=\(prepared.mode.rawValue) playlist=\(MovieBoxFileLogger.redactURL(playbackURL))")
-            if let duration = prepared.durationSeconds, duration.isFinite, duration > 0 {
-                resolvedDuration = duration
-            }
         } else if await session.isCurrentStreamMKV() {
             let cacheKey = localHLSCacheKey(for: torrent, localURL: url)
+            activeStreamingSourceURL = url
+            activeStreamingHLSCacheKey = cacheKey
             PlaybackLog.log("[Prepare] finishPlayback live stream cacheKey=\(cacheKey) url=\(MovieBoxFileLogger.redactURL(url))")
             playerState.updateBufferingDetail("Preparing AVPlayer-compatible stream…")
             let prepared = try await moviePlayer.prepareStreamingForPlayback(inputURL: url, cacheKey: cacheKey)
@@ -110,10 +118,13 @@ public final class TorrentPlaybackCoordinator {
             remuxResult = prepared.remuxResult
             playbackURL = prepared.playbackURL
             PlaybackLog.log("[Prepare] finishPlayback streaming mode=\(prepared.mode.rawValue) playlist=\(MovieBoxFileLogger.redactURL(playbackURL))")
-            if let duration = prepared.durationSeconds, duration.isFinite, duration > 0 {
-                resolvedDuration = duration
-            }
         }
+
+        resolvedDuration = PlaybackDuration.resolved(
+            known: knownDurationSeconds,
+            probed: prepareResult?.durationSeconds,
+            remux: remuxResult?.durationSeconds
+        )
 
         if let remuxResult {
             moviePlayer.applyRemuxPlaybackSignals(remuxResult, to: playerState)
@@ -154,26 +165,36 @@ public final class TorrentPlaybackCoordinator {
             posterURL: posterURL,
             resourceLoader: resourceLoader
         )
-        Task { @MainActor in
-            await Task.yield()
-            playerState.updateBufferingDetail(nil)
-            playerState.load(
-                url: loadPayload.url,
-                title: loadPayload.title,
-                movieId: loadPayload.movieId,
-                subtitleURL: loadPayload.subtitleURL,
-                hdrType: loadPayload.hdr,
-                audioFormat: loadPayload.audio,
-                subtitleAppearance: loadPayload.appearance,
-                subtitleFontSize: loadPayload.fontSize,
-                episodeTitle: loadPayload.episodeTitle,
-                displayTitle: loadPayload.hudTitle,
-                resumePosition: loadPayload.resume,
-                knownDurationSeconds: loadPayload.knownDuration,
-                posterURL: loadPayload.posterURL,
-                resourceLoaderDelegate: loadPayload.resourceLoader,
-                resourceLoaderQueue: DispatchQueue(label: "com.marban.moviebox.torrent-resource-loader")
+        playerState.updateBufferingDetail(nil)
+        playerState.load(
+            url: loadPayload.url,
+            title: loadPayload.title,
+            movieId: loadPayload.movieId,
+            subtitleURL: loadPayload.subtitleURL,
+            hdrType: loadPayload.hdr,
+            audioFormat: loadPayload.audio,
+            subtitleAppearance: loadPayload.appearance,
+            subtitleFontSize: loadPayload.fontSize,
+            episodeTitle: loadPayload.episodeTitle,
+            displayTitle: loadPayload.hudTitle,
+            resumePosition: loadPayload.resume,
+            knownDurationSeconds: loadPayload.knownDuration,
+            posterURL: loadPayload.posterURL,
+            resourceLoaderDelegate: loadPayload.resourceLoader,
+            resourceLoaderQueue: DispatchQueue(label: "com.marban.moviebox.torrent-resource-loader")
+        )
+        if let infoHash = torrent.resolvedInfoHash?.lowercased(),
+           movieId > 0,
+           let known = resolvedDuration, known.isFinite, known > 0 {
+            let cached = PlaybackDiskCache.loadStreamBufferRanges(
+                tmdbId: movieId,
+                infoHash: infoHash,
+                expectedDuration: known
             )
+            if !cached.isEmpty {
+                playerState.cachedStreamBufferRanges = cached
+                playerState.refreshBufferedTimeRangesFromPlayer()
+            }
         }
     }
 
@@ -234,6 +255,11 @@ public final class TorrentPlaybackCoordinator {
                 }
                 resolvedPayload.hdr = playbackHDR(from: prepareResult, remux: remuxResult, fallback: torrent.hdrType)
                 resolvedPayload.audio = playbackAudio(from: prepareResult, remux: remuxResult, fallback: torrent.audioFormat)
+                resolvedPayload.knownDuration = PlaybackDuration.resolved(
+                    known: loadPayload.knownDuration,
+                    probed: prepareResult?.durationSeconds,
+                    remux: remuxResult?.durationSeconds
+                )
                 PlaybackLog.log("[MKVHLS] loading player url=\(MovieBoxFileLogger.redactURL(resolvedPayload.url)) ext=\(resolvedPayload.url.pathExtension.lowercased())")
                 playerState.updateBufferingDetail(nil)
                 loadPlayer(playerState, payload: resolvedPayload)
@@ -403,12 +429,51 @@ public final class TorrentPlaybackCoordinator {
         }
     }
 
-    private func installStreamBufferProvider(on playerState: PlayerState) {
+    private func installStreamBufferProvider(
+        on playerState: PlayerState,
+        torrent: TorrentResult,
+        movieId: Int
+    ) {
         let orchestrator = orchestrator
-        playerState.streamBufferTimeRangesProvider = {
-            let duration = await MainActor.run { playerState.duration }
+        let infoHash = torrent.resolvedInfoHash?.lowercased()
+        playerState.activeTorrentInfoHash = infoHash
+        if let infoHash, movieId > 0 {
+            let cached = PlaybackDiskCache.loadStreamBufferRanges(
+                tmdbId: movieId,
+                infoHash: infoHash,
+                expectedDuration: playerState.duration > 0 ? playerState.duration : nil
+            )
+            if !cached.isEmpty {
+                playerState.cachedStreamBufferRanges = cached
+            }
+        }
+        playerState.streamBufferTimeRangesProvider = { @MainActor in
+            let duration = playerState.duration
             guard duration.isFinite, duration > 0 else { return [] }
             return await orchestrator.readableMediaTimeRanges(durationSeconds: duration)
+        }
+        playerState.onPrioritizeTorrentPlayback = { @MainActor time in
+            let duration = playerState.duration
+            guard duration.isFinite, duration > 0 else { return }
+            await orchestrator.prioritizePlayback(atSeconds: time, durationSeconds: duration)
+        }
+        playerState.onRestartStreamingHLSSeek = { @MainActor [weak self] time in
+            await self?.scheduleStreamingRemuxRestart(to: time, playerState: playerState)
+        }
+        playerState.streamPlaybackReadinessProvider = { @MainActor [weak self] time in
+            guard let self else { return false }
+            return await self.orchestrator.hasReadablePlaybackData(
+                atSeconds: time,
+                durationSeconds: playerState.duration
+            )
+        }
+        playerState.onPersistStreamBufferRanges = { tmdbId, infoHash, duration, ranges in
+            PlaybackDiskCache.saveStreamBufferRanges(
+                tmdbId: tmdbId,
+                infoHash: infoHash,
+                durationSeconds: duration,
+                ranges: ranges
+            )
         }
     }
 
@@ -479,6 +544,73 @@ public final class TorrentPlaybackCoordinator {
     private func localHLSCacheKey(for torrent: TorrentResult, localURL: URL) -> String {
         let key = torrent.resolvedInfoHash ?? "\(torrent.id.uuidString)-\(localURL.lastPathComponent)"
         return key.lowercased()
+    }
+
+    private func scheduleStreamingRemuxRestart(to time: Double, playerState: PlayerState) {
+        guard playerState.isHLSTorrentPlayback, playerState.isStreamingTorrent else { return }
+        streamingRemuxRestartTask?.cancel()
+        streamingRemuxRestartTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(450))
+            guard !Task.isCancelled else { return }
+            await self?.performStreamingRemuxRestartIfNeeded(to: time, playerState: playerState)
+        }
+    }
+
+    private func performStreamingRemuxRestartIfNeeded(to time: Double, playerState: PlayerState) async {
+        guard let sourceURL = activeStreamingSourceURL,
+              let cacheKey = activeStreamingHLSCacheKey else { return }
+        let remuxedSeconds = await moviePlayer.estimatedStreamingHLSDuration(cacheKey: cacheKey)
+        let currentStartSeek = lastStreamingRemuxRestartTarget >= 30 ? lastStreamingRemuxRestartTarget - 30 : 0
+        let remuxedAbsoluteEnd = lastStreamingRemuxRestartTarget >= 0 ? (currentStartSeek + remuxedSeconds) : remuxedSeconds
+
+        let needsRestart = lastStreamingRemuxRestartTarget < 0 || time < currentStartSeek || time > remuxedAbsoluteEnd + 2
+        guard needsRestart else {
+            PlaybackLog.log(
+                "[MKVHLS] skip remux restart — target \(Int(time))s within remuxed playlist [\(Int(currentStartSeek)), \(Int(remuxedAbsoluteEnd))]s"
+            )
+            playerState.performNormalSeek(to: time)
+            return
+        }
+
+        let duration = playerState.duration
+        guard duration.isFinite, duration > 0 else { return }
+        lastStreamingRemuxRestartTarget = time
+        PlaybackLog.log(
+            "[MKVHLS] restart remux at \(Int(time))s — only \(Int(remuxedSeconds))s segmented so far (playlist start \(Int(currentStartSeek))s)"
+        )
+        playerState.updateBufferingDetail(nil)
+        playerState.isBuffering = false
+
+        let durationForPrioritize = duration
+        let startPrioritize = time >= 30 ? time - 30 : 0
+        await orchestrator.prioritizePlayback(atSeconds: startPrioritize, durationSeconds: durationForPrioritize)
+
+        do {
+            // The HLS stream starts at this offset into the movie (matches the -ss value in restartStreamingRemux).
+            let hlsStartOffset = time >= 30 ? time - 30 : 0.0
+            let remux = try await moviePlayer.restartStreamingRemux(
+                inputURL: sourceURL,
+                cacheKey: cacheKey,
+                seekSeconds: time
+            )
+            playerState.reloadStreamingHLSPlaylist(remux.playlistURL, seekTo: time, hlsOffset: hlsStartOffset)
+            playerState.updateBufferingDetail(nil)
+        } catch {
+            lastStreamingRemuxRestartTarget = -1
+            PlaybackLog.log("[MKVHLS] remux restart failed: \(error.localizedDescription)")
+            playerState.updateBufferingDetail("Seek failed — try another position")
+        }
+    }
+
+    private func formatSeekClock(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds))
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let secs = total % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, secs)
+        }
+        return String(format: "%d:%02d", minutes, secs)
     }
 
     private static func formatBytes(_ bytes: Int64) -> String {

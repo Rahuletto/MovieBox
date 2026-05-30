@@ -19,7 +19,7 @@ struct DetailHeroOverlay: View {
         ZStack(alignment: .bottomLeading) {
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
-                DetailHeroHeader(
+                MovieDetailHeader(
                     detail: detail,
                     kind: kind,
                     techKinds: techKinds,

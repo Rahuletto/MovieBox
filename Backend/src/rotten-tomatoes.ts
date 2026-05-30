@@ -1,3 +1,4 @@
+
 import { kvGet, kvPut } from './kv-cache'
 
 export type RottenTomatoesStats = {
@@ -323,8 +324,11 @@ async function resolveHighestVariantHls(manifestURL: string): Promise<string> {
       }
     }
 
-    // Return the master manifest URL so AVPlayer can adapt quality dynamically
-    // as network conditions improve/dip during playback.
+    const preferredVariant = bestHDURL ?? bestFallbackURL
+    if (preferredVariant) {
+      // Keep returning master manifest so AVPlayer can adapt quality dynamically.
+      return manifestURL
+    }
     return manifestURL
   } catch {
     return manifestURL

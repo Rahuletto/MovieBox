@@ -6,6 +6,7 @@ import CoreStreaming
 import CoreTorrent
 import DesignSystem
 import MovieBoxCore
+import MovieBoxDetail
 import SwiftData
 import SwiftUI
 
@@ -751,7 +752,30 @@ struct DownloadTaskRow: View {
     }
 
     private func loadBannerArtwork() async {
-        guard tmdbId > 0, case .task = model else {
+        guard case .task = model else {
+            bannerArtworkURL = artworkURL
+            return
+        }
+
+        let task = resolvedTask
+
+        if tmdbId <= 0, let title = task?.title, !title.isEmpty {
+            if let mode = MetadataSettings.mode(from: settings) {
+                let client = MetadataClient(mode: mode)
+                do {
+                    let results = try await client.searchMovies(query: title, kind: mediaKind)
+                    guard !Task.isCancelled, let first = results.first else {
+                        bannerArtworkURL = artworkURL
+                        return
+                    }
+                    if let path = first.backdropPath ?? first.posterPath {
+                        bannerArtworkURL = client.imageURL(path: path, width: 1280)
+                        return
+                    }
+                } catch {
+                    NSLog("DownloadTaskRow: title search fallback failed — \(error.localizedDescription)")
+                }
+            }
             bannerArtworkURL = artworkURL
             return
         }
@@ -788,7 +812,6 @@ struct DownloadTaskRow: View {
     }
 
     private func watchCompletedTask(_ task: DownloadManager.DownloadTask) {
-        guard let path = task.outputPath else { return }
         if task.tmdbId > 0 {
             let posterPath = movieRecords.first(where: { $0.tmdbId == task.tmdbId })?.posterPath
             WatchProgressStore.ensurePlaybackRecord(
@@ -802,19 +825,65 @@ struct DownloadTaskRow: View {
         }
 
         let torrent = torrentResult(for: task)
-        appServices.playbackCoordinator.playLocalFile(
-            localFilePath: path,
-            torrent: torrent,
-            allTorrents: [torrent],
-            playerState: playerState,
-            movieId: task.tmdbId,
-            subtitleURL: nil,
-            subtitleAppearance: playback.appearance,
-            subtitleFontSize: playback.fontSize,
-            displayTitle: displayTitle,
-            resumePosition: WatchProgressStore.resumePosition(for: task.tmdbId, in: movieRecords),
-            posterURL: effectiveArtworkURL
-        )
+        let kind = mediaKind
+        Task { @MainActor in
+            let path = appServices.resolvedCompletedMediaPath(for: torrent)
+                ?? task.outputPath.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }
+            guard let path else {
+                NSLog("DownloadTaskRow: missing file on disk for task \(task.id)")
+                return
+            }
+
+            await appServices.prepareForLocalFilePlayback()
+
+            var subtitleCatalog: [SubtitleInfo] = []
+            var subtitleSearchContext: SubtitleSearchContext?
+
+            if task.tmdbId > 0,
+               let mode = settings.first?.metadataMode {
+                do {
+                    let client = MetadataClient(mode: mode)
+                    let detail = try await client.movieDetail(id: task.tmdbId, kind: kind)
+                    subtitleCatalog = await MovieDetailLoader.loadSubtitles(
+                        detail: detail,
+                        kind: kind,
+                        settings: settings.first
+                    )
+                    subtitleSearchContext = SubtitleSearchContext(
+                        title: detail.movie.title,
+                        year: Int(detail.movie.releaseDate.prefix(4)),
+                        imdbId: detail.imdbId,
+                        tmdbId: task.tmdbId,
+                        mediaKind: kind,
+                        preferredLanguage: settings.first?.preferredSubtitleLang ?? "en",
+                        metadataMode: mode
+                    )
+                } catch {
+                    NSLog("Download playback subtitle setup failed: \(error.localizedDescription)")
+                }
+            }
+
+            appServices.playbackCoordinator.playLocalFile(
+                localFilePath: path,
+                torrent: torrent,
+                allTorrents: [torrent],
+                playerState: playerState,
+                movieId: task.tmdbId,
+                subtitleURL: nil,
+                subtitleAppearance: playback.appearance,
+                subtitleFontSize: playback.fontSize,
+                displayTitle: displayTitle,
+                resumePosition: WatchProgressStore.resumePosition(for: task.tmdbId, in: movieRecords),
+                posterURL: effectiveArtworkURL
+            )
+            SubtitlePlaybackSupport.attachToPlayback(
+                playerState: playerState,
+                catalog: subtitleCatalog,
+                searchContext: subtitleSearchContext,
+                localMediaPath: path,
+                autoSelectRemote: subtitleSearchContext != nil
+            )
+        }
     }
 
     private func completedFileIsPlayable(_ task: DownloadManager.DownloadTask) -> Bool {

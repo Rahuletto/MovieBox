@@ -87,6 +87,8 @@ public enum EmbeddedSubtitleExtractor {
         process.standardOutput = outputPipe
         process.standardError = Pipe()
 
+        ProcessRegistry.shared.register(process)
+        defer { ProcessRegistry.shared.unregister(process) }
         do {
             try process.run()
             process.waitUntilExit()
@@ -145,6 +147,8 @@ public enum EmbeddedSubtitleExtractor {
         let errorPipe = Pipe()
         process.standardError = errorPipe
 
+        ProcessRegistry.shared.register(process)
+        defer { ProcessRegistry.shared.unregister(process) }
         try process.run()
         process.waitUntilExit()
 

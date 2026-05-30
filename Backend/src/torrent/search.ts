@@ -1,5 +1,5 @@
-import { parseEnabledIndexerIDs, INDEXER_CATALOG, DEFAULT_ENABLED_INDEXER_IDS } from './catalog'
-import { runIndexers, INDEXER_IDS } from './registry'
+import { parseEnabledIndexerIDs } from './catalog'
+import { runIndexers } from './registry'
 import { sanitizeQuery } from './utils'
 import type { TorrentKind, TorrentSearchPayload } from './types'
 import { TORRENT_API_VERSION } from './types'
@@ -12,6 +12,8 @@ export {
   parseEnabledIndexerIDs,
 } from './catalog'
 export { parse1337xSearchRows } from './indexers/x1337'
+
+type RunIndexersResult = Awaited<ReturnType<typeof runIndexers>>
 
 export async function searchAllTorrents(opts: {
   query: string
@@ -55,11 +57,7 @@ export async function searchAllTorrents(opts: {
   const mainPromise = runIndexers(ctx, enabled)
 
   // 2. If TV show and season is known, also run season pack search in parallel
-  let seasonPromise: Promise<{
-    results: any[]
-    counts: Record<string, number>
-    errors: Record<string, string>
-  }> = Promise.resolve({
+  let seasonPromise: Promise<RunIndexersResult> = Promise.resolve({
     results: [],
     counts: {},
     errors: {},

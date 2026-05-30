@@ -1,8 +1,30 @@
 import Foundation
+import CoreStreaming
 import MoviePlayerEngine
 import XCTest
 
 final class RemuxServiceTests: XCTestCase {
+    func testMKVTailCueMappingDoesNotAddSegmentStartToAbsoluteCueOffsets() throws {
+        let mediaByteLength: Int64 = 7_414_870_811
+        let expectedOffset: UInt64 = 7_414_870_810
+        let segmentContentStart: UInt64 = 6
+        let expectedCueClusterPosition = expectedOffset - segmentContentStart
+        let timecodeScale = Self.element([0x2A, 0xD7, 0xB1], Self.uintBytes(1_000_000))
+        let head = Data([0x18, 0x53, 0x80, 0x67, 0x81, 0x00]) + timecodeScale + Data(repeating: 0, count: 64)
+        let tail = Self.mkvCues(cueTime: 43, cueClusterPosition: expectedCueClusterPosition)
+
+        let offset = MKVSeekBootstrap.testMediaOffsetForPlaybackTime(
+            seconds: 43,
+            durationSeconds: 100,
+            head: head,
+            tail: tail,
+            tailMediaOffset: 7_410_000_000,
+            mediaByteLength: mediaByteLength
+        )
+
+        XCTAssertNil(offset)
+    }
+
     func testHEVCMain10EAC3IsAccepted() throws {
         let plan = try makePlan(videoCodec: "hevc", videoProfile: "Main 10", audioCodecs: [("truehd", true), ("eac3", false)])
 
@@ -333,6 +355,34 @@ final class RemuxServiceTests: XCTestCase {
 
     private func decode(_ json: String) throws -> MediaProbe {
         try RemuxService.decodeProbe(Data(json.utf8))
+    }
+
+    private static func mkvCues(cueTime: UInt64, cueClusterPosition: UInt64) -> Data {
+        let cueTrackPositions = element([0xB7], element([0xF1], uintBytes(cueClusterPosition)))
+        let cuePoint = element([0xBB], element([0xB3], uintBytes(cueTime)) + cueTrackPositions)
+        return element([0x1C, 0x53, 0xBB, 0x6B], cuePoint)
+    }
+
+    private static func element(_ id: [UInt8], _ payload: Data) -> Data {
+        Data(id) + ebmlSize(payload.count) + payload
+    }
+
+    private static func ebmlSize(_ size: Int) -> Data {
+        precondition(size < 0x7F)
+        return Data([UInt8(0x80 | size)])
+    }
+
+    private static func uintBytes(_ value: UInt64) -> Data {
+        var bytes: [UInt8] = []
+        var started = false
+        for shift in stride(from: 56, through: 0, by: -8) {
+            let byte = UInt8((value >> UInt64(shift)) & 0xFF)
+            if byte != 0 || started {
+                bytes.append(byte)
+                started = true
+            }
+        }
+        return Data(bytes.isEmpty ? [0] : bytes)
     }
 
     func testStopAllTerminatesProcessesAndStopsServers() async throws {

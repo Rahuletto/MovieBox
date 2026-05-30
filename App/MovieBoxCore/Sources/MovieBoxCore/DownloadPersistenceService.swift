@@ -22,10 +22,9 @@ public final class DownloadPersistenceService: DownloadPersistenceDelegate {
 
     public func completedFilePath(for infoHash: String) -> String? {
         let cleanHash = infoHash.lowercased()
-        let descriptor = FetchDescriptor<DownloadRecord>(
-            predicate: #Predicate<DownloadRecord> { $0.infoHash == cleanHash }
-        )
-        guard let record = try? modelContext.fetch(descriptor).first else { return nil }
+        let descriptor = FetchDescriptor<DownloadRecord>()
+        guard let records = try? modelContext.fetch(descriptor) else { return nil }
+        guard let record = records.first(where: { $0.infoHash.lowercased() == cleanHash }) else { return nil }
         guard record.state == DownloadState.completed.rawValue else { return nil }
         guard let path = record.localFilePath, !path.isEmpty else { return nil }
         if FileManager.default.fileExists(atPath: path) {
@@ -97,7 +96,7 @@ public final class DownloadPersistenceService: DownloadPersistenceDelegate {
         }
     }
 
-    /// Re-attaches in-progress piece data when SwiftData has no row but `moviebox_*.stream` exists on disk.
+    /// Re-attaches in-progress piece data when SwiftData has no row but `.moviebox_*.stream` exists on disk.
     private func recoverOrphanedDownloads(into downloadManager: DownloadManager) {
         let roots = [
             downloadManager.downloadRootDirectory,
@@ -118,12 +117,21 @@ public final class DownloadPersistenceService: DownloadPersistenceDelegate {
                let streams = try? FileManager.default.contentsOfDirectory(
                    at: legacyDir,
                    includingPropertiesForKeys: nil,
-                   options: [.skipsHiddenFiles]
+                   options: []
                ) {
                 for stream in streams where stream.pathExtension == "stream" {
                     let base = stream.deletingPathExtension().lastPathComponent
-                    guard base.hasPrefix("moviebox_") else { continue }
-                    let hash = String(base.dropFirst("moviebox_".count)).lowercased()
+                    let newPrefix = ".moviebox_"
+                    let oldPrefix = "moviebox_"
+                    let prefix: String
+                    if base.hasPrefix(newPrefix) {
+                        prefix = newPrefix
+                    } else if base.hasPrefix(oldPrefix) {
+                        prefix = oldPrefix
+                    } else {
+                        continue
+                    }
+                    let hash = String(base.dropFirst(prefix.count)).lowercased()
                     if let legacy = DownloadDiskRecovery.legacyContainerArtifact(
                         infoHash: hash,
                         preferredStorageDirectory: nil,

@@ -26,7 +26,8 @@ public enum MovieBoxFileLogger {
     private nonisolated static let fileQueue = DispatchQueue(label: "moviebox.filelogger", qos: .utility)
 
     public static func log(_ level: Level, category: String, _ message: String) {
-        guard isDebugLoggingEnabled || level == .error || level == .warn else { return }
+        guard isDebugLoggingEnabled || level == .error || level == .warn
+            || (category == "torrent" && level == .info) else { return }
         let line = formatLine(level: level, category: category, message: sanitize(message))
         fileQueue.async {
             ensureLogDirectory()

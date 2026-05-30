@@ -44,7 +44,10 @@ struct MovieBoxApp: App {
                 .environment(appServices)
                 .environment(errorCenter)
                 .modelContainer(sharedModelContainer)
-                .onAppear { wireAppDelegate() }
+                .onAppear {
+                    wireAppDelegate()
+                    appServices.runStartupStorageCleanup()
+                }
                 .onChange(of: playerState.isPresented) { _, presented in
                     if !presented, playerState.isStreamingTorrent {
                         Task { await appServices.cancelActiveStream() }

@@ -14,6 +14,7 @@ public final class AppServices {
     public private(set) var activeSession: TorrentStreamSession?
     public let persistentPlayback = PersistentPlaybackController()
     public var downloadPersistence: DownloadPersistenceService?
+    private var pendingStreamCleanup: (infoHash: String, movieId: Int)?
 
     public let streamingOrchestrator: StreamingOrchestrator
 
@@ -28,6 +29,7 @@ public final class AppServices {
 
     public func cancelActiveStream() async {
         await persistentPlayback.cancel(appServices: self)
+        finishStreamCleanup()
     }
 
     /// Stops torrent engine/session without clearing persistent pill state (used internally during replace).
@@ -35,6 +37,30 @@ public final class AppServices {
         await activeSession?.cancel()
         activeSession = nil
         await playbackCoordinator.cancel()
+    }
+
+    public func trackStreamForCleanup(torrent: TorrentResult, movieId: Int) {
+        guard let hash = torrent.resolvedInfoHash, movieId > 0 else { return }
+        pendingStreamCleanup = (hash.lowercased(), movieId)
+    }
+
+    public func finishStreamCleanup(hlsCacheKey: String? = nil) {
+        guard let pending = pendingStreamCleanup else { return }
+        _ = StorageCleanup.cleanupAfterStream(
+            infoHash: pending.infoHash,
+            movieId: pending.movieId,
+            hlsCacheKey: hlsCacheKey
+        )
+        pendingStreamCleanup = nil
+    }
+
+    public func runStartupStorageCleanup() {
+        Task.detached(priority: .utility) {
+            _ = StorageCleanup.runMaintenance(
+                retainStreamInfoHashes: [],
+                streamBufferMaxAge: 0
+            )
+        }
     }
 
     @discardableResult
@@ -90,6 +116,27 @@ public final class AppServices {
 
     public func registerActiveSession(_ session: TorrentStreamSession?) {
         activeSession = session
+    }
+
+    /// Stops any active torrent stream engine without cancelling an in-flight playback pipeline task.
+    public func prepareForLocalFilePlayback() async {
+        finishStreamCleanup()
+        await activeSession?.cancel()
+        activeSession = nil
+        await streamingOrchestrator.stop()
+        await playbackCoordinator.cancel()
+    }
+
+    public func resolvedCompletedMediaPath(
+        for torrent: TorrentResult,
+        downloadRecords: [DownloadRecord] = []
+    ) -> String? {
+        DownloadPlaybackPaths.completedMediaPath(
+            for: torrent,
+            persistence: downloadPersistence,
+            downloadManager: downloadManager,
+            downloadRecords: downloadRecords
+        )
     }
 
     /// Warms torrent metadata cache for the best release while the user is on the detail page.

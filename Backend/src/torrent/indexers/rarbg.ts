@@ -1,5 +1,6 @@
+
 import type { TorrentIndexer, TorrentSearchHit } from '../types'
-import { fetchJSON, hashFromMagnet, magnetFor, resolveQualityLabel } from '../utils'
+import { fetchJSON, magnetFor, resolveQualityLabel } from '../utils'
 
 interface RarbgTorrent {
   title: string

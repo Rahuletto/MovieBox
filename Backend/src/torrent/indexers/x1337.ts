@@ -1,4 +1,5 @@
-import type { SearchContext, TorrentIndexer, TorrentSearchHit } from '../types'
+
+import type { TorrentIndexer, TorrentSearchHit } from '../types'
 import {
   decodeHtml,
   fetchHTML,
