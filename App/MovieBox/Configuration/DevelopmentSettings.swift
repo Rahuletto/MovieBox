@@ -4,9 +4,9 @@ import Foundation
 import MovieBoxCore
 import SwiftData
 
-/// Applies Rahul's deployed Worker + app token when Settings are still empty (local dev only).
+/// Debug-only: pre-fills the maintainer's personal Worker URL + token when Settings are empty.
 enum DevelopmentSettings {
-    /// Remote Worker — used when `useLocalBackend` is off.
+    /// Personal Worker — not a public service; self-host for your own use.
     static let proxyBaseURL = BackendProxyURL.production
 
     @MainActor

@@ -4,7 +4,7 @@ A native **macOS** app for browsing movies and TV, streaming from torrents, and 
 
 Think of it as a personal media library: TMDB for discovery, torrent search across several indexers, piece-based streaming with resume, optional full downloads, and a player that can remux MKV into HLS for AVPlayer (including HDR when the source supports it).
 
-> **Note:** This is personal software, not a hosted product. You bring your own API keys, Worker deployment, and torrent sources. Use it responsibly and in line with the laws where you live.
+> **Note:** The app is open source. Run the **backend yourself** ([guide](docs/SELF_HOSTING.md)) — there is no public hosted API. The maintainer’s Worker is for personal use only. Torrent playback stays on your Mac. Use it responsibly and in line with the laws where you live.
 
 ## What’s in the repo
 
@@ -12,6 +12,8 @@ Think of it as a personal media library: TMDB for discovery, torrent search acro
 |------|------------|
 | [`App/`](App/) | SwiftUI macOS app (`MovieBox.xcodeproj`) and local Swift packages |
 | [`Backend/`](Backend/) | Hono API on Cloudflare Workers (Wrangler + Bun) |
+| [`PRIVACY.md`](PRIVACY.md) | What the app and backend collect |
+| [`docs/SELF_HOSTING.md`](docs/SELF_HOSTING.md) | Run your own backend on Cloudflare Workers |
 | [`LICENSE`](LICENSE) | [CC BY-NC-ND 4.0](https://creativecommons.org/licenses/by-nc-nd/4.0/) |
 
 ### App packages (high level)
@@ -58,7 +60,9 @@ The Worker listens on **http://127.0.0.1:8787**. Health check: `curl http://127.
 
 ### 3. Point the app at your Worker
 
-In the app: **Settings → Backend** (or on first launch in Debug builds, defaults may be applied automatically).
+In the app: **Settings → Metadata** (or on first launch in Debug builds, defaults may be applied automatically).
+
+Full production deploy: **[docs/SELF_HOSTING.md](docs/SELF_HOSTING.md)**. Privacy: **[PRIVACY.md](PRIVACY.md)**.
 
 | Setting | Local dev | Production |
 |---------|-----------|------------|
@@ -115,7 +119,7 @@ Playback and remux logs (when enabled):
 
 ## Backend API (overview)
 
-All `/api/*` routes expect `Authorization: Bearer <APP_SECRET>` unless you’re in local dev mode with relaxed auth.
+All `/api/*` routes expect header `X-MovieBox-Token: <APP_SECRET>` (same value as in app Settings).
 
 | Area | Examples |
 |------|----------|
@@ -143,6 +147,14 @@ The macOS app checks for updates via [Sparkle](https://sparkle-project.org/), us
 - **Swift packages:** you can build modules in isolation, e.g. `swift build --package-path App/CoreStreaming`.  
 - **Player package:** see [App/MoviePlayer/README.md](App/MoviePlayer/README.md) for remux tiers, HDR checks, and integration notes.  
 - **CI:** if workflows are enabled on your branch, Swift builds need a stub secrets file (the workflow copies `DevelopmentSecrets.swift.example`); backend CI runs `bun run lint:strict`.
+
+## Support
+
+If MovieBox is useful to you, you can sponsor development on GitHub — no paid tier, no hosted backend:
+
+**[github.com/sponsors/Rahuletto](https://github.com/sponsors/Rahuletto)**
+
+That helps cover API keys and Cloudflare costs for the maintainer’s personal setup. Everyone else should [self-host](docs/SELF_HOSTING.md).
 
 ## License
 
