@@ -22,9 +22,13 @@ public enum TorrentFileAssembler {
             filename = exportFilename(for: target)
         }
         let destination = outputDirectory.appendingPathComponent(filename)
+        let staging = stagingURL(for: destination)
 
         guard isContained(file: destination, in: outputDirectory) else {
             throw TorrentFileAssemblerError.pathTraversal(filename)
+        }
+        guard isContained(file: staging, in: outputDirectory) else {
+            throw TorrentFileAssemblerError.pathTraversal(staging.lastPathComponent)
         }
 
         try await verifyRequiredPiecesStructurally(
@@ -34,22 +38,17 @@ public enum TorrentFileAssembler {
             exportByteLength: exportLength
         )
 
-        if FileManager.default.fileExists(atPath: destination.path) {
-            try FileManager.default.removeItem(at: destination)
-        }
-        FileManager.default.createFile(atPath: destination.path, contents: nil)
+        removeExportArtifacts(destination: destination, staging: staging)
+        FileManager.default.createFile(atPath: staging.path, contents: nil)
 
-        let writeHandle = try FileHandle(forWritingTo: destination)
+        let writeHandle = try FileHandle(forWritingTo: staging)
         defer { try? writeHandle.close() }
 
         var mediaOffset: Int64 = 0
         while mediaOffset < exportLength {
             let toRead = Int(min(Int64(chunkSize), exportLength - mediaOffset))
             let torrentOffset = target.byteOffset + mediaOffset
-            let data = try await pieceStore.read(offset: torrentOffset, length: toRead)
-            guard data.count == toRead else {
-                throw TorrentFileAssemblerError.incompleteExport
-            }
+            let data = try await pieceStore.readForExport(offset: torrentOffset, length: toRead)
             if mediaOffset == 0 {
                 try validateLeadingMediaBytes(data, pathExtension: (target.file.relativePath as NSString).pathExtension)
             }
@@ -57,8 +56,57 @@ public enum TorrentFileAssembler {
             mediaOffset += Int64(data.count)
         }
 
-        try validateExportedMedia(at: destination, expectedLength: exportLength)
+        try validateExportedMedia(at: staging, expectedLength: exportLength)
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+        try FileManager.default.moveItem(at: staging, to: destination)
         return destination
+    }
+
+    public static func exportDestinationURL(
+        outputDirectory: URL,
+        displayTitle: String?,
+        target: TorrentStreamTarget
+    ) -> URL {
+        let videoExtension = (target.file.relativePath as NSString).pathExtension
+        let filename: String
+        if let displayTitle,
+           !displayTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            filename = displayFilename(forTitle: displayTitle, fileExtension: videoExtension)
+        } else {
+            filename = exportFilename(for: target)
+        }
+        return outputDirectory.appendingPathComponent(filename)
+    }
+
+    /// True when every required piece is verified and MP4/MOV tail index atoms are on disk.
+    public static func isReadyForExport(
+        pieceStore: PieceStore,
+        metadata: TorrentMetadata,
+        target: TorrentStreamTarget
+    ) async -> Bool {
+        do {
+            try await verifyRequiredPiecesStructurally(
+                pieceStore: pieceStore,
+                metadata: metadata,
+                target: target,
+                exportByteLength: target.byteLength
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private static func stagingURL(for destination: URL) -> URL {
+        URL(fileURLWithPath: destination.path + ".part")
+    }
+
+    private static func removeExportArtifacts(destination: URL, staging: URL) {
+        for url in [destination, staging] where FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     /// Partial export for subtitle probing.
@@ -157,13 +205,10 @@ public enum TorrentFileAssembler {
         }
 
         let probeLength = Int(min(Int64(65_536), exportByteLength))
-        let header = try await pieceStore.read(
+        let header = try await pieceStore.readForExport(
             offset: target.byteOffset,
             length: probeLength
         )
-        guard header.count == probeLength else {
-            throw TorrentFileAssemblerError.incompleteExport
-        }
         try validateLeadingMediaBytes(
             header,
             pathExtension: (target.file.relativePath as NSString).pathExtension
@@ -171,6 +216,41 @@ public enum TorrentFileAssembler {
         let sample = header.prefix(min(4096, header.count))
         guard !sample.isEmpty, sample.contains(where: { $0 != 0 }) else {
             throw TorrentFileAssemblerError.invalidContainer
+        }
+
+        let ext = (target.file.relativePath as NSString).pathExtension.lowercased()
+        if ext == "mp4" || ext == "m4v" || ext == "mov" {
+            try await verifyMP4IndexPresent(
+                pieceStore: pieceStore,
+                target: target,
+                exportByteLength: exportByteLength
+            )
+        }
+    }
+
+    /// Fast-start MP4s keep `moov` near `ftyp`; classic MP4s put it at EOF.
+    private static func verifyMP4IndexPresent(
+        pieceStore: PieceStore,
+        target: TorrentStreamTarget,
+        exportByteLength: Int64
+    ) async throws {
+        let headProbe = Int(min(Int64(16 * 1024 * 1024), exportByteLength))
+        let head = try await pieceStore.readForExport(
+            offset: target.byteOffset,
+            length: headProbe
+        )
+        if head.contains(Data("moov".utf8)) {
+            return
+        }
+
+        let tailProbe = Int(min(Int64(4 * 1024 * 1024), exportByteLength))
+        let tailOffset = target.byteOffset + exportByteLength - Int64(tailProbe)
+        let tail = try await pieceStore.readForExport(
+            offset: tailOffset,
+            length: Int(tailProbe)
+        )
+        guard tail.contains(Data("moov".utf8)) else {
+            throw TorrentFileAssemblerError.missingMP4Index
         }
     }
 
@@ -216,6 +296,19 @@ public enum TorrentFileAssembler {
         let boxType = header.subdata(in: 4..<8)
         guard boxType == Data("ftyp".utf8) else {
             throw TorrentFileAssemblerError.invalidContainer
+        }
+
+        let headProbe = Int(min(Int64(16 * 1024 * 1024), expectedLength))
+        let head = handle.readData(ofLength: headProbe)
+        if head.contains(Data("moov".utf8)) {
+            return
+        }
+
+        let tailProbe = Int(min(Int64(4 * 1024 * 1024), expectedLength))
+        try handle.seek(toOffset: UInt64(max(0, expectedLength - Int64(tailProbe))))
+        let tail = handle.readData(ofLength: tailProbe)
+        guard tail.contains(Data("moov".utf8)) else {
+            throw TorrentFileAssemblerError.missingMP4Index
         }
     }
 
@@ -267,6 +360,7 @@ public enum TorrentFileAssemblerError: Error, LocalizedError {
     case missingPieces([Int])
     case missingPieceHash(Int)
     case invalidPiecesHashTable
+    case missingMP4Index
 
     public var errorDescription: String? {
         switch self {
@@ -286,6 +380,8 @@ public enum TorrentFileAssemblerError: Error, LocalizedError {
             "Torrent metadata is missing piece \(index) hashes. Try another release."
         case .invalidPiecesHashTable:
             "Torrent metadata is incomplete. Try another release."
+        case .missingMP4Index:
+            "MP4 index (moov) is not on disk yet. Keep downloading the final pieces."
         }
     }
 }

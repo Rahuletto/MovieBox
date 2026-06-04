@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import CoreMetadata
 import CorePlayer
 import CoreStorage
@@ -54,6 +55,18 @@ struct MovieBoxApp: App {
                     }
                 }
                 .onOpenURL { url in
+                    if StreamFileLocator.isMovieBoxStreamFile(url) {
+                        NotificationCenter.default.post(name: .movieBoxOpenStreamFile, object: url)
+                    } else {
+                        do {
+                            try MagnetImportHandler.handle(url: url, router: router)
+                        } catch {
+                            importErrorMessage = error.localizedDescription
+                        }
+                    }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .movieBoxOpenImportURL)) { notification in
+                    guard let url = notification.object as? URL else { return }
                     do {
                         try MagnetImportHandler.handle(url: url, router: router)
                     } catch {

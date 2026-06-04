@@ -101,6 +101,7 @@ extension PlayerState {
                         self.adoptDurationFromPlayer(readyDuration)
                     }
                     PlaybackLog.log("AVPlayerItem readyToPlay duration=\(self.duration)s")
+                    self.installAudioVolumePipeline()
                     // #region agent log
                     if let container = self.pipHostView {
                         let superName = container.superview.map { String(describing: type(of: $0)) } ?? "nil"

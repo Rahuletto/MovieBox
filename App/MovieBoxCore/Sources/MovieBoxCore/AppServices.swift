@@ -15,6 +15,8 @@ public final class AppServices {
     public let persistentPlayback = PersistentPlaybackController()
     public var downloadPersistence: DownloadPersistenceService?
     private var pendingStreamCleanup: (infoHash: String, movieId: Int)?
+    public private(set) var activeDownloadPlaybackTaskId: UUID?
+    public private(set) var activeStreamFilePlaybackHash: String?
 
     public let streamingOrchestrator: StreamingOrchestrator
 
@@ -28,8 +30,52 @@ public final class AppServices {
     }
 
     public func cancelActiveStream() async {
+        await endActiveDownloadPlayback()
         await persistentPlayback.cancel(appServices: self)
         finishStreamCleanup()
+    }
+
+    public func endActiveDownloadPlayback() async {
+        if let taskId = activeDownloadPlaybackTaskId {
+            activeDownloadPlaybackTaskId = nil
+            await downloadManager.endPlaybackSession(for: taskId)
+        }
+        if let hash = activeStreamFilePlaybackHash {
+            activeStreamFilePlaybackHash = nil
+            await downloadManager.endStreamFilePlayback(infoHash: hash)
+        }
+        await playbackCoordinator.cancel()
+    }
+
+    /// Plays a `.moviebox_*.stream` sidecar (e.g. Finder double-click).
+    public func playStreamFile(at url: URL, playerState: PlayerState) async throws {
+        await cancelActiveStreamWithoutPersistentReset()
+        await streamingOrchestrator.stop()
+
+        let start = try await downloadManager.beginPlaybackFromStreamFile(at: url)
+        if let taskId = start.downloadTaskId {
+            activeDownloadPlaybackTaskId = taskId
+            activeStreamFilePlaybackHash = nil
+        } else {
+            activeStreamFilePlaybackHash = start.infoHash
+            activeDownloadPlaybackTaskId = nil
+        }
+
+        let torrent = StreamFilePlaybackSupport.torrentResult(
+            displayTitle: start.displayTitle,
+            metadata: start.metadata
+        )
+        let coordinator = beginPlaybackCoordinator()
+        try await coordinator.playInProgressDownload(
+            session: start.session,
+            torrent: torrent,
+            allTorrents: [torrent],
+            playerState: playerState,
+            movieId: 0,
+            subtitleURL: nil,
+            knownDurationSeconds: Double(start.metadata.totalSize)
+        )
+        playerState.isStreamingTorrent = true
     }
 
     /// Stops torrent engine/session without clearing persistent pill state (used internally during replace).
@@ -118,13 +164,53 @@ public final class AppServices {
         activeSession = session
     }
 
+    public var hasActiveTorrentSession: Bool {
+        activeSession != nil || activeDownloadPlaybackTaskId != nil
+    }
+
     /// Stops any active torrent stream engine without cancelling an in-flight playback pipeline task.
     public func prepareForLocalFilePlayback() async {
+        await endActiveDownloadPlayback()
+        guard hasActiveTorrentSession else { return }
         finishStreamCleanup()
         await activeSession?.cancel()
         activeSession = nil
         await streamingOrchestrator.stop()
         await playbackCoordinator.cancel()
+    }
+
+    public func playInProgressDownload(
+        task: DownloadManager.DownloadTask,
+        torrent: TorrentResult,
+        allTorrents: [TorrentResult],
+        playerState: PlayerState,
+        movieId: Int,
+        subtitleURL: URL?,
+        subtitleAppearance: SubtitleAppearance,
+        subtitleFontSize: CGFloat,
+        displayTitle: String?,
+        resumePosition: Double?,
+        posterURL: URL?
+    ) async throws {
+        await cancelActiveStreamWithoutPersistentReset()
+        await streamingOrchestrator.stop()
+        let session = try await downloadManager.beginPlaybackSession(for: task.id)
+        activeDownloadPlaybackTaskId = task.id
+        try await playbackCoordinator.playInProgressDownload(
+            session: session,
+            torrent: torrent,
+            allTorrents: allTorrents,
+            playerState: playerState,
+            movieId: movieId,
+            subtitleURL: subtitleURL,
+            subtitleAppearance: subtitleAppearance,
+            subtitleFontSize: subtitleFontSize,
+            displayTitle: displayTitle,
+            resumePosition: resumePosition,
+            knownDurationSeconds: task.totalBytes > 0 ? Double(task.totalBytes) : nil,
+            posterURL: posterURL
+        )
+        playerState.isStreamingTorrent = true
     }
 
     public func resolvedCompletedMediaPath(

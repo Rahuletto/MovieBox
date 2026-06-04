@@ -27,4 +27,4 @@ jobs:
       - name: Stub development secrets
         run: cp MovieBox/Configuration/DevelopmentSecrets.swift.example MovieBox/Configuration/DevelopmentSecrets.swift
       - name: Build MovieBox (macOS)
-        run: xcodebuild -project MovieBox.xcodeproj -scheme MovieBox -destination 'platform=macOS' -quiet build
+        run: xcodebuild -project MovieBox.xcodeproj -scheme MovieBox -destination 'platform=macOS' ARCHS=arm64 EXCLUDED_ARCHS=x86_64 -quiet build

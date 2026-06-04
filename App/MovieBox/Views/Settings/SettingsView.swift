@@ -536,6 +536,13 @@ private struct PlaybackSettingsSection: View {
                 Toggle("Enter full screen on playback", isOn: $draft.fullScreenOnPlayback)
                 Stepper("Skip intro duration: \(draft.skipIntroDuration)s", value: $draft.skipIntroDuration, in: 0...30)
             }
+
+            Section("Developer") {
+                Toggle("Show streaming samples on Downloads", isOn: $draft.showStreamingSamples)
+                Text("Adds Apple’s HLS reference streams for HDR/Atmos testing. Off by default.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
     }
@@ -596,7 +603,7 @@ private struct SettingsDraft: Equatable {
     var strictHDRValidation = false
     var allowTranscodeFallback = true
     var subtitlesEnabled = true
-    var subtitleStyle = "cinematic"
+    var subtitleStyle = "modern"
     var subtitleFontSize = 20.0
     var audioFormatPriority = "best"
     var resumePlayback = true
@@ -614,6 +621,7 @@ private struct SettingsDraft: Equatable {
     var metadataCacheTTL = 60
     var debugLogging = false
     var logTorrentActivity = false
+    var showStreamingSamples = false
 
     init(settings: AppSettings? = nil) {
         guard let settings else { return }
@@ -657,6 +665,7 @@ private struct SettingsDraft: Equatable {
         metadataCacheTTL = settings.metadataCacheTTL
         debugLogging = settings.debugLogging
         logTorrentActivity = settings.logTorrentActivity
+        showStreamingSamples = settings.showStreamingSamples
     }
 
     func apply(to settings: AppSettings) {
@@ -700,5 +709,6 @@ private struct SettingsDraft: Equatable {
         settings.metadataCacheTTL = metadataCacheTTL
         settings.debugLogging = debugLogging
         settings.logTorrentActivity = logTorrentActivity
+        settings.showStreamingSamples = showStreamingSamples
     }
 }

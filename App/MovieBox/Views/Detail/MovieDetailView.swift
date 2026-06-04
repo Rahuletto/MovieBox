@@ -66,7 +66,7 @@ struct MovieDetailView: View {
                     isLoadingSubtitles: isLoadingSubtitles,
                     subtitleLoadHint: subtitleLoadHint,
                     subtitleFileURL: subtitleFileURL,
-                    subtitleAppearance: settings.first?.subtitleAppearance ?? .cinematic,
+                    subtitleAppearance: settings.first?.subtitleAppearance ?? .modern,
                     subtitleFontSize: settings.first?.subtitleFontSizePoints ?? 20,
                     currentRating: currentRating,
                     kind: kind,

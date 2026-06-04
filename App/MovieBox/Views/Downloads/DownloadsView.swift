@@ -24,14 +24,16 @@ struct DownloadsView: View {
 
     private var playback: PlaybackSettings { PlaybackSettings.from(settings.first) }
 
-    /// Apple reference stream — https://developer.apple.com/streaming/examples/
-    private let hdrTestStreams: [HDRTestStream] = [
-        HDRTestStream(
-            id: "apple-adv-dv-atmos",
-            title: "Apple Advanced HDR",
-            url: "https://devstreaming-cdn.apple.com/videos/streaming/examples/adv_dv_atmos/main.m3u8"
-        ),
-    ]
+    private var hdrTestStreams: [HDRTestStream] {
+        guard settings.first?.showStreamingSamples == true else { return [] }
+        return [
+            HDRTestStream(
+                id: "apple-adv-dv-atmos",
+                title: "Apple Advanced HDR",
+                url: "https://devstreaming-cdn.apple.com/videos/streaming/examples/adv_dv_atmos/main.m3u8"
+            ),
+        ]
+    }
 
     var body: some View {
         DownloadsViewBody(
@@ -109,7 +111,10 @@ private struct DownloadsViewBody: View {
     }
 
     private var downloadsScrollContent: some View {
-        ScrollView {
+        ZStack(alignment: .topLeading) {
+            AmbientPageGlow(color: MovieBoxColors.downloadGlow)
+
+            ScrollView {
             VStack(alignment: .leading, spacing: 28) {
                 if let errorMessage {
                     Text(errorMessage)
@@ -132,6 +137,7 @@ private struct DownloadsViewBody: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 18)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

@@ -16,8 +16,8 @@
 		AB0000010000000000000007 /* CoreStreaming in Frameworks */ = {isa = PBXBuildFile; productRef = AB0000010000000000001007 /* CoreStreaming */; };
 		AB0000010000000000000008 /* MovieBoxCore in Frameworks */ = {isa = PBXBuildFile; productRef = AB0000010000000000001008 /* MovieBoxCore */; };
 		AB0000010000000000000009 /* MovieBoxDetail in Frameworks */ = {isa = PBXBuildFile; productRef = AB0000010000000000001009 /* MovieBoxDetail */; };
-		E7SP00032FB9961F005174D0 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = E7SP00022FB9961F005174D0 /* Sparkle */; };
 		D23E0D542FBB6FA400526BEF /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = D23E0D532FBB6FA400526BEF /* AppIcon.icon */; };
+		E7SP00032FB9961F005174D0 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = E7SP00022FB9961F005174D0 /* Sparkle */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -265,6 +265,8 @@
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
+				ARCHS = arm64;
+				EXCLUDED_ARCHS = x86_64;
 				SDKROOT = macosx;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
@@ -321,6 +323,8 @@
 				MACOSX_DEPLOYMENT_TARGET = 26.5;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
+				ARCHS = arm64;
+				EXCLUDED_ARCHS = x86_64;
 				SDKROOT = macosx;
 				SWIFT_COMPILATION_MODE = wholemodule;
 			};
@@ -339,6 +343,7 @@
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
+				ARCHS = arm64;
 				EXCLUDED_ARCHS = x86_64;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = MovieBox/Info.plist;
@@ -373,6 +378,7 @@
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
+				ARCHS = arm64;
 				EXCLUDED_ARCHS = x86_64;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = MovieBox/Info.plist;

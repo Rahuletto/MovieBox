@@ -49,7 +49,27 @@ public actor PieceManager {
     private func midFilePlaybackWindow(for anchorInt: Int) -> ClosedRange<Int> {
         let lower = max(streamFirstPiece, anchorInt - Self.maxSequentialBehindFromAnchor)
         let upper = min(streamLastPiece, anchorInt + Self.maxSequentialAheadFromAnchor)
+        return safeIntRange(lower, through: upper) ?? lower...lower
+    }
+
+    private func streamEndPieceIndex() -> UInt32? {
+        guard pieceCount > 0 else { return nil }
+        return min(UInt32(streamLastPiece), UInt32(pieceCount - 1))
+    }
+
+    private func safeUInt32Range(_ lower: UInt32, through upper: UInt32) -> ClosedRange<UInt32>? {
+        guard lower <= upper else { return nil }
         return lower...upper
+    }
+
+    private func safeIntRange(_ lower: Int, through upper: Int) -> ClosedRange<Int>? {
+        guard lower <= upper else { return nil }
+        return lower...upper
+    }
+
+    private func cappedPieceAhead(of piece: UInt32, count: Int, end: UInt32) -> UInt32 {
+        let sum = min(UInt64(UInt32.max), UInt64(piece) + UInt64(count))
+        return UInt32(min(UInt64(end), sum))
     }
 
     public init(
@@ -89,6 +109,19 @@ public actor PieceManager {
     public func setInitialDownloadedPieces(_ pieces: Set<UInt32>) {
         downloadedPieces = pieces
         resumeSeededPieces = pieces
+    }
+
+    /// Syncs the manager after `PieceStore` verified pieces already present on disk.
+    public func confirmPiecesVerifiedOnDisk(_ indices: [Int]) {
+        guard !indices.isEmpty else { return }
+        for index in indices {
+            let piece = UInt32(index)
+            downloadedPieces.insert(piece)
+            resumeSeededPieces.remove(piece)
+            pieceBuffers.removeValue(forKey: piece)
+            receivedBlockOffsets.removeValue(forKey: piece)
+        }
+        advancePlaybackAnchor()
     }
 
     public func clearDownloadedPieces(in range: ClosedRange<Int>) {
@@ -145,9 +178,15 @@ public actor PieceManager {
             
             // 2. First append the critical seek target pieces (seek ... seek + criticalReadAhead)
             var criticalSeekPieces: [UInt32] = []
-            let criticalEnd = min(UInt32(streamLastPiece), seek + UInt32(Self.criticalReadAheadPieceCount))
-            for p in seek...criticalEnd {
-                criticalSeekPieces.append(p)
+            let criticalEnd = cappedPieceAhead(
+                of: seek,
+                count: Self.criticalReadAheadPieceCount,
+                end: min(UInt32(streamLastPiece), streamEndPieceIndex() ?? seek)
+            )
+            if let range = safeUInt32Range(seek, through: criticalEnd) {
+                for p in range {
+                    criticalSeekPieces.append(p)
+                }
             }
             appendFrom(criticalSeekPieces)
             
@@ -177,7 +216,17 @@ public actor PieceManager {
             appendFrom((streamFirstPiece..<anchorInt).map { UInt32($0) })
         }
 
+        appendFrom(buildCompletionFillOrder())
+
         return result
+    }
+
+    /// Ensures full-download tasks keep fetching verified gaps, not only the playback window.
+    private func buildCompletionFillOrder() -> [UInt32] {
+        guard streamFirstPiece <= streamLastPiece else { return [] }
+        return (streamFirstPiece...streamLastPiece)
+            .filter { !downloadedPieces.contains(UInt32($0)) }
+            .map { UInt32($0) }
     }
 
     private func isMidFileSeekAnchor(_ anchorInt: Int) -> Bool {
@@ -597,19 +646,31 @@ public actor PieceManager {
     /// advance the anchor so the next undownloaded frontier gets critical priority.
     private func advancePlaybackAnchor() {
         guard let anchor = playbackAnchorPiece else { return }
-        let end = min(UInt32(streamLastPiece), UInt32(pieceCount - 1))
+        guard let end = streamEndPieceIndex() else {
+            playbackAnchorPiece = nil
+            return
+        }
+
         var newAnchor = anchor
         while newAnchor <= end && downloadedPieces.contains(newAnchor) {
             newAnchor += 1
         }
         guard newAnchor > anchor else { return }
 
+        guard newAnchor <= end else {
+            playbackAnchorPiece = nil
+            return
+        }
+
         playbackAnchorPiece = newAnchor
 
-        // Seed the hot list with the next frontier pieces so they get duplicate-request
-        // hot-swapping in Loop 2 of getNextRequest.
-        let hotEnd = min(end, newAnchor + UInt32(Self.warmReadAheadPieceCount))
-        for piece in newAnchor...hotEnd {
+        let hotEnd = cappedPieceAhead(
+            of: newAnchor,
+            count: Self.warmReadAheadPieceCount,
+            end: end
+        )
+        guard let range = safeUInt32Range(newAnchor, through: hotEnd) else { return }
+        for piece in range {
             guard !downloadedPieces.contains(piece) else { continue }
             playerHotPieces.removeAll { $0 == piece }
             playerHotPieces.insert(piece, at: 0)

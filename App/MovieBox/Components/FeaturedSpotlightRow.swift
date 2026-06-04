@@ -46,6 +46,9 @@ private struct FeaturedSpotlightCard: View {
     let height: CGFloat
     let action: () -> Void
 
+    private let contentHorizontalPadding: CGFloat = 28
+    private let contentBottomPadding: CGFloat = 26
+
     var body: some View {
         Button(action: action) {
             ZStack(alignment: .bottomLeading) {
@@ -74,8 +77,15 @@ private struct FeaturedSpotlightCard: View {
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
-                    AsyncLogoView(movieId: movie.id, title: movie.title, kind: kind)
-                        .frame(maxWidth: width - 36, alignment: .leading)
+                    AsyncLogoView(
+                        movieId: movie.id,
+                        title: movie.title,
+                        kind: kind,
+                        maxLogoHeight: 82,
+                        fallbackTitleSize: 32
+                    )
+                    .frame(maxWidth: width - contentHorizontalPadding * 2, alignment: .leading)
+                    .scaleEffect(0.92, anchor: .bottomLeading)
 
                     Text(GenreLabelFormatter.metadataLine(kind: kind, genreIds: movie.genreIds))
                         .font(.system(size: 13, weight: .medium))
@@ -88,10 +98,11 @@ private struct FeaturedSpotlightCard: View {
                             .foregroundStyle(.white.opacity(0.78))
                             .lineLimit(2)
                             .multilineTextAlignment(.leading)
+                            .frame(maxWidth: width - contentHorizontalPadding * 2, alignment: .leading)
                     }
                 }
-                .padding(.horizontal, 18)
-                .padding(.bottom, 22)
+                .padding(.horizontal, contentHorizontalPadding)
+                .padding(.bottom, contentBottomPadding)
             }
             .frame(width: width, height: height)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))

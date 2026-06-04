@@ -12,6 +12,10 @@ public enum MovieBoxColors {
     public static let movieGlow = Color(red: 1, green: 0.58, blue: 0)
     /// Purple — shows catalog glow
     public static let showGlow = Color(red: 0.69, green: 0.32, blue: 0.87)
+    /// Teal — downloads tab ambient glow
+    public static let downloadGlow = Color(red: 0.2, green: 0.78, blue: 0.72)
+    /// Indigo — library tab ambient glow
+    public static let libraryGlow = Color(red: 0.45, green: 0.42, blue: 0.95)
     public static let mutedText = Color.secondary
     public static let success = Color(red: 0.24, green: 0.72, blue: 0.45)
     public static let warning = Color(red: 0.95, green: 0.72, blue: 0.22)
@@ -141,6 +145,41 @@ public struct AmbientTopGlow: View {
             endRadius: 480
         )
         .ignoresSafeArea()
+    }
+}
+
+/// Subtle counterweight glow at the bottom-trailing corner (pairs with `AmbientTopGlow`).
+public struct AmbientBottomGlow: View {
+    private let color: Color
+
+    public init(color: Color) {
+        self.color = color
+    }
+
+    public var body: some View {
+        RadialGradient(
+            colors: [color.opacity(0.055), Color.clear],
+            center: .bottomTrailing,
+            startRadius: 16,
+            endRadius: 400
+        )
+        .ignoresSafeArea()
+    }
+}
+
+/// Top-leading and bottom-trailing ambient washes for tab pages.
+public struct AmbientPageGlow: View {
+    private let color: Color
+
+    public init(color: Color) {
+        self.color = color
+    }
+
+    public var body: some View {
+        ZStack {
+            AmbientTopGlow(color: color)
+            AmbientBottomGlow(color: color)
+        }
     }
 }
 

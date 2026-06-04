@@ -13,7 +13,7 @@ public struct PlaybackSettings: Sendable {
 
     public static func from(_ settings: AppSettings?) -> PlaybackSettings {
         PlaybackSettings(
-            appearance: settings?.subtitleAppearance ?? .cinematic,
+            appearance: settings?.subtitleAppearance ?? .modern,
             fontSize: settings?.subtitleFontSizePoints ?? 20
         )
     }

@@ -139,15 +139,6 @@ struct GenreCardView: View {
                 )
                 .allowsHitTesting(false)
 
-                // Translucent Material Badge in top right
-                Image(systemName: genre.symbol)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.95))
-                    .frame(width: 30, height: 30)
-                    .background(.white.opacity(0.2), in: Circle())
-                    .padding(10)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-
                 // Title
                 Text(genre.name)
                     .font(.system(size: 15, weight: .bold))

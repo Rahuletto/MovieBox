@@ -4,33 +4,51 @@ import SwiftUI
 struct ContinueWatchingPlaybackOverlay: View {
     let progress: Double
     let label: String?
-
+    /// When false, only the progress row (for stacking under a title logo in the same bottom chrome).
+    var includesBackdropGradient: Bool = true
+    var showsPlayIcon: Bool = true
+    /// Extra inset for the time label from the trailing/bottom edges of its container.
+    var labelEdgeInset: CGFloat = 0
     var body: some View {
-        ZStack(alignment: .bottom) {
-            LinearGradient(
-                colors: [.clear, .black.opacity(0.35), .black.opacity(0.72)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
+        if includesBackdropGradient {
+            ZStack(alignment: .bottom) {
+                LinearGradient(
+                    colors: [.clear, .black.opacity(0.35), .black.opacity(0.72)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(maxHeight: .infinity)
 
-            HStack(spacing: 10) {
+                progressRow
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 14)
+                    .padding(.top, 12)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        } else {
+            progressRow
+                .padding(.trailing, labelEdgeInset)
+                .padding(.bottom, labelEdgeInset)
+        }
+    }
+
+    var progressRow: some View {
+        HStack(spacing: 8) {
+            if showsPlayIcon {
                 Image(systemName: "play.fill")
                     .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(.white)
-
-                progressBar
-
-                if let label {
-                    Text(label)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.85)
-                }
             }
-            .padding(.horizontal, 14)
-            .padding(.bottom, 14)
-            .padding(.top, 28)
+
+            progressBar
+
+            if let label {
+                Text(label)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
         }
     }
 

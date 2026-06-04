@@ -28,7 +28,7 @@ struct TorrentSection: View {
     var subtitleCatalog: [SubtitleInfo] = []
     var selectedSubtitleID: String? = nil
     var subtitleSearchContext: SubtitleSearchContext? = nil
-    var subtitleAppearance: SubtitleAppearance = .cinematic
+    var subtitleAppearance: SubtitleAppearance = .modern
     var subtitleFontSize: CGFloat = 20
 
     private var orchestrator: StreamingOrchestrator { appServices.streamingOrchestrator }
@@ -291,10 +291,23 @@ struct TorrentSection: View {
             return TorrentDownloadActivity(phase: .queued, progress: 0, label: "Starting…")
         case .downloading:
             let percent = task.progress > 0 ? "\(Int(task.progress * 100))%" : "…"
+            let label: String
+            switch task.activityPhase {
+            case .assembling:
+                label = "Finishing"
+            case .waitingForFinalPieces:
+                if let detail = task.statusDetail, !detail.isEmpty {
+                    label = detail
+                } else {
+                    label = "Finishing download \(percent)"
+                }
+            case .downloading:
+                label = "Downloading \(percent)"
+            }
             return TorrentDownloadActivity(
                 phase: .downloading,
                 progress: task.progress,
-                label: "Downloading \(percent)"
+                label: label
             )
         case .paused:
             let percent = task.progress > 0 ? " \(Int(task.progress * 100))%" : ""

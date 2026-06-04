@@ -38,6 +38,7 @@ struct DownloadTaskRow: View {
     @Query private var movieRecords: [MovieRecord]
     @Query private var settings: [AppSettings]
     @State private var bannerArtworkURL: URL?
+    @State private var canPlayWhileDownloading = false
     let model: DownloadRowModel
     let artworkURL: URL?
     let tmdbId: Int
@@ -67,11 +68,9 @@ struct DownloadTaskRow: View {
                 shelfBottomContent
             }
 
-            if let watchProgressFraction {
-                watchProgressEdgeBar(fraction: watchProgressFraction)
+            if !showsInlineShelfProgress {
+                downloadEdgeProgressBar
             }
-
-            downloadEdgeProgressBar
         }
         .frame(
             width: MovieBoxLayout.landscapeCardWidth,
@@ -94,6 +93,34 @@ struct DownloadTaskRow: View {
         .task(id: bannerFetchKey) {
             await loadBannerArtwork()
         }
+        .task(id: downloadPlayabilityKey) {
+            await refreshDownloadPlayability()
+        }
+    }
+
+    private var downloadPlayabilityKey: String {
+        guard let task = resolvedTask else { return "none" }
+        return "\(task.id)-\(task.state.rawValue)-\(task.activityPhase.rawValue)-\(Int(task.progress * 1000))"
+    }
+
+    private func refreshDownloadPlayability() async {
+        guard let task = resolvedTask,
+              task.state == .downloading || task.state == .paused
+        else {
+            canPlayWhileDownloading = false
+            return
+        }
+        let playable = await downloadManager.canPlayWhileDownloading(taskId: task.id)
+        canPlayWhileDownloading = playable && task.activityPhase != .assembling
+    }
+
+    private var downloadPercentLabel: String {
+        let percent = Int(downloadProgressValue * 100)
+        return percent > 0 ? " · \(percent)%" : ""
+    }
+
+    private var activityShortLabel: String {
+        resolvedTask?.activityPhase.shortLabel ?? "Downloading"
     }
 
     private var bannerFetchKey: String {
@@ -108,9 +135,12 @@ struct DownloadTaskRow: View {
 
     private var topOverlay: some View {
         HStack(alignment: .center, spacing: 10) {
-            HStack(spacing: 6) {
-                if showsQualityInTopPill {
-                    qualityTopPillBadge
+            HStack(spacing: 5) {
+                if showsResolutionBadge {
+                    ResolutionQualityBadge(quality: qualityLabel, style: .onMedia)
+                }
+                if !techKinds.isEmpty {
+                    MediaTechBadgeRow(kinds: techKinds, context: .hero, size: .list)
                 }
                 if let pill = topStatusPill {
                     shelfCapsulePill(pill)
@@ -126,21 +156,16 @@ struct DownloadTaskRow: View {
         .padding(14)
     }
 
-    private var showsQualityInTopPill: Bool {
+    private var showsResolutionBadge: Bool {
         qualityLabel != VideoQuality.p2160.rawValue
     }
 
-    private var qualityTopPillBadge: some View {
-        Text(qualityLabel)
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(.white.opacity(0.2), in: Capsule())
+    private var shelfLogoHeight: CGFloat {
+        showsInlineShelfProgress ? 76 : 72
     }
 
     private var shelfBottomContent: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: showsInlineShelfProgress ? 8 : 10) {
             shelfBadgeRow
 
             if case .hdrTest(let stream) = model {
@@ -151,12 +176,15 @@ struct DownloadTaskRow: View {
                     .frame(maxWidth: MovieBoxLayout.landscapeCardWidth * 0.72, alignment: .leading)
             } else if showsTitleLogo {
                 titleBlock
-                    .frame(maxWidth: MovieBoxLayout.landscapeLogoMaxWidth, alignment: .leading)
-                    .frame(height: 72, alignment: .bottomLeading)
+                    .frame(
+                        width: shelfBottomContentWidth,
+                        height: shelfLogoHeight,
+                        alignment: .bottomLeading
+                    )
                     .clipped()
             }
 
-            if let statusLine {
+            if let statusLine, !showsInlineShelfProgress {
                 Text(statusLine)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.white.opacity(0.82))
@@ -166,8 +194,17 @@ struct DownloadTaskRow: View {
 
             actionRow
         }
-        .padding(.horizontal, 20)
-        .padding(.bottom, showsDownloadEdgeProgress ? 26 : 18)
+        .padding(.leading, shelfBottomHorizontalPadding)
+        .padding(.trailing, showsInlineShelfProgress ? shelfBottomCornerInset : shelfBottomHorizontalPadding)
+        .padding(.bottom, showsDownloadEdgeProgress && !showsInlineShelfProgress ? 26 : (showsInlineShelfProgress ? shelfBottomCornerInset : 14))
+    }
+
+    private var shelfBottomHorizontalPadding: CGFloat { 16 }
+    private var shelfBottomCornerInset: CGFloat { 18 }
+
+    private var shelfBottomContentWidth: CGFloat {
+        let trailing = showsInlineShelfProgress ? shelfBottomCornerInset : shelfBottomHorizontalPadding
+        return MovieBoxLayout.landscapeCardWidth - shelfBottomHorizontalPadding - trailing
     }
 
     @ViewBuilder
@@ -317,22 +354,6 @@ struct DownloadTaskRow: View {
         }
     }
 
-    private func watchProgressEdgeBar(fraction: Double) -> some View {
-        VStack(spacing: 0) {
-            Spacer(minLength: 0)
-            Color.white.opacity(0.18)
-                .frame(maxWidth: .infinity)
-                .frame(height: 3)
-                .overlay(alignment: .leading) {
-                    Color.white.opacity(0.5)
-                        .frame(maxWidth: .infinity)
-                        .scaleEffect(x: fraction, y: 1, anchor: .leading)
-                }
-                .padding(.bottom, showsDownloadEdgeProgress ? 22 : 10)
-        }
-        .allowsHitTesting(false)
-    }
-
     // MARK: - Artwork
 
     @ViewBuilder
@@ -409,18 +430,6 @@ struct DownloadTaskRow: View {
 
     private var shelfBadgeRow: some View {
         HStack(spacing: 6) {
-            if showsDownloadedBadge {
-                GlassBadge("Downloaded", color: MovieBoxColors.success)
-            }
-
-            if !techKinds.isEmpty {
-                MediaTechBadgeRow(kinds: techKinds, context: .hero, size: .list)
-            }
-
-            if let watchStatusLabel {
-                GlassBadge(watchStatusLabel, color: MovieBoxColors.accent)
-            }
-
             if case .failed = resolvedTask?.state {
                 GlassBadge("Failed", color: MovieBoxColors.danger)
             }
@@ -432,8 +441,14 @@ struct DownloadTaskRow: View {
     @ViewBuilder
     private var titleBlock: some View {
         if tmdbId > 0, case .task = model {
-            AsyncLogoView(movieId: tmdbId, title: displayTitle, kind: mediaKind)
-                .scaleEffect(0.92, anchor: .bottomLeading)
+            AsyncLogoView(
+                movieId: tmdbId,
+                title: displayTitle,
+                kind: mediaKind,
+                maxLogoHeight: shelfLogoHeight,
+                fillsAvailableWidth: false
+            )
+            .scaleEffect(showsInlineShelfProgress ? 1.06 : 1, anchor: .bottomLeading)
         } else {
             Text(displayTitle)
                 .font(.system(size: 22, weight: .bold))
@@ -447,9 +462,18 @@ struct DownloadTaskRow: View {
 
     @ViewBuilder
     private var actionRow: some View {
-        HStack(spacing: 12) {
-            primaryAction
-            Spacer(minLength: 0)
+        if showsInlineShelfProgress {
+            HStack(alignment: .center, spacing: 28) {
+                primaryAction
+                shelfInlineProgress
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(width: shelfBottomContentWidth, alignment: .leading)
+        } else {
+            HStack(alignment: .center, spacing: 12) {
+                primaryAction
+                Spacer(minLength: 0)
+            }
         }
     }
 
@@ -495,14 +519,25 @@ struct DownloadTaskRow: View {
                     )
                 }
             case .downloading:
-                DownloadPlayPill(
-                    title: primaryPillTitle,
-                    systemImage: "arrow.down.circle.fill",
-                    showsProgress: true,
-                    progress: max(downloadProgressValue, 0.05),
-                    isEnabled: false,
-                    action: {}
-                )
+                if canPlayWhileDownloading {
+                    DownloadPlayPill(
+                        title: "Watch",
+                        systemImage: "play.fill",
+                        showsProgress: true,
+                        progress: max(downloadProgressValue, 0.05),
+                        isEnabled: true,
+                        action: { watchInProgressDownload(task) }
+                    )
+                } else {
+                    DownloadPlayPill(
+                        title: primaryPillTitle,
+                        systemImage: primaryPillSystemImage,
+                        showsProgress: true,
+                        progress: max(downloadProgressValue, 0.05),
+                        isEnabled: false,
+                        action: {}
+                    )
+                }
             case .queued:
                 DownloadPlayPill(
                     title: primaryPillTitle,
@@ -513,14 +548,25 @@ struct DownloadTaskRow: View {
                     action: {}
                 )
             case .paused:
-                DownloadPlayPill(
-                    title: "Resume",
-                    systemImage: "play.fill",
-                    showsProgress: task.progress > 0,
-                    progress: task.progress,
-                    isEnabled: true,
-                    action: { downloadManager.resumeDownload(taskId: task.id) }
-                )
+                if canPlayWhileDownloading {
+                    DownloadPlayPill(
+                        title: "Watch",
+                        systemImage: "play.fill",
+                        showsProgress: task.progress > 0,
+                        progress: task.progress,
+                        isEnabled: true,
+                        action: { watchInProgressDownload(task) }
+                    )
+                } else {
+                    DownloadPlayPill(
+                        title: "Resume",
+                        systemImage: "play.fill",
+                        showsProgress: task.progress > 0,
+                        progress: task.progress,
+                        isEnabled: true,
+                        action: { downloadManager.resumeDownload(taskId: task.id) }
+                    )
+                }
             case .failed:
                 DownloadPlayPill(
                     title: "Retry",
@@ -554,6 +600,16 @@ struct DownloadTaskRow: View {
         return downloadManager.isReexporting(taskId: task.id)
     }
 
+    private var primaryPillSystemImage: String {
+        guard let task = resolvedTask else { return "arrow.down.circle.fill" }
+        switch task.activityPhase {
+        case .assembling, .waitingForFinalPieces:
+            return "gearshape.arrow.triangle.2.circlepath"
+        case .downloading:
+            return "arrow.down.circle.fill"
+        }
+    }
+
     private var primaryPillTitle: String {
         guard let task = resolvedTask else { return "Downloading" }
         switch task.state {
@@ -562,15 +618,17 @@ struct DownloadTaskRow: View {
         case .paused:
             return task.progress > 0 ? "Paused · \(Int(task.progress * 100))%" : "Paused"
         case .downloading:
-            if isReexporting {
-                return downloadProgressValue > 0
-                    ? "Fixing export · \(Int(downloadProgressValue * 100))%"
-                    : "Fixing export…"
+            switch task.activityPhase {
+            case .assembling:
+                return "Finishing…"
+            case .waitingForFinalPieces:
+                return "Finishing download\(downloadPercentLabel)"
+            case .downloading:
+                if downloadProgressValue > 0 {
+                    return "Downloading\(downloadPercentLabel)"
+                }
+                return "Downloading…"
             }
-            if downloadProgressValue > 0 {
-                return "Downloading · \(Int(downloadProgressValue * 100))%"
-            }
-            return "Downloading…"
         default:
             return "Download"
         }
@@ -583,19 +641,24 @@ struct DownloadTaskRow: View {
         }
         switch task.state {
         case .downloading:
-            if isReexporting {
+            switch task.activityPhase {
+            case .assembling:
+                return "Finishing"
+            case .waitingForFinalPieces:
+                if let detail = task.statusDetail, !detail.isEmpty {
+                    return detail
+                }
+                return "Finishing download\(downloadPercentLabel)"
+            case .downloading:
+                if let speed = downloadSpeedCaption {
+                    return downloadProgressValue > 0
+                        ? "\(Int(downloadProgressValue * 100))% · \(speed)"
+                        : speed
+                }
                 return downloadProgressValue > 0
-                    ? "Fixing export · \(Int(downloadProgressValue * 100))%"
-                    : "Fixing export"
+                    ? "Downloading\(downloadPercentLabel)"
+                    : "Downloading"
             }
-            if let speed = downloadSpeedCaption {
-                return downloadProgressValue > 0
-                    ? "\(Int(downloadProgressValue * 100))% · \(speed)"
-                    : speed
-            }
-            return downloadProgressValue > 0
-                ? "Downloading · \(Int(downloadProgressValue * 100))%"
-                : "Downloading"
         case .queued:
             return "Starting"
         case .paused:
@@ -606,7 +669,7 @@ struct DownloadTaskRow: View {
             if !completedFileIsPlayable(task) {
                 return "File incomplete"
             }
-            return showsDownloadedBadge ? "Ready" : nil
+            return nil
         }
     }
 
@@ -627,7 +690,97 @@ struct DownloadTaskRow: View {
         return ByteFormatting.speed(task.speed)
     }
 
+    @ViewBuilder
+    private var shelfInlineProgress: some View {
+        if let progress = shelfPlaybackProgress {
+            ContinueWatchingPlaybackOverlay(
+                progress: progress,
+                label: shelfPlaybackLabel,
+                includesBackdropGradient: false,
+                showsPlayIcon: false
+            )
+            .frame(height: 20)
+        }
+    }
+
+    private var showsInlineShelfProgress: Bool {
+        shelfPlaybackProgress != nil
+    }
+
+    private var shelfPlaybackProgress: Double? {
+        if let fraction = completedWatchProgressFraction {
+            return fraction
+        }
+        guard showsDownloadEdgeProgress else { return nil }
+        return min(1, max(0.02, downloadProgressValue))
+    }
+
+    private var completedWatchProgressFraction: Double? {
+        guard let task = resolvedTask,
+              task.state == .completed,
+              completedFileIsPlayable(task)
+        else { return nil }
+
+        if resumePosition != nil {
+            if let record = watchRecord {
+                let fraction = WatchProgressStore.progressFraction(for: record)
+                return min(0.99, max(0.02, fraction > 0 ? fraction : 0.05))
+            }
+            return 0.05
+        }
+
+        guard let record = watchRecord else { return nil }
+        let fraction = WatchProgressStore.progressFraction(for: record)
+        guard fraction > 0.05, fraction < 0.95 else { return nil }
+        return fraction
+    }
+
+    private var shelfPlaybackLabel: String? {
+        if showsDownloadEdgeProgress {
+            if let remaining = downloadRemainingLabel { return remaining }
+            if downloadProgressValue >= 0.99 { return "Finishing…" }
+            let percent = Int(downloadProgressValue * 100)
+            return percent > 0 ? "\(percent)%" : nil
+        }
+        guard let record = watchRecord else { return nil }
+        if let label = WatchProgressStore.continueWatchingOverlayLabel(for: record) {
+            return label
+        }
+        if resumePosition != nil {
+            let fraction = WatchProgressStore.progressFraction(for: record)
+            if fraction > 0 {
+                return "\(Int(fraction * 100))% watched"
+            }
+        }
+        return nil
+    }
+
+    private var downloadRemainingLabel: String? {
+        guard let task = resolvedTask, task.totalBytes > 0 else { return nil }
+        let remaining = max(0, task.totalBytes - task.downloadedBytes)
+        if remaining <= 0 { return nil }
+        if task.speed > 0 {
+            let seconds = Double(remaining) / task.speed
+            if seconds.isFinite, seconds > 0, seconds < 86_400 {
+                return "\(formattedETA(seconds)) left"
+            }
+        }
+        return "\(formattedTotalSize(remaining)) left"
+    }
+
+    private func formattedETA(_ seconds: Double) -> String {
+        let totalMinutes = Int(seconds / 60)
+        if totalMinutes >= 60 {
+            let hours = totalMinutes / 60
+            let minutes = totalMinutes % 60
+            return minutes > 0 ? "\(hours)h \(minutes)m" : "\(hours)h"
+        }
+        return max(1, totalMinutes) == 1 ? "1m" : "\(max(1, totalMinutes))m"
+    }
+
     private var statusLine: String? {
+        if showsInlineShelfProgress { return nil }
+
         if let task = resolvedTask {
             if task.state == .failed {
                 if let message = task.failureMessage?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -638,14 +791,21 @@ struct DownloadTaskRow: View {
             }
 
             var parts: [String] = []
-            if task.downloadedBytes > 0, task.totalBytes > 0 {
+            if task.state != .completed,
+               task.downloadedBytes > 0,
+               task.totalBytes > 0 {
                 parts.append("\(formattedTotalSize(task.downloadedBytes)) of \(formattedTotalSize(task.totalBytes))")
-            } else if task.totalBytes > 0 {
+            } else if task.state != .completed, task.totalBytes > 0 {
                 parts.append(formattedTotalSize(task.totalBytes))
             }
 
-            if task.state == .downloading, isReexporting {
-                parts.append("Rebuilding video file from cached stream…")
+            if let detail = task.statusDetail,
+               !detail.isEmpty,
+               task.state == .downloading,
+               task.activityPhase != .downloading {
+                parts.append(detail)
+            } else if task.state == .downloading, task.activityPhase == .assembling {
+                parts.append(task.statusDetail ?? "Creating playable MP4…")
             } else if task.state == .downloading, task.peerCount > 0 {
                 parts.append("\(task.peerCount) peers")
             } else if task.state == .downloading, task.progress == 0 {
@@ -674,7 +834,7 @@ struct DownloadTaskRow: View {
 
     private var techKinds: [MediaTechKind] {
         if let task = resolvedTask {
-            return downloadTechKinds(quality: task.quality, hdrType: task.hdrType)
+            return torrentTechKinds(for: torrentResult(for: task))
         }
         if case .hdrTest = model {
             return [.fourK, .dolbyVision, .dolbyAtmos]
@@ -682,22 +842,9 @@ struct DownloadTaskRow: View {
         return []
     }
 
-    private var showsDownloadedBadge: Bool {
-        resolvedTask?.state == .completed
-    }
-
     private var watchRecord: MovieRecord? {
         guard let task = resolvedTask, task.tmdbId > 0 else { return nil }
         return movieRecords.first(where: { $0.tmdbId == task.tmdbId })
-    }
-
-    private var watchProgressFraction: Double? {
-        guard let task = resolvedTask, task.state == .completed,
-              let record = watchRecord
-        else { return nil }
-        let fraction = WatchProgressStore.progressFraction(for: record)
-        guard fraction > 0.05, fraction < 0.95 else { return nil }
-        return fraction
     }
 
     private var completedWatchButtonTitle: String {
@@ -707,18 +854,6 @@ struct DownloadTaskRow: View {
     private var resumePosition: Double? {
         guard let task = resolvedTask else { return nil }
         return WatchProgressStore.resumePosition(for: task.tmdbId, in: movieRecords)
-    }
-
-    private var watchStatusLabel: String? {
-        guard let task = resolvedTask, task.state == .completed,
-              let record = watchRecord
-        else { return nil }
-        if let remaining = WatchProgressStore.timeRemainingLabel(for: record) {
-            return remaining
-        }
-        let fraction = WatchProgressStore.progressFraction(for: record)
-        guard fraction > 0.05, fraction < 0.95 else { return nil }
-        return "\(Int(fraction * 100))% watched"
     }
 
     private var showsDownloadEdgeProgress: Bool {
@@ -811,6 +946,77 @@ struct DownloadTaskRow: View {
         bannerArtworkURL = artworkURL
     }
 
+    private func watchInProgressDownload(_ task: DownloadManager.DownloadTask) {
+        if task.tmdbId > 0 {
+            let posterPath = movieRecords.first(where: { $0.tmdbId == task.tmdbId })?.posterPath
+            WatchProgressStore.ensurePlaybackRecord(
+                tmdbId: task.tmdbId,
+                title: task.title,
+                mediaKind: MediaKind(storageValue: task.mediaKind) ?? .movie,
+                posterPath: posterPath,
+                in: modelContext,
+                existing: movieRecords
+            )
+        }
+
+        let torrent = torrentResult(for: task)
+        Task { @MainActor in
+            var subtitleCatalog: [SubtitleInfo] = []
+            var subtitleSearchContext: SubtitleSearchContext?
+
+            if task.tmdbId > 0,
+               let mode = settings.first?.metadataMode {
+                do {
+                    let client = MetadataClient(mode: mode)
+                    let detail = try await client.movieDetail(id: task.tmdbId, kind: mediaKind)
+                    subtitleCatalog = await MovieDetailLoader.loadSubtitles(
+                        detail: detail,
+                        kind: mediaKind,
+                        settings: settings.first
+                    )
+                    subtitleSearchContext = SubtitleSearchContext(
+                        title: detail.movie.title,
+                        year: Int(detail.movie.releaseDate.prefix(4)),
+                        imdbId: detail.imdbId,
+                        tmdbId: task.tmdbId,
+                        mediaKind: mediaKind,
+                        preferredLanguage: settings.first?.preferredSubtitleLang ?? "en",
+                        metadataMode: mode
+                    )
+                } catch {
+                    NSLog("Download in-progress playback subtitle setup failed: \(error.localizedDescription)")
+                }
+            }
+
+            do {
+                try await appServices.playInProgressDownload(
+                    task: task,
+                    torrent: torrent,
+                    allTorrents: [torrent],
+                    playerState: playerState,
+                    movieId: task.tmdbId,
+                    subtitleURL: nil,
+                    subtitleAppearance: playback.appearance,
+                    subtitleFontSize: playback.fontSize,
+                    displayTitle: displayTitle,
+                    resumePosition: WatchProgressStore.resumePosition(for: task.tmdbId, in: movieRecords),
+                    posterURL: effectiveArtworkURL
+                )
+                SubtitlePlaybackSupport.attachToPlayback(
+                    playerState: playerState,
+                    catalog: subtitleCatalog,
+                    searchContext: subtitleSearchContext,
+                    localMediaPath: nil,
+                    autoSelectRemote: subtitleSearchContext != nil
+                )
+            } catch {
+                playerState.errorMessage = (error as? LocalizedError)?.errorDescription
+                    ?? error.localizedDescription
+                NSLog("Download in-progress playback failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
     private func watchCompletedTask(_ task: DownloadManager.DownloadTask) {
         if task.tmdbId > 0 {
             let posterPath = movieRecords.first(where: { $0.tmdbId == task.tmdbId })?.posterPath
@@ -826,6 +1032,7 @@ struct DownloadTaskRow: View {
 
         let torrent = torrentResult(for: task)
         let kind = mediaKind
+        let resumePosition = WatchProgressStore.resumePosition(for: task.tmdbId, in: movieRecords)
         Task { @MainActor in
             let path = appServices.resolvedCompletedMediaPath(for: torrent)
                 ?? task.outputPath.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }
@@ -834,13 +1041,28 @@ struct DownloadTaskRow: View {
                 return
             }
 
-            await appServices.prepareForLocalFilePlayback()
+            if appServices.hasActiveTorrentSession {
+                await appServices.prepareForLocalFilePlayback()
+            }
 
-            var subtitleCatalog: [SubtitleInfo] = []
-            var subtitleSearchContext: SubtitleSearchContext?
+            appServices.playbackCoordinator.playLocalFile(
+                localFilePath: path,
+                torrent: torrent,
+                allTorrents: [torrent],
+                playerState: playerState,
+                movieId: task.tmdbId,
+                subtitleURL: nil,
+                subtitleAppearance: playback.appearance,
+                subtitleFontSize: playback.fontSize,
+                displayTitle: displayTitle,
+                resumePosition: resumePosition,
+                posterURL: effectiveArtworkURL
+            )
 
-            if task.tmdbId > 0,
-               let mode = settings.first?.metadataMode {
+            guard task.tmdbId > 0, let mode = settings.first?.metadataMode else { return }
+            Task { @MainActor in
+                var subtitleCatalog: [SubtitleInfo] = []
+                var subtitleSearchContext: SubtitleSearchContext?
                 do {
                     let client = MetadataClient(mode: mode)
                     let detail = try await client.movieDetail(id: task.tmdbId, kind: kind)
@@ -861,28 +1083,14 @@ struct DownloadTaskRow: View {
                 } catch {
                     NSLog("Download playback subtitle setup failed: \(error.localizedDescription)")
                 }
+                SubtitlePlaybackSupport.attachToPlayback(
+                    playerState: playerState,
+                    catalog: subtitleCatalog,
+                    searchContext: subtitleSearchContext,
+                    localMediaPath: path,
+                    autoSelectRemote: subtitleSearchContext != nil
+                )
             }
-
-            appServices.playbackCoordinator.playLocalFile(
-                localFilePath: path,
-                torrent: torrent,
-                allTorrents: [torrent],
-                playerState: playerState,
-                movieId: task.tmdbId,
-                subtitleURL: nil,
-                subtitleAppearance: playback.appearance,
-                subtitleFontSize: playback.fontSize,
-                displayTitle: displayTitle,
-                resumePosition: WatchProgressStore.resumePosition(for: task.tmdbId, in: movieRecords),
-                posterURL: effectiveArtworkURL
-            )
-            SubtitlePlaybackSupport.attachToPlayback(
-                playerState: playerState,
-                catalog: subtitleCatalog,
-                searchContext: subtitleSearchContext,
-                localMediaPath: path,
-                autoSelectRemote: subtitleSearchContext != nil
-            )
         }
     }
 

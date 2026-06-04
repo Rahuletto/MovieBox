@@ -8,6 +8,10 @@ fi
 
 DEST="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/MacOS"
 HOST_ARCH="$(uname -m)"
+if [[ "$HOST_ARCH" != "arm64" ]]; then
+  echo "error: MovieBox builds for Apple Silicon (arm64) only; host is ${HOST_ARCH}" >&2
+  exit 1
+fi
 CACHE_ROOT="${BUILD_DIR%/Build/*}/MovieBoxFFmpegStatic"
 CACHE_DIR="${CACHE_ROOT}/${HOST_ARCH}"
 mkdir -p "${CACHE_DIR}" "${DEST}"
@@ -25,13 +29,7 @@ binary_arch() {
 
 binary_usable_on_host() {
   local bin="$1"
-  local bin_arch
-  bin_arch="$(binary_arch "$bin")"
-  case "$HOST_ARCH" in
-    arm64) [[ "$bin_arch" == arm64 || "$bin_arch" == x86_64 ]] ;;
-    x86_64) [[ "$bin_arch" == x86_64 ]] ;;
-    *) return 0 ;;
-  esac
+  [[ "$(binary_arch "$bin")" == arm64 ]]
 }
 
 sign_embedded_tool() {
@@ -59,13 +57,9 @@ fetch_tool() {
   install -m 755 "${tmp}/${name}" "${cached}"
 
   if ! binary_usable_on_host "${cached}"; then
-    echo "error: ${name} is $(binary_arch "${cached}") but host is ${HOST_ARCH}" >&2
+    echo "error: ${name} is $(binary_arch "${cached}") but Apple Silicon (arm64) is required" >&2
     rm -f "${cached}"
     exit 1
-  fi
-
-  if [[ "$HOST_ARCH" == arm64 && "$(binary_arch "${cached}")" == x86_64 ]]; then
-    echo "note: ${name} is x86_64; will run under Rosetta on Apple Silicon"
   fi
 }
 

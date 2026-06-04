@@ -136,15 +136,32 @@ struct PlayerVolumeIcon: View {
     let iconFont: CGFloat
     let frameSize: CGFloat
 
+    private static let boostWaveColor = Color(red: 1, green: 0.55, blue: 0.18)
+
     private var isSilent: Bool {
         isMuted || volume <= 0.001
     }
 
-    private var clampedVolume: Double {
-        Double(min(max(volume, 0), 1))
+    private var boostBlend: Double {
+        guard !isSilent, volume > PlayerState.unityVolume else { return 0 }
+        let span = PlayerState.maxVolume - PlayerState.unityVolume
+        guard span > 0 else { return 0 }
+        return Double(min(max((volume - PlayerState.unityVolume) / span, 0), 1))
     }
 
-    /// Single symbol identity so `contentTransition(.symbolEffect(.replace))` can morph (mute ↔ waves).
+    private var waveColor: Color {
+        let blend = boostBlend
+        return Color(
+            red: 1,
+            green: 1 - (1 - 0.55) * blend,
+            blue: 1 - (1 - 0.18) * blend
+        )
+    }
+
+    private var clampedVolume: Double {
+        Double(min(max(volume, 0), PlayerState.unityVolume))
+    }
+
     private var symbolName: String {
         isSilent ? "speaker.slash.fill" : "speaker.wave.3.fill"
     }
@@ -152,11 +169,13 @@ struct PlayerVolumeIcon: View {
     var body: some View {
         Image(systemName: symbolName, variableValue: isSilent ? 0 : clampedVolume)
             .font(.system(size: iconFont, weight: .semibold))
-            .playerGlassSymbol()
+            .symbolRenderingMode(.palette)
+            .foregroundStyle(.primary, waveColor)
             .frame(width: frameSize, height: frameSize)
             .contentShape(Rectangle())
             .contentTransition(.symbolEffect(.replace))
             .animation(.spring(response: 0.34, dampingFraction: 0.78), value: symbolName)
             .animation(.interactiveSpring(response: 0.16, dampingFraction: 0.88), value: clampedVolume)
+            .animation(.easeInOut(duration: 0.28), value: boostBlend)
     }
 }

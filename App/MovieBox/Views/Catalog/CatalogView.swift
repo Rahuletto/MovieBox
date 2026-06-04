@@ -32,7 +32,7 @@ struct CatalogView: View {
 
     var body: some View {
         ZStack {
-            AmbientTopGlow(color: ambientGlowColor)
+            AmbientPageGlow(color: ambientGlowColor)
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 36) {

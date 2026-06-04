@@ -16,6 +16,7 @@ public final class TorrentPlaybackCoordinator {
     private var activeStreamingHLSCacheKey: String?
     private var streamingRemuxRestartTask: Task<Void, Never>?
     private var lastStreamingRemuxRestartTarget: Double = -1
+    private var activeDownloadPlayback: DownloadPlaybackSession?
 
     public var strictHDRValidation: Bool {
         get { moviePlayer.strictHDRValidation }
@@ -37,6 +38,10 @@ public final class TorrentPlaybackCoordinator {
         activeStreamingSourceURL = nil
         activeStreamingHLSCacheKey = nil
         lastStreamingRemuxRestartTarget = -1
+        if let downloadPlayback = activeDownloadPlayback {
+            await downloadPlayback.stop()
+            activeDownloadPlayback = nil
+        }
         await session?.cancel()
         session = nil
         await moviePlayer.cancelRemux()
@@ -72,7 +77,7 @@ public final class TorrentPlaybackCoordinator {
         playerState: PlayerState,
         movieId: Int,
         subtitleURL: URL?,
-        subtitleAppearance: SubtitleAppearance = .cinematic,
+        subtitleAppearance: SubtitleAppearance = .modern,
         subtitleFontSize: CGFloat = 20,
         episodeTitle: String? = nil,
         displayTitle: String? = nil,
@@ -198,6 +203,95 @@ public final class TorrentPlaybackCoordinator {
         }
     }
 
+    /// Plays an in-progress download from its on-disk `.stream` piece store (loopback HTTP, download keeps running).
+    public func playInProgressDownload(
+        session: DownloadPlaybackSession,
+        torrent: TorrentResult,
+        allTorrents: [TorrentResult],
+        playerState: PlayerState,
+        movieId: Int,
+        subtitleURL: URL?,
+        subtitleAppearance: SubtitleAppearance = .modern,
+        subtitleFontSize: CGFloat = 20,
+        episodeTitle: String? = nil,
+        displayTitle: String? = nil,
+        resumePosition: Double? = nil,
+        knownDurationSeconds: Double? = nil,
+        posterURL: URL? = nil
+    ) async throws {
+        activeDownloadPlayback = session
+        configureSources(on: playerState, torrents: allTorrents, selected: torrent)
+        installDownloadStreamBufferProvider(on: playerState, session: session, torrent: torrent, movieId: movieId)
+        await syncRemuxPolicy()
+        playerState.updatePlaybackQualityWarning(nil)
+
+        var playbackURL = session.playbackURL
+        var resolvedDuration = knownDurationSeconds
+        var remuxResult: RemuxResult?
+        var prepareResult: PlaybackPrepareResult?
+        let target = session.streamTarget
+
+        if needsStreamingRemux(target: target) {
+            let cacheKey = localHLSCacheKey(for: torrent, localURL: playbackURL)
+            activeStreamingSourceURL = playbackURL
+            activeStreamingHLSCacheKey = cacheKey
+            PlaybackLog.log("[Prepare] playInProgressDownload streaming cacheKey=\(cacheKey)")
+            playerState.updateBufferingDetail("Preparing AVPlayer-compatible stream…")
+            let prepared = try await moviePlayer.prepareStreamingForPlayback(
+                inputURL: playbackURL,
+                cacheKey: cacheKey
+            )
+            prepareResult = prepared
+            remuxResult = prepared.remuxResult
+            playbackURL = prepared.playbackURL
+        }
+
+        resolvedDuration = PlaybackDuration.resolved(
+            known: knownDurationSeconds,
+            probed: prepareResult?.durationSeconds,
+            remux: remuxResult?.durationSeconds
+        )
+
+        if let remuxResult {
+            moviePlayer.applyRemuxPlaybackSignals(remuxResult, to: playerState)
+        } else {
+            playerState.updatePlaybackQualityWarning(nil)
+        }
+
+        let verifiedHDR = playbackHDR(from: prepareResult, remux: remuxResult, fallback: torrent.hdrType)
+        let verifiedAudio = playbackAudio(from: prepareResult, remux: remuxResult, fallback: torrent.audioFormat)
+        let hudTitle = displayTitle.map { PlaybackDisplayTitle.clean($0) }
+        playerState.updateBufferingDetail(nil)
+        playerState.load(
+            url: playbackURL,
+            title: torrent.title,
+            movieId: movieId,
+            subtitleURL: subtitleURL,
+            hdrType: verifiedHDR,
+            audioFormat: verifiedAudio,
+            subtitleAppearance: subtitleAppearance,
+            subtitleFontSize: subtitleFontSize,
+            episodeTitle: episodeTitle,
+            displayTitle: hudTitle,
+            resumePosition: resumePosition,
+            knownDurationSeconds: resolvedDuration,
+            posterURL: posterURL
+        )
+        if let infoHash = torrent.resolvedInfoHash?.lowercased(),
+           movieId > 0,
+           let known = resolvedDuration, known.isFinite, known > 0 {
+            let cached = PlaybackDiskCache.loadStreamBufferRanges(
+                tmdbId: movieId,
+                infoHash: infoHash,
+                expectedDuration: known
+            )
+            if !cached.isEmpty {
+                playerState.cachedStreamBufferRanges = cached
+                playerState.refreshBufferedTimeRangesFromPlayer()
+            }
+        }
+    }
+
     public func playLocalFile(
         localFilePath: String,
         torrent: TorrentResult,
@@ -205,7 +299,7 @@ public final class TorrentPlaybackCoordinator {
         playerState: PlayerState,
         movieId: Int,
         subtitleURL: URL?,
-        subtitleAppearance: SubtitleAppearance = .cinematic,
+        subtitleAppearance: SubtitleAppearance = .modern,
         subtitleFontSize: CGFloat = 20,
         episodeTitle: String? = nil,
         displayTitle: String? = nil,
@@ -219,7 +313,7 @@ public final class TorrentPlaybackCoordinator {
         PlaybackLog.log("playLocalFile → loading player localURL=\(MovieBoxFileLogger.redactURL(localURL)) ext=\(localURL.pathExtension.lowercased()) movieId=\(movieId) hdr=\(torrent.hdrType?.rawValue ?? "none")")
         PlaybackLog.log("[MKVHLS] playLocalFile enter title=\"\(torrent.title)\" ext=\(localURL.pathExtension.lowercased()) exists=\(FileManager.default.fileExists(atPath: localURL.path)) sourceID=\(torrent.id.uuidString)")
         let hudTitle = displayTitle.map { PlaybackDisplayTitle.clean($0) }
-        let loadPayload = makeLocalPlaybackPayload(
+        var loadPayload = makeLocalPlaybackPayload(
             url: localURL,
             torrent: torrent,
             movieId: movieId,
@@ -232,37 +326,37 @@ public final class TorrentPlaybackCoordinator {
             knownDurationSeconds: knownDurationSeconds,
             posterURL: posterURL
         )
+
+        if Self.isNativeContainerFile(localURL) {
+            PlaybackLog.log("[Prepare] playLocalFile direct-open ext=\(localURL.pathExtension.lowercased())")
+            loadPlayer(playerState, payload: loadPayload)
+            Task { @MainActor in
+                await finalizeLocalFilePrepare(
+                    localURL: localURL,
+                    torrent: torrent,
+                    playerState: playerState,
+                    loadPayload: &loadPayload
+                )
+            }
+            return
+        }
+
         Task { @MainActor in
             await Task.yield()
+            playerState.updateBufferingDetail("Preparing AVPlayer-compatible stream…")
             do {
-                await syncRemuxPolicy()
-                playerState.updatePlaybackQualityWarning(nil)
-                var resolvedPayload = loadPayload
-                var remuxResult: RemuxResult?
-                var prepareResult: PlaybackPrepareResult?
                 let cacheKey = localHLSCacheKey(for: torrent, localURL: localURL)
                 PlaybackLog.log("[Prepare] playLocalFile cacheKey=\(cacheKey) file=\(MovieBoxFileLogger.redactURL(localURL))")
-                playerState.updateBufferingDetail("Preparing AVPlayer-compatible stream…")
                 let prepared = try await moviePlayer.prepareForPlayback(inputURL: localURL, cacheKey: cacheKey)
-                prepareResult = prepared
-                remuxResult = prepared.remuxResult
-                resolvedPayload.url = prepared.playbackURL
-                PlaybackLog.log("[Prepare] playLocalFile mode=\(prepared.mode.rawValue) playlist=\(MovieBoxFileLogger.redactURL(prepared.playbackURL))")
-                if let remuxResult {
-                    moviePlayer.applyRemuxPlaybackSignals(remuxResult, to: playerState)
-                } else {
-                    playerState.updatePlaybackQualityWarning(nil)
-                }
-                resolvedPayload.hdr = playbackHDR(from: prepareResult, remux: remuxResult, fallback: torrent.hdrType)
-                resolvedPayload.audio = playbackAudio(from: prepareResult, remux: remuxResult, fallback: torrent.audioFormat)
-                resolvedPayload.knownDuration = PlaybackDuration.resolved(
-                    known: loadPayload.knownDuration,
-                    probed: prepareResult?.durationSeconds,
-                    remux: remuxResult?.durationSeconds
+                loadPayload.url = prepared.playbackURL
+                applyPreparedLocalPlayback(
+                    prepared: prepared,
+                    torrent: torrent,
+                    playerState: playerState,
+                    loadPayload: &loadPayload
                 )
-                PlaybackLog.log("[MKVHLS] loading player url=\(MovieBoxFileLogger.redactURL(resolvedPayload.url)) ext=\(resolvedPayload.url.pathExtension.lowercased())")
                 playerState.updateBufferingDetail(nil)
-                loadPlayer(playerState, payload: resolvedPayload)
+                loadPlayer(playerState, payload: loadPayload)
             } catch {
                 playerState.errorMessage = error.localizedDescription
                 playerState.isBuffering = false
@@ -272,7 +366,74 @@ public final class TorrentPlaybackCoordinator {
         }
     }
 
-    func switchToSource(id: String, playerState: PlayerState, subtitleAppearance: SubtitleAppearance = .cinematic) async {
+    private static func isNativeContainerFile(_ url: URL) -> Bool {
+        guard url.isFileURL else { return false }
+        return ["mp4", "mov", "m4v"].contains(url.pathExtension.lowercased())
+    }
+
+    private func applyPreparedLocalPlayback(
+        prepared: PlaybackPrepareResult,
+        torrent: TorrentResult,
+        playerState: PlayerState,
+        loadPayload: inout LocalPlaybackPayload
+    ) {
+        if let remuxResult = prepared.remuxResult {
+            moviePlayer.applyRemuxPlaybackSignals(remuxResult, to: playerState)
+        } else {
+            playerState.updatePlaybackQualityWarning(nil)
+        }
+        loadPayload.hdr = playbackHDR(from: prepared, remux: prepared.remuxResult, fallback: torrent.hdrType)
+        loadPayload.audio = playbackAudio(from: prepared, remux: prepared.remuxResult, fallback: torrent.audioFormat)
+        loadPayload.knownDuration = PlaybackDuration.resolved(
+            known: loadPayload.knownDuration,
+            probed: prepared.durationSeconds,
+            remux: prepared.remuxResult?.durationSeconds
+        )
+        PlaybackLog.log(
+            "[Prepare] playLocalFile mode=\(prepared.mode.rawValue) playlist=\(MovieBoxFileLogger.redactURL(prepared.playbackURL))"
+        )
+    }
+
+    private func finalizeLocalFilePrepare(
+        localURL: URL,
+        torrent: TorrentResult,
+        playerState: PlayerState,
+        loadPayload: inout LocalPlaybackPayload
+    ) async {
+        do {
+            await syncRemuxPolicy()
+            let cacheKey = localHLSCacheKey(for: torrent, localURL: localURL)
+            let prepared = try await moviePlayer.prepareForPlayback(inputURL: localURL, cacheKey: cacheKey)
+            applyPreparedLocalPlayback(
+                prepared: prepared,
+                torrent: torrent,
+                playerState: playerState,
+                loadPayload: &loadPayload
+            )
+            if prepared.playbackURL != localURL {
+                PlaybackLog.log(
+                    "[Prepare] playLocalFile switching to remux url=\(MovieBoxFileLogger.redactURL(prepared.playbackURL))"
+                )
+                loadPayload.url = prepared.playbackURL
+                loadPlayer(playerState, payload: loadPayload)
+            } else {
+                applyPreparedMetadataToPlayerState(
+                    prepared: prepared,
+                    torrent: torrent,
+                    loadPayload: loadPayload,
+                    playerState: playerState
+                )
+            }
+            playerState.updateBufferingDetail(nil)
+        } catch {
+            playerState.errorMessage = error.localizedDescription
+            playerState.isBuffering = false
+            playerState.bufferingDetail = nil
+            PlaybackLog.log("[MKVHLS] playLocalFile prepare failed: \(error.localizedDescription)")
+        }
+    }
+
+    func switchToSource(id: String, playerState: PlayerState, subtitleAppearance: SubtitleAppearance = .modern) async {
         guard let torrent = torrents.first(where: { $0.id.uuidString == id }) else { return }
         guard torrent.id.uuidString != playerState.selectedPlaybackSourceID else { return }
 
@@ -429,6 +590,57 @@ public final class TorrentPlaybackCoordinator {
         }
     }
 
+    private func needsStreamingRemux(target: TorrentStreamTarget) -> Bool {
+        let ext = (target.file.relativePath as NSString).pathExtension.lowercased()
+        return ext == "mkv" || ext == "webm" || target.contentType.contains("matroska")
+    }
+
+    private func installDownloadStreamBufferProvider(
+        on playerState: PlayerState,
+        session: DownloadPlaybackSession,
+        torrent: TorrentResult,
+        movieId: Int
+    ) {
+        let infoHash = torrent.resolvedInfoHash?.lowercased()
+        playerState.activeTorrentInfoHash = infoHash
+        if let infoHash, movieId > 0 {
+            let cached = PlaybackDiskCache.loadStreamBufferRanges(
+                tmdbId: movieId,
+                infoHash: infoHash,
+                expectedDuration: playerState.duration > 0 ? playerState.duration : nil
+            )
+            if !cached.isEmpty {
+                playerState.cachedStreamBufferRanges = cached
+            }
+        }
+        playerState.streamBufferTimeRangesProvider = { @MainActor in
+            let duration = playerState.duration
+            guard duration.isFinite, duration > 0 else { return [] }
+            return await session.readableMediaTimeRanges(durationSeconds: duration)
+        }
+        playerState.onPrioritizeTorrentPlayback = { @MainActor time in
+            let duration = playerState.duration
+            guard duration.isFinite, duration > 0 else { return }
+            await session.prioritizePlayback(atSeconds: time, durationSeconds: duration)
+        }
+        playerState.onRestartStreamingHLSSeek = { @MainActor [weak self] time in
+            await self?.scheduleStreamingRemuxRestart(to: time, playerState: playerState)
+        }
+        playerState.streamPlaybackReadinessProvider = { @MainActor time in
+            let duration = playerState.duration
+            guard duration.isFinite, duration > 0 else { return false }
+            return await session.hasReadablePlaybackData(atSeconds: time, durationSeconds: duration)
+        }
+        playerState.onPersistStreamBufferRanges = { tmdbId, infoHash, duration, ranges in
+            PlaybackDiskCache.saveStreamBufferRanges(
+                tmdbId: tmdbId,
+                infoHash: infoHash,
+                durationSeconds: duration,
+                ranges: ranges
+            )
+        }
+    }
+
     private func installStreamBufferProvider(
         on playerState: PlayerState,
         torrent: TorrentResult,
@@ -477,21 +689,21 @@ public final class TorrentPlaybackCoordinator {
         }
     }
 
-    private typealias LocalPlaybackPayload = (
-        url: URL,
-        title: String,
-        movieId: Int,
-        subtitleURL: URL?,
-        hdr: PlayerHDRType?,
-        audio: PlayerAudioFormat?,
-        appearance: SubtitleAppearance,
-        fontSize: CGFloat,
-        episodeTitle: String?,
-        hudTitle: String?,
-        resume: Double?,
-        knownDuration: Double?,
-        posterURL: URL?
-    )
+    private struct LocalPlaybackPayload {
+        var url: URL
+        let title: String
+        let movieId: Int
+        let subtitleURL: URL?
+        var hdr: PlayerHDRType?
+        var audio: PlayerAudioFormat?
+        let appearance: SubtitleAppearance
+        let fontSize: CGFloat
+        let episodeTitle: String?
+        let hudTitle: String?
+        let resume: Double?
+        var knownDuration: Double?
+        let posterURL: URL?
+    }
 
     private func makeLocalPlaybackPayload(
         url: URL,
@@ -506,7 +718,7 @@ public final class TorrentPlaybackCoordinator {
         knownDurationSeconds: Double?,
         posterURL: URL?
     ) -> LocalPlaybackPayload {
-        (
+        LocalPlaybackPayload(
             url: url,
             title: torrent.title,
             movieId: movieId,
@@ -521,6 +733,30 @@ public final class TorrentPlaybackCoordinator {
             knownDuration: knownDurationSeconds,
             posterURL: posterURL
         )
+    }
+
+    private func applyPreparedMetadataToPlayerState(
+        prepared: PlaybackPrepareResult,
+        torrent: TorrentResult,
+        loadPayload: LocalPlaybackPayload,
+        playerState: PlayerState
+    ) {
+        if let remuxResult = prepared.remuxResult {
+            moviePlayer.applyRemuxPlaybackSignals(remuxResult, to: playerState)
+        }
+        if let hdr = playbackHDR(from: prepared, remux: prepared.remuxResult, fallback: torrent.hdrType) {
+            playerState.hdrType = hdr
+        }
+        if let audio = playbackAudio(from: prepared, remux: prepared.remuxResult, fallback: torrent.audioFormat) {
+            playerState.audioFormat = audio
+        }
+        if let resolved = PlaybackDuration.resolved(
+            known: loadPayload.knownDuration,
+            probed: prepared.durationSeconds,
+            remux: prepared.remuxResult?.durationSeconds
+        ), resolved.isFinite, resolved > 0 {
+            playerState.applyPreparedDuration(seconds: resolved)
+        }
     }
 
     private func loadPlayer(_ playerState: PlayerState, payload: LocalPlaybackPayload) {

@@ -17,15 +17,29 @@ struct AppShellView: View {
     @State private var didAttachPersistence = false
     @State private var showsReplaceStreamConfirmation = false
     @State private var didApplyLaunchTab = false
+    @State private var streamFileOpenError: String?
     @Namespace private var streamPillNamespace
 
     private var persistentPlayback: PersistentPlaybackController {
         appServices.persistentPlayback
     }
 
-    /// Full-screen player blocks browsing (trailers, clips, etc.).
+    /// Full-screen player blocks browsing only while the player chrome is actually visible.
+    /// During dismiss, `isPlayerRevealed` drops first — keep the shell visible so we never sit on a black void.
+    private var isPlayerChromeVisible: Bool {
+        playerState.isPresented
+            && playerState.isPlayerRevealed
+            && !playerState.isPlaybackChromeHidden
+    }
+
     private var isBrowsingObstructed: Bool {
-        playerState.isPresented && !playerState.isPlaybackChromeHidden
+        isPlayerChromeVisible
+    }
+
+    /// Mount the player layer only while it should be visible — avoids a black AVPlayer surface after dismiss.
+    private var showsPlayerShell: Bool {
+        playerState.isPresented
+            && (playerState.isPlayerRevealed || playerState.isPlaybackChromeHidden)
     }
 
     private var streamPillPlacement: StreamPillPlacement {
@@ -38,7 +52,7 @@ struct AppShellView: View {
 
     /// Window chrome is grey; player uses rounded corners — fill with black so letterboxing isn’t grey.
     private var shellBackdropColor: Color {
-        playerState.isPresented ? .black : Color(nsColor: .windowBackgroundColor)
+        isPlayerChromeVisible ? .black : Color(nsColor: .windowBackgroundColor)
     }
 
     var body: some View {
@@ -61,7 +75,7 @@ struct AppShellView: View {
                 .zIndex(playerState.isPresented && playerState.isPlaybackChromeHidden ? 9 : 5)
 
             Group {
-                if playerState.isPresented {
+                if showsPlayerShell {
                     PlayerView(state: playerState) {
                         PlaybackSourcesSidebar(
                             playerState: playerState,
@@ -109,6 +123,18 @@ struct AppShellView: View {
         .onReceive(appServices.downloadManager.objectWillChange) { _ in
             syncDockDownloadPresentation()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .movieBoxOpenStreamFile)) { notification in
+            guard let url = notification.object as? URL else { return }
+            Task { @MainActor in
+                NSApp.activate(ignoringOtherApps: true)
+                do {
+                    try await appServices.playStreamFile(at: url, playerState: playerState)
+                } catch {
+                    streamFileOpenError = (error as? LocalizedError)?.errorDescription
+                        ?? error.localizedDescription
+                }
+            }
+        }
         .onChange(of: appServices.downloadManager.tasks.count) { _, _ in
             syncDockDownloadPresentation()
         }
@@ -137,6 +163,17 @@ struct AppShellView: View {
         }
         .onChange(of: persistentPlayback.pendingRequest != nil) { _, hasPending in
             showsReplaceStreamConfirmation = hasPending
+        }
+        .alert(
+            "Could Not Play Stream File",
+            isPresented: Binding(
+                get: { streamFileOpenError != nil },
+                set: { if !$0 { streamFileOpenError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { streamFileOpenError = nil }
+        } message: {
+            Text(streamFileOpenError ?? "")
         }
         .confirmationDialog(
             "Cancel the current download and start a new one?",

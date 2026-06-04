@@ -65,6 +65,7 @@ struct PlaybackSourcesSidebar: View {
             .frame(maxHeight: .infinity)
         }
         .frame(width: 320)
+        .frame(maxHeight: .infinity)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .padding(12)
     }

@@ -1,8 +1,11 @@
 import CorePlayer
+import CoreStorage
+import SwiftData
 import SwiftUI
 
-/// In-player subtitles panel — mirrors versions sidebar chrome.
 struct PlaybackSubtitlesSidebar: View {
+    @Environment(\.modelContext) private var modelContext
+    @Query private var settings: [AppSettings]
     @Bindable var playerState: PlayerState
 
     private var embeddedOptions: [PlayerSubtitleOption] {
@@ -52,69 +55,72 @@ struct PlaybackSubtitlesSidebar: View {
             .padding(.top, 16)
             .padding(.bottom, 12)
 
-            if playerState.isLoadingSubtitleCatalog {
-                subtitleProgressPanel(catalogLoadingProgress)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let progress = playerState.subtitleLoadProgress, playerState.availableSubtitles.isEmpty {
-                subtitleProgressPanel(progress)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if playerState.availableSubtitles.isEmpty {
-                VStack(spacing: 12) {
-                    Text("No subtitles found.")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.white.opacity(0.65))
-                    if playerState.onRefreshSubtitles != nil {
-                        Button("Search again") {
-                            Task { await playerState.onRefreshSubtitles?() }
+            Group {
+                if playerState.isLoadingSubtitleCatalog {
+                    subtitleProgressPanel(catalogLoadingProgress)
+                } else if let progress = playerState.subtitleLoadProgress, playerState.availableSubtitles.isEmpty {
+                    subtitleProgressPanel(progress)
+                } else if playerState.availableSubtitles.isEmpty {
+                    VStack(spacing: 12) {
+                        Text("No subtitles found.")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.white.opacity(0.65))
+                        if playerState.onRefreshSubtitles != nil {
+                            Button("Search again") {
+                                Task { await playerState.onRefreshSubtitles?() }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
                     }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                VStack(alignment: .leading, spacing: 0) {
-                    if let progress = playerState.subtitleLoadProgress {
-                        subtitleProgressPanel(progress)
+                } else {
+                    VStack(alignment: .leading, spacing: 0) {
+                        if let progress = playerState.subtitleLoadProgress {
+                            subtitleProgressPanel(progress)
+                                .padding(.horizontal, 12)
+                                .padding(.bottom, 10)
+                        }
+
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 16) {
+                                if !embeddedOptions.isEmpty {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        Text("In video")
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(.white.opacity(0.55))
+                                            .textCase(.uppercase)
+
+                                        ForEach(embeddedOptions) { option in
+                                            subtitleRow(option)
+                                        }
+                                    }
+                                }
+
+                                ForEach(remoteSections, id: \.language) { section in
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        Text(sectionTitle(for: section.language))
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(.white.opacity(0.55))
+                                            .textCase(.uppercase)
+
+                                        ForEach(section.items) { option in
+                                            subtitleRow(option)
+                                        }
+                                    }
+                                }
+                            }
                             .padding(.horizontal, 12)
-                            .padding(.bottom, 10)
-                    }
-
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 16) {
-                            if !embeddedOptions.isEmpty {
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Text("In video")
-                                        .font(.system(size: 11, weight: .semibold))
-                                        .foregroundStyle(.white.opacity(0.55))
-                                        .textCase(.uppercase)
-
-                                    ForEach(embeddedOptions) { option in
-                                        subtitleRow(option)
-                                    }
-                                }
-                            }
-
-                            ForEach(remoteSections, id: \.language) { section in
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Text(sectionTitle(for: section.language))
-                                        .font(.system(size: 11, weight: .semibold))
-                                        .foregroundStyle(.white.opacity(0.55))
-                                        .textCase(.uppercase)
-
-                                    ForEach(section.items) { option in
-                                        subtitleRow(option)
-                                    }
-                                }
-                            }
+                            .padding(.bottom, 8)
                         }
-                        .padding(.horizontal, 12)
-                        .padding(.bottom, 16)
                     }
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+
+            subtitleAppearanceFooter
         }
         .frame(width: 320)
+        .frame(maxHeight: .infinity)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .padding(12)
         .task {
@@ -160,6 +166,78 @@ struct PlaybackSubtitlesSidebar: View {
             get: { playerState.areSubtitlesEnabled },
             set: { playerState.setSubtitlesEnabled($0) }
         )
+    }
+
+    private var subtitleStyleBinding: Binding<String> {
+        Binding(
+            get: { playerState.subtitleAppearance.rawValue },
+            set: { persistSubtitleAppearance(SubtitleAppearance.from(settingsValue: $0)) }
+        )
+    }
+
+    private var subtitleFontSizeBinding: Binding<Double> {
+        Binding(
+            get: { Double(playerState.subtitleFontSize) },
+            set: { persistSubtitleFontSize($0) }
+        )
+    }
+
+    private var subtitleAppearanceFooter: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Divider()
+                .overlay(Color.white.opacity(0.14))
+
+            HStack(spacing: 10) {
+                Text("Style")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.85))
+
+                Picker("Style", selection: subtitleStyleBinding) {
+                    ForEach(SubtitleAppearance.allCases, id: \.rawValue) { style in
+                        Text(style.displayName).tag(style.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+
+            HStack(spacing: 10) {
+                Text("Size")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .frame(width: 34, alignment: .leading)
+
+                Slider(value: subtitleFontSizeBinding, in: 14...36, step: 1)
+                    .tint(.white)
+
+                Text("\(Int(playerState.subtitleFontSize)) pt")
+                    .font(.system(size: 12, weight: .semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(.white.opacity(0.75))
+                    .frame(width: 40, alignment: .trailing)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+        .padding(.bottom, 14)
+        .background(Color.black.opacity(0.22))
+    }
+
+    private func persistSubtitleAppearance(_ appearance: SubtitleAppearance) {
+        playerState.subtitleAppearance = appearance
+        guard let settings = settings.first else { return }
+        settings.subtitleStyle = appearance.rawValue
+        try? modelContext.save()
+    }
+
+    private func persistSubtitleFontSize(_ size: Double) {
+        let clamped = min(max(size, 14), 36)
+        playerState.subtitleFontSize = CGFloat(clamped)
+        guard let settings = settings.first else { return }
+        settings.subtitleFontSize = clamped
+        try? modelContext.save()
     }
 
     @ViewBuilder

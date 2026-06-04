@@ -22,6 +22,9 @@ public final class DownloadManager: ObservableObject {
         public var infoHash: String?
         public var storageDirectory: URL?
         public var failureMessage: String?
+        public var activityPhase: DownloadActivityPhase = .downloading
+        /// User-facing sub-status, e.g. "Waiting for final piece (~2 MB)".
+        public var statusDetail: String?
 
         public init(
             id: UUID = UUID(),
@@ -50,12 +53,17 @@ public final class DownloadManager: ObservableObject {
             self.infoHash = infoHash.flatMap { MagnetURI.normalizeInfoHash($0) }
             self.storageDirectory = nil
             self.failureMessage = nil
+            self.activityPhase = .downloading
+            self.statusDetail = nil
         }
     }
 
     @Published public private(set) var tasks: [DownloadTask] = []
     @Published public private(set) var totalDownloadSpeed: Double = 0
     @Published public private(set) var reexportingTaskIds: Set<UUID> = []
+
+    private var assemblingTaskIds: Set<UUID> = []
+    private var lastDiskReconcileAt: [UUID: Date] = [:]
 
     public weak var persistenceDelegate: DownloadPersistenceDelegate?
     /// Called on the main actor whenever the task list or progress changes (Dock tile, etc.).
@@ -66,6 +74,8 @@ public final class DownloadManager: ObservableObject {
     private var pieceManagers: [UUID: PieceManager] = [:]
     private var metadataByTask: [UUID: TorrentMetadata] = [:]
     private var executionTasks: [UUID: Task<Void, Never>] = [:]
+    private var playbackSessions: [UUID: DownloadPlaybackSession] = [:]
+    private var streamFilePlaybackByHash: [String: StreamFilePlaybackBundle] = [:]
     private var downloadDirectory: URL
 
     private func isRunnableState(_ state: DownloadState) -> Bool {
@@ -328,6 +338,8 @@ public final class DownloadManager: ObservableObject {
         reexportingTaskIds.insert(taskId)
         mutateTask(taskId: taskId) { task in
             task.state = .downloading
+            task.activityPhase = .assembling
+            task.statusDetail = "Rebuilding video file from cached stream…"
             task.progress = 0.05
             task.speed = 0
             task.peerCount = 0
@@ -457,6 +469,8 @@ public final class DownloadManager: ObservableObject {
     private func updateReexportProgress(taskId: UUID, progress: Double, downloadedBytes: Int64? = nil) {
         mutateTask(taskId: taskId) { task in
             task.state = .downloading
+            task.activityPhase = .assembling
+            task.statusDetail = "Rebuilding video file from cached stream…"
             task.progress = min(0.98, max(0.05, progress))
             if let downloadedBytes {
                 task.downloadedBytes = downloadedBytes
@@ -546,6 +560,25 @@ public final class DownloadManager: ObservableObject {
                 downloadedBytes: DownloadStorage.fileAllocatedBytes(at: store.storageURL)
             )
 
+            await reconcileVerifiedPiecesOnDisk(
+                taskId: taskId,
+                store: store,
+                manager: nil,
+                metadata: metadata,
+                target: target
+            )
+
+            guard await TorrentFileAssembler.isReadyForExport(
+                pieceStore: store,
+                metadata: metadata,
+                target: target
+            ) else {
+                TorrentLog.warn(
+                    "[DownloadManager] re-export blocked — verified pieces or container index not ready"
+                )
+                return false
+            }
+
             let displayTitle = currentTask(taskId: taskId)?.title ?? task.title
             let fileURL = try await TorrentFileAssembler.exportPrimaryFile(
                 metadata: metadata,
@@ -573,6 +606,8 @@ public final class DownloadManager: ObservableObject {
                 task.progress = 1
                 task.downloadedBytes = target.byteLength
                 task.failureMessage = nil
+                task.activityPhase = .downloading
+                task.statusDetail = nil
             }
             if let task = currentTask(taskId: taskId) {
                 persist(task)
@@ -611,10 +646,277 @@ public final class DownloadManager: ObservableObject {
         )
     }
 
+    /// True when enough of the download is on disk to open the in-app player from `.stream` data.
+    public func canPlayWhileDownloading(taskId: UUID) async -> Bool {
+        guard let task = currentTask(taskId: taskId),
+              task.state == .downloading || task.state == .paused,
+              let store = pieceStores[taskId],
+              let metadata = metadataByTask[taskId]
+        else { return false }
+
+        let target = TorrentStreamTarget.selectPrimary(from: metadata)
+        let head = await store.streamHeadContiguousBytes()
+        let ext = (target.file.relativePath as NSString).pathExtension.lowercased()
+        let isMKV = ext == "mkv" || ext == "webm" || target.contentType.contains("matroska")
+        let minHead: Int64 = isMKV
+            ? StreamPlaybackThreshold.minimumContiguousHeadBytesForMKV
+            : StreamPlaybackThreshold.minimumContiguousHeadBytesForMP4
+        if head >= minHead { return true }
+        let mediaProgress = await store.progress(in: target.requiredPieceRange)
+        return mediaProgress >= 0.98
+    }
+
+    /// Serves loopback HTTP from this task's piece store while the download keeps running.
+    public func beginPlaybackSession(for taskId: UUID) async throws -> DownloadPlaybackSession {
+        if let session = playbackSessions[taskId] {
+            return session
+        }
+        guard let task = currentTask(taskId: taskId),
+              task.state == .downloading || task.state == .paused
+        else {
+            throw DownloadPlaybackError.downloadNotActive
+        }
+        guard let store = pieceStores[taskId],
+              let manager = pieceManagers[taskId],
+              let metadata = metadataByTask[taskId],
+              let engine = activeEngines[taskId]
+        else {
+            throw DownloadPlaybackError.downloadNotActive
+        }
+        guard await canPlayWhileDownloading(taskId: taskId) else {
+            throw DownloadPlaybackError.insufficientBuffer
+        }
+
+        let target = TorrentStreamTarget.selectPrimary(from: metadata)
+        let server = HTTPRangeServer()
+        server.onPlayerRead = { mediaOffset, length in
+            await manager.notePlayerRead(mediaOffset: mediaOffset, length: length)
+            await MainActor.run {
+                engine.refreshDownloadPriorities()
+            }
+        }
+        let url = try await server.start(
+            pieceStore: store,
+            streamTarget: target,
+            pieceManager: manager
+        )
+        let tailOffset = max(0, target.byteLength - 2 * 1024 * 1024)
+        await manager.notePlayerRead(mediaOffset: tailOffset, length: 2 * 1024 * 1024)
+        engine.refreshDownloadPriorities()
+
+        let session = DownloadPlaybackSession(
+            playbackURL: url,
+            streamTarget: target,
+            store: store,
+            manager: manager,
+            engine: engine,
+            rangeServer: server
+        )
+        playbackSessions[taskId] = session
+        TorrentLog.info(
+            "[DownloadManager] playback started — task=\(taskId.uuidString.prefix(8))… url=\(MovieBoxFileLogger.redactURL(url))"
+        )
+        return session
+    }
+
+    public func endPlaybackSession(for taskId: UUID) async {
+        guard let session = playbackSessions.removeValue(forKey: taskId) else { return }
+        await session.stop()
+        TorrentLog.info("[DownloadManager] playback stopped — task=\(taskId.uuidString.prefix(8))…")
+    }
+
+    /// Opens a `.moviebox_*.stream` file for in-app playback (Finder double-click or Open With).
+    public func beginPlaybackFromStreamFile(
+        at streamFileURL: URL,
+        magnetTrackers: [String] = []
+    ) async throws -> StreamFilePlaybackStart {
+        guard streamFileURL.isFileURL else { throw StreamFileOpenError.notAFile }
+        guard let artifact = StreamFileLocator.artifact(at: streamFileURL) else {
+            throw StreamFileOpenError.unrecognized
+        }
+
+        let hash = artifact.infoHash
+
+        if let taskId = activeTaskId(forInfoHash: hash),
+           pieceStores[taskId] != nil,
+           metadataByTask[taskId] != nil {
+            let metadata = metadataByTask[taskId]!
+            guard await canPlayWhileDownloading(taskId: taskId)
+                || meetsStreamFilePlaybackThreshold(artifact: artifact, metadata: metadata)
+            else {
+                throw StreamFileOpenError.insufficientData
+            }
+            let session = try await beginPlaybackSession(for: taskId)
+            return StreamFilePlaybackStart(
+                session: session,
+                metadata: metadata,
+                displayTitle: artifact.title,
+                infoHash: hash,
+                downloadTaskId: taskId
+            )
+        }
+
+        if let bundle = streamFilePlaybackByHash[hash] {
+            return StreamFilePlaybackStart(
+                session: bundle.session,
+                metadata: bundle.metadata,
+                displayTitle: bundle.displayTitle,
+                infoHash: hash,
+                downloadTaskId: nil
+            )
+        }
+
+        let metadata = try await TorrentMetadataFetcher.fetch(
+            infoHash: hash,
+            magnetTrackers: magnetTrackers
+        )
+        guard meetsStreamFilePlaybackThreshold(artifact: artifact, metadata: metadata) else {
+            throw StreamFileOpenError.insufficientData
+        }
+
+        let target = TorrentStreamTarget.selectPrimary(from: metadata)
+        let tailPieces = StreamTailPlanner.tailPieceIndicesForDownload(
+            target: target,
+            pieceLength: metadata.pieceLength,
+            pieceCount: metadata.pieceCount
+        )
+
+        let store = try await PieceStore(
+            infoHash: hash,
+            pieceCount: metadata.pieceCount,
+            pieceSize: metadata.pieceLength,
+            totalSize: metadata.totalSize,
+            streamFirstPiece: target.firstPieceIndex,
+            streamMediaByteOffset: target.byteOffset,
+            storageDirectory: artifact.storageDirectory,
+            existingBitmap: artifact.bitmap.isEmpty ? nil : artifact.bitmap,
+            recreateFile: false
+        )
+
+        let manager = PieceManager(
+            pieceCount: metadata.pieceCount,
+            pieceLength: metadata.pieceLength,
+            totalSize: metadata.totalSize,
+            piecesHash: metadata.pieces,
+            streamFirstPiece: target.firstPieceIndex,
+            streamLastPiece: target.lastPieceIndex,
+            streamTailPieces: tailPieces.isEmpty ? [target.lastPieceIndex] : tailPieces,
+            streamMediaByteOffset: target.byteOffset,
+            streamMediaByteLength: target.byteLength
+        )
+
+        if !artifact.bitmap.isEmpty {
+            await seedManagerFromResumedStore(
+                manager: manager,
+                store: store,
+                metadata: metadata,
+                taskId: UUID(),
+                bitmapData: artifact.bitmap
+            )
+        }
+
+        let peerId = BitTorrentPeerID.make()
+        let engine = TorrentEngine(
+            metadata: metadata,
+            pieceManager: manager,
+            pieceStore: store,
+            peerId: peerId,
+            progressHandler: { _, _, _ in }
+        )
+        await engine.start()
+
+        let server = HTTPRangeServer()
+        server.onPlayerRead = { mediaOffset, length in
+            await manager.notePlayerRead(mediaOffset: mediaOffset, length: length)
+            await MainActor.run {
+                engine.refreshDownloadPriorities()
+            }
+        }
+        let playbackURL = try await server.start(
+            pieceStore: store,
+            streamTarget: target,
+            pieceManager: manager
+        )
+        let tailOffset = max(0, target.byteLength - 2 * 1024 * 1024)
+        await manager.notePlayerRead(mediaOffset: tailOffset, length: 2 * 1024 * 1024)
+        engine.refreshDownloadPriorities()
+
+        let session = DownloadPlaybackSession(
+            playbackURL: playbackURL,
+            streamTarget: target,
+            store: store,
+            manager: manager,
+            engine: engine,
+            rangeServer: server
+        )
+
+        let bundle = StreamFilePlaybackBundle(
+            infoHash: hash,
+            metadata: metadata,
+            displayTitle: artifact.title,
+            store: store,
+            manager: manager,
+            engine: engine,
+            session: session
+        )
+        streamFilePlaybackByHash[hash] = bundle
+        TorrentLog.info(
+            "[DownloadManager] stream-file playback — hash=\(hash.prefix(8))… title=\"\(artifact.title)\" url=\(MovieBoxFileLogger.redactURL(playbackURL))"
+        )
+        return StreamFilePlaybackStart(
+            session: session,
+            metadata: metadata,
+            displayTitle: artifact.title,
+            infoHash: hash,
+            downloadTaskId: nil
+        )
+    }
+
+    public func endStreamFilePlayback(infoHash: String) async {
+        let hash = infoHash.lowercased()
+        guard let bundle = streamFilePlaybackByHash.removeValue(forKey: hash) else { return }
+        await bundle.session.stop()
+        bundle.engine.stop()
+        await bundle.store.closeHandles()
+        TorrentLog.info("[DownloadManager] stream-file playback stopped — hash=\(hash.prefix(8))…")
+    }
+
+    private func activeTaskId(forInfoHash hash: String) -> UUID? {
+        let normalized = hash.lowercased()
+        return tasks.first(where: { task in
+            (task.infoHash ?? "").lowercased() == normalized
+                && (task.state == .downloading || task.state == .paused)
+        })?.id
+    }
+
+    private func meetsStreamFilePlaybackThreshold(
+        artifact: RecoveredDownloadArtifact,
+        metadata: TorrentMetadata
+    ) -> Bool {
+        let target = TorrentStreamTarget.selectPrimary(from: metadata)
+        let ext = (target.file.relativePath as NSString).pathExtension.lowercased()
+        let isMKV = ext == "mkv" || ext == "webm" || target.contentType.contains("matroska")
+        let minBytes: Int64 = isMKV
+            ? StreamPlaybackThreshold.minimumContiguousHeadBytesForMKV
+            : StreamPlaybackThreshold.minimumContiguousHeadBytesForMP4
+        if artifact.streamByteCount >= minBytes {
+            return true
+        }
+        guard !artifact.bitmap.isEmpty else { return false }
+        let flags = PieceStore.decodeBitmap(artifact.bitmap, pieceCount: metadata.pieceCount)
+        let span = max(1, target.requiredPieceCount)
+        var completed = 0
+        for index in target.requiredPieceRange where index < flags.count && flags[index] {
+            completed += 1
+        }
+        return Double(completed) / Double(span) >= 0.98
+    }
+
     public func cancelDownload(taskId: UUID) {
         guard let task = currentTask(taskId: taskId) else { return }
         let infoHash = resolvedInfoHash(for: task)
 
+        Task { await endPlaybackSession(for: taskId) }
         cancelExecution(for: taskId)
         if let engine = activeEngines[taskId] {
             engine.stop()
@@ -1067,11 +1369,26 @@ public final class DownloadManager: ObservableObject {
 
         let target = TorrentStreamTarget.selectPrimary(from: metadata)
         let store = pieceStores[taskId]
-        let mediaProgress: Double
+        var mediaProgress: Double
         if let store {
             mediaProgress = await store.progress(in: target.requiredPieceRange)
         } else {
             mediaProgress = progress
+        }
+
+        if let store, mediaProgress >= 0.97 {
+            let missing = await store.missingPieceIndices(in: target.requiredPieceRange)
+            if !missing.isEmpty, shouldRunDiskReconcile(taskId: taskId) {
+                lastDiskReconcileAt[taskId] = Date()
+                await reconcileVerifiedPiecesOnDisk(
+                    taskId: taskId,
+                    store: store,
+                    manager: pieceManagers[taskId],
+                    metadata: metadata,
+                    target: target
+                )
+                mediaProgress = await store.progress(in: target.requiredPieceRange)
+            }
         }
 
         var shouldAssemble = false
@@ -1103,84 +1420,279 @@ public final class DownloadManager: ObservableObject {
 
         guard currentTask(taskId: taskId)?.state == .downloading else { return }
 
-        mutateTask(taskId: taskId) { task in
-            task.progress = max(task.progress, effectiveMediaProgress)
-            task.speed = speed
-            task.peerCount = peers
-            let byteProgress = Int64(effectiveMediaProgress * Double(target.byteLength))
-            task.downloadedBytes = max(task.downloadedBytes, byteProgress)
-            task.totalBytes = target.byteLength
+        await applyProgressUpdate(
+            taskId: taskId,
+            target: target,
+            metadata: metadata,
+            store: store,
+            effectiveMediaProgress: effectiveMediaProgress,
+            mediaProgress: mediaProgress,
+            mediaReadyForAssembly: mediaReadyForAssembly,
+            shouldAssemble: shouldAssemble,
+            speed: speed,
+            peers: peers
+        )
+
+        if shouldAssemble, pieceStores[taskId] != nil {
+            beginPrimaryFileAssembly(
+                taskId: taskId,
+                metadata: metadata,
+                target: target,
+                outputDir: outputDir
+            )
         }
 
-        if !shouldAssemble, effectiveMediaProgress > 0.98, effectiveMediaProgress < 1.0, let store {
-            let missing = await store.missingPieceIndices(in: target.requiredPieceRange)
-            if !missing.isEmpty {
-                TorrentLog.info(
-                    "[DownloadManager] awaiting \(missing.count) media piece(s): \(missing.prefix(8).map(String.init).joined(separator: ","))\(missing.count > 8 ? "…" : "")"
-                )
+        await persistCheckpoint(taskId: taskId)
+    }
+
+    private func shouldRunDiskReconcile(taskId: UUID) -> Bool {
+        guard let last = lastDiskReconcileAt[taskId] else { return true }
+        return Date().timeIntervalSince(last) >= 5
+    }
+
+    /// Byte-copies the native container (mkv/mp4/…) off the MainActor so the UI stays responsive.
+    private func beginPrimaryFileAssembly(
+        taskId: UUID,
+        metadata: TorrentMetadata,
+        target: TorrentStreamTarget,
+        outputDir: URL
+    ) {
+        guard !assemblingTaskIds.contains(taskId) else { return }
+        guard let store = pieceStores[taskId] else { return }
+
+        assemblingTaskIds.insert(taskId)
+        let displayTitle = currentTask(taskId: taskId)?.title ?? ""
+        let exportURL = TorrentFileAssembler.exportDestinationURL(
+            outputDirectory: outputDir,
+            displayTitle: displayTitle,
+            target: target
+        )
+        removeStaleExportArtifacts(at: exportURL)
+
+        Task { await endPlaybackSession(for: taskId) }
+
+        mutateTask(taskId: taskId) { task in
+            task.activityPhase = .assembling
+            task.statusDetail = assemblingStatusDetail(for: target)
+        }
+
+        Task.detached(priority: .utility) { [weak self] in
+            await self?.runPrimaryFileAssembly(
+                taskId: taskId,
+                metadata: metadata,
+                target: target,
+                outputDir: outputDir,
+                displayTitle: displayTitle,
+                exportURL: exportURL,
+                store: store
+            )
+        }
+    }
+
+    private func runPrimaryFileAssembly(
+        taskId: UUID,
+        metadata: TorrentMetadata,
+        target: TorrentStreamTarget,
+        outputDir: URL,
+        displayTitle: String,
+        exportURL: URL,
+        store: PieceStore
+    ) async {
+        defer {
+            Task { @MainActor [weak self] in
+                self?.assemblingTaskIds.remove(taskId)
             }
         }
 
-        if shouldAssemble, let store = pieceStores[taskId] {
-            do {
-                await store.syncToDisk()
-                TorrentLog.info(
-                    "[DownloadManager] assembling primary file — \(target.file.relativePath)"
-                )
-                let displayTitle = currentTask(taskId: taskId)?.title ?? ""
-                let fileURL = try await TorrentFileAssembler.exportPrimaryFile(
-                    metadata: metadata,
-                    pieceStore: store,
-                    outputDirectory: outputDir,
-                    displayTitle: displayTitle
-                )
-                if let hash = tasks.first(where: { $0.id == taskId })?.infoHash {
-                    await finalizeCompletedDownload(
-                        exportedURL: fileURL,
-                        displayTitle: displayTitle,
-                        infoHash: hash,
-                        storageDirectory: outputDir,
-                        store: store
-                    )
+        do {
+            await store.syncToDisk()
+            TorrentLog.info(
+                "[DownloadManager] assembling primary file — \(target.file.relativePath)"
+            )
+            let fileURL = try await TorrentFileAssembler.exportPrimaryFile(
+                metadata: metadata,
+                pieceStore: store,
+                outputDirectory: outputDir,
+                displayTitle: displayTitle.isEmpty ? nil : displayTitle
+            )
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                guard self.currentTask(taskId: taskId)?.state == .downloading else { return }
+                if let hash = self.tasks.first(where: { $0.id == taskId })?.infoHash {
+                    Task {
+                        await self.finalizeCompletedDownload(
+                            exportedURL: fileURL,
+                            displayTitle: displayTitle,
+                            infoHash: hash,
+                            storageDirectory: outputDir,
+                            store: store
+                        )
+                    }
                 } else {
-                    await store.closeHandles()
+                    Task { await store.closeHandles() }
                 }
-                pieceStores.removeValue(forKey: taskId)
-                mutateTask(taskId: taskId) { task in
+                self.pieceStores.removeValue(forKey: taskId)
+                self.mutateTask(taskId: taskId) { task in
                     task.state = .completed
                     task.outputPath = fileURL.path
                     task.progress = 1
                     task.downloadedBytes = target.byteLength
+                    task.activityPhase = .downloading
+                    task.statusDetail = nil
                 }
-                activeEngines[taskId]?.stop()
-                activeEngines.removeValue(forKey: taskId)
-                pieceManagers.removeValue(forKey: taskId)
-                metadataByTask.removeValue(forKey: taskId)
-            } catch {
-                let message = (error as? LocalizedError)?.errorDescription
-                    ?? error.localizedDescription
-                TorrentLog.warn("[DownloadManager] assembly failed — \(message)")
-                if let path = currentTask(taskId: taskId)?.outputPath {
+                self.activeEngines[taskId]?.stop()
+                self.activeEngines.removeValue(forKey: taskId)
+                self.pieceManagers.removeValue(forKey: taskId)
+                self.metadataByTask.removeValue(forKey: taskId)
+                self.lastDiskReconcileAt.removeValue(forKey: taskId)
+                Task { await self.persistCheckpoint(taskId: taskId) }
+            }
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
+            TorrentLog.warn("[DownloadManager] assembly failed — \(message)")
+            let resumedProgress = await store.progress(in: target.requiredPieceRange)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                let manager = self.pieceManagers[taskId]
+                Task {
+                    await self.reconcileInflatedResumeProgress(
+                        store: store,
+                        manager: manager,
+                        target: target,
+                        metadata: metadata
+                    )
+                }
+                for path in self.exportCleanupPaths(for: exportURL) {
                     try? FileManager.default.removeItem(atPath: path)
                 }
-                await reconcileInflatedResumeProgress(
-                    store: store,
-                    manager: pieceManagers[taskId],
-                    target: target,
-                    metadata: metadata
-                )
-                let resumedProgress = await store.progress(in: target.requiredPieceRange)
-                mutateTask(taskId: taskId) { task in
+                if let path = self.currentTask(taskId: taskId)?.outputPath {
+                    try? FileManager.default.removeItem(atPath: path)
+                }
+                self.mutateTask(taskId: taskId) { task in
                     task.state = .downloading
                     task.outputPath = nil
                     task.failureMessage = nil
                     task.progress = resumedProgress
                     task.downloadedBytes = Int64(resumedProgress * Double(target.byteLength))
+                    task.activityPhase = .downloading
+                    task.statusDetail = nil
                 }
+                Task { await self.persistCheckpoint(taskId: taskId) }
+            }
+        }
+    }
+
+    private func removeStaleExportArtifacts(at destination: URL) {
+        for path in exportCleanupPaths(for: destination) {
+            try? FileManager.default.removeItem(atPath: path)
+        }
+    }
+
+    private func applyProgressUpdate(
+        taskId: UUID,
+        target: TorrentStreamTarget,
+        metadata: TorrentMetadata,
+        store: PieceStore?,
+        effectiveMediaProgress: Double,
+        mediaProgress: Double,
+        mediaReadyForAssembly: Bool,
+        shouldAssemble: Bool,
+        speed: Double,
+        peers: Int
+    ) async {
+        var phase: DownloadActivityPhase = .downloading
+        var detail: String?
+
+        if reexportingTaskIds.contains(taskId) {
+            phase = .assembling
+            detail = "Rebuilding video file from cached stream…"
+        } else if shouldAssemble || assemblingTaskIds.contains(taskId) {
+            phase = .assembling
+            detail = assemblingStatusDetail(for: target)
+        } else if let store {
+            let missing = await store.missingPieceIndices(in: target.requiredPieceRange)
+            if !missing.isEmpty, effectiveMediaProgress > 0.98 {
+                phase = .waitingForFinalPieces
+                let bytes = Self.missingMediaBytes(
+                    missing: missing,
+                    metadata: metadata,
+                    target: target
+                )
+                detail = Self.waitingForPiecesDetail(missingCount: missing.count, bytes: bytes)
+                TorrentLog.info(
+                    "[DownloadManager] awaiting \(missing.count) media piece(s): \(missing.prefix(8).map(String.init).joined(separator: ","))\(missing.count > 8 ? "…" : "") (~\(bytes) B)"
+                )
+            } else if mediaProgress >= 1.0, !mediaReadyForAssembly {
+                phase = .waitingForFinalPieces
+                detail = "Waiting for remaining data on disk…"
             }
         }
 
-        await persistCheckpoint(taskId: taskId)
+        mutateTask(taskId: taskId) { task in
+            task.speed = speed
+            task.peerCount = peers
+            task.totalBytes = target.byteLength
+            task.activityPhase = phase
+            task.statusDetail = detail
+
+            switch phase {
+            case .waitingForFinalPieces:
+                task.progress = effectiveMediaProgress
+                task.downloadedBytes = Int64(effectiveMediaProgress * Double(target.byteLength))
+            case .assembling:
+                task.progress = max(task.progress, effectiveMediaProgress)
+                task.downloadedBytes = Int64(effectiveMediaProgress * Double(target.byteLength))
+            case .downloading:
+                task.progress = max(task.progress, effectiveMediaProgress)
+                let byteProgress = Int64(effectiveMediaProgress * Double(target.byteLength))
+                task.downloadedBytes = min(
+                    max(task.downloadedBytes, byteProgress),
+                    target.byteLength
+                )
+            }
+        }
+    }
+
+    private static func missingMediaBytes(
+        missing: [Int],
+        metadata: TorrentMetadata,
+        target: TorrentStreamTarget
+    ) -> Int64 {
+        let pieceLength = metadata.pieceLength
+        let mediaStart = target.byteOffset
+        let mediaEnd = target.byteOffset + target.byteLength
+        var total: Int64 = 0
+        for index in missing {
+            let pieceStart = Int64(index) * pieceLength
+            let pieceEnd = min(metadata.totalSize, pieceStart + pieceLength)
+            let overlapStart = max(pieceStart, mediaStart)
+            let overlapEnd = min(pieceEnd, mediaEnd)
+            total += max(0, overlapEnd - overlapStart)
+        }
+        return total
+    }
+
+    private static func waitingForPiecesDetail(missingCount: Int, bytes: Int64) -> String {
+        let size = formatShortByteCount(bytes)
+        if missingCount == 1 {
+            return "Waiting for final piece (\(size))"
+        }
+        return "Waiting for \(missingCount) pieces (\(size))"
+    }
+
+    private static func formatShortByteCount(_ bytes: Int64) -> String {
+        let value = Double(bytes)
+        if value >= 1_073_741_824 {
+            return String(format: "%.1f GB", value / 1_073_741_824)
+        }
+        if value >= 1_048_576 {
+            return String(format: "%.1f MB", value / 1_048_576)
+        }
+        if value >= 1024 {
+            return String(format: "%.0f KB", value / 1024)
+        }
+        return "\(bytes) B"
     }
 
     private func persist(_ task: DownloadTask) {
@@ -1192,28 +1704,52 @@ public final class DownloadManager: ObservableObject {
         }
     }
 
+    private func reconcileVerifiedPiecesOnDisk(
+        taskId: UUID,
+        store: PieceStore,
+        manager: PieceManager?,
+        metadata: TorrentMetadata,
+        target: TorrentStreamTarget
+    ) async {
+        let verified = await store.reconcileVerifiedPiecesOnDisk(
+            in: target.requiredPieceRange,
+            pieceHashes: metadata.pieces
+        )
+        guard !verified.isEmpty else { return }
+        if let manager {
+            await manager.confirmPiecesVerifiedOnDisk(verified)
+        } else if let activeManager = pieceManagers[taskId] {
+            await activeManager.confirmPiecesVerifiedOnDisk(verified)
+        }
+    }
+
     private func isMediaReadyForAssembly(
         store: PieceStore,
         target: TorrentStreamTarget,
         metadata: TorrentMetadata
     ) async -> Bool {
-        let missing = await store.missingPieceIndices(in: target.requiredPieceRange)
-        guard missing.isEmpty else { return false }
-
-        let allocated = DownloadStorage.fileAllocatedBytes(at: store.storageURL)
-        let minimum = DownloadStorage.minimumOnDiskBytesForPieceSpan(
-            firstPieceIndex: target.firstPieceIndex,
-            lastPieceIndex: target.lastPieceIndex,
-            pieceSize: metadata.pieceLength,
-            totalSize: metadata.totalSize
+        await TorrentFileAssembler.isReadyForExport(
+            pieceStore: store,
+            metadata: metadata,
+            target: target
         )
-        guard allocated >= minimum else {
-            TorrentLog.warn(
-                "[DownloadManager] media bitmap complete but stream has only \(allocated) of \(minimum) required bytes on disk"
-            )
-            return false
+    }
+
+    private func assemblingStatusDetail(for target: TorrentStreamTarget) -> String {
+        let ext = (target.file.relativePath as NSString).pathExtension.lowercased()
+        switch ext {
+        case "mkv", "webm":
+            return "Copying \(ext.uppercased()) from download cache…"
+        default:
+            return "Copying video file from download cache…"
         }
-        return true
+    }
+
+    private func exportCleanupPaths(for destination: URL) -> [String] {
+        [
+            destination.path,
+            destination.path + ".part",
+        ]
     }
 
     private func reconcileInflatedResumeProgress(

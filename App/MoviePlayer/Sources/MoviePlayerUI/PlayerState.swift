@@ -17,6 +17,7 @@ public final class PlayerState {
     }
 
     public var player: AVPlayer
+    let audioGainController = PlaybackAudioGainController()
     public var title: String
     public var seriesName: String = ""
     public var episodeTitle: String? = nil
@@ -50,6 +51,8 @@ public final class PlayerState {
     /// When set (torrent streams), polled to merge disk-backed ranges into the scrubber.
     public var streamBufferTimeRangesProvider: (@MainActor () async -> [ClosedRange<Double>])?
     public var streamPlaybackReadinessProvider: (@MainActor (Double) async -> Bool)?
+    public static let unityVolume: Float = 1.0
+    public static let maxVolume: Float = 1.5
     public var volume: Float = 1.0
     public var isMuted: Bool = false
     public var playbackRate: Double = 1.0
@@ -61,7 +64,7 @@ public final class PlayerState {
     public var activeSubtitleTrack: Int = 0
     public var currentSubtitleText: String = ""
     public var currentSubtitleCueID: UUID?
-    public var subtitleAppearance: SubtitleAppearance = .cinematic
+    public var subtitleAppearance: SubtitleAppearance = .modern
     public var subtitleFontSize: CGFloat = 20
     
     public var hdrType: PlayerHDRType? = nil

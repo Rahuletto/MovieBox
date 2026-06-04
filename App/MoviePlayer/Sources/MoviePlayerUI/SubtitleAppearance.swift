@@ -1,19 +1,19 @@
 import SwiftUI
 
-/// Visual style for on-screen subtitles (Settings → Playback → Subtitle Style).
 public enum SubtitleAppearance: String, Sendable, CaseIterable {
-    case cinematic = "cinematic"
+    case modern = "modern"
     case system = "system"
     case largeWhite = "large-white"
     case yellowBlack = "yellow-black"
 
     public static func from(settingsValue: String) -> SubtitleAppearance {
-        SubtitleAppearance(rawValue: settingsValue) ?? .cinematic
+        if settingsValue == "cinematic" { return .modern }
+        return SubtitleAppearance(rawValue: settingsValue) ?? .modern
     }
 
     public var displayName: String {
         switch self {
-        case .cinematic: "Cinematic (pill)"
+        case .modern: "Modern"
         case .system: "System default"
         case .largeWhite: "Large white"
         case .yellowBlack: "Yellow on black"
@@ -77,7 +77,8 @@ public struct SubtitleOverlayView: View {
                     Group {
                         if !text.isEmpty {
                             styledText(text)
-                                .fixedSize(horizontal: true, vertical: true)
+                                .frame(maxWidth: 720)
+                                .fixedSize(horizontal: false, vertical: true)
                                 .id(subtitleIdentity)
                                 .transition(.opacity)
                         } else if let loadProgress {
@@ -132,7 +133,7 @@ public struct SubtitleOverlayView: View {
     @ViewBuilder
     private func styledText(_ text: String) -> some View {
         switch appearance {
-        case .cinematic:
+        case .modern:
             FluidSubtitleLabel(
                 text: text,
                 font: .system(size: fontSize, weight: .semibold, design: .rounded),
@@ -214,7 +215,7 @@ private struct FluidSubtitleLabel: View {
             .multilineTextAlignment(.center)
             .lineSpacing(lineSpacing)
             .frame(maxWidth: 720, alignment: .center)
-            .fixedSize(horizontal: true, vertical: true)
+            .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, horizontalPadding)
             .padding(.vertical, verticalPadding)
     }

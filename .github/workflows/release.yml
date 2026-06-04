@@ -41,6 +41,8 @@ jobs:
             -configuration Release \
             -destination 'platform=macOS' \
             -derivedDataPath ../build/DerivedData \
+            ARCHS=arm64 \
+            EXCLUDED_ARCHS=x86_64 \
             MARKETING_VERSION="$MARKETING_VERSION" \
             CURRENT_PROJECT_VERSION="$CURRENT_PROJECT_VERSION" \
             build

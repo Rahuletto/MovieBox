@@ -193,7 +193,7 @@ final class PlayerKeyboardNSView: NSView {
             return true
         case 126: // up
             guard !isCommand, !isShift else { return false }
-            state.setVolume(min(1.0, state.volume + 0.1))
+            state.setVolume(min(PlayerState.maxVolume, state.volume + 0.1))
             return true
         case 125: // down
             guard !isCommand, !isShift else { return false }

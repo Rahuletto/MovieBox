@@ -165,6 +165,8 @@ public final class AppSettings {
     public var metadataCacheTTL: Int
     public var debugLogging: Bool
     public var logTorrentActivity: Bool
+    /// Shows Apple HLS reference streams on the Downloads page (developer samples).
+    public var showStreamingSamples: Bool = false
 
     public init(
         proxyBaseURL: String = "",
@@ -189,7 +191,7 @@ public final class AppSettings {
         strictHDRValidation: Bool = false,
         allowTranscodeFallback: Bool = true,
         subtitlesEnabled: Bool = true,
-        subtitleStyle: String = "cinematic",
+        subtitleStyle: String = "modern",
         subtitleFontSize: Double = 20,
         audioFormatPriority: String = "best",
         resumePlayback: Bool = true,
@@ -206,7 +208,8 @@ public final class AppSettings {
         imageCacheSize: Int = 250,
         metadataCacheTTL: Int = 60,
         debugLogging: Bool = false,
-        logTorrentActivity: Bool = false
+        logTorrentActivity: Bool = false,
+        showStreamingSamples: Bool = false
     ) {
         self.proxyBaseURL = proxyBaseURL
         self.useLocalBackend = useLocalBackend
@@ -248,6 +251,7 @@ public final class AppSettings {
         self.metadataCacheTTL = metadataCacheTTL
         self.debugLogging = debugLogging
         self.logTorrentActivity = logTorrentActivity
+        self.showStreamingSamples = showStreamingSamples
     }
 }
 

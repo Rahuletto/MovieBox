@@ -59,21 +59,23 @@ extension PlayerState {
         isBuffering = false
         player.pause()
 
-        withAnimation(.easeInOut(duration: 0.38)) {
+        withAnimation(.easeInOut(duration: 0.28)) {
             isPlayerRevealed = false
         }
+        isPresented = false
 
         presentationTransitionTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(380))
-            guard !Task.isCancelled else { return }
-            withAnimation(.easeInOut(duration: 0.38)) {
-                isPresented = false
+            try? await Task.sleep(for: .milliseconds(280))
+            if Task.isCancelled {
+                finalizeDismissal()
+                return
             }
             finalizeDismissal()
         }
     }
 
     func finalizeDismissal() {
+        audioGainController.clear()
         stopPlaybackResources()
         isStreamingTorrent = false
         dismissPlaybackWhenPiPCloses = false

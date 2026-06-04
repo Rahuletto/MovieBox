@@ -453,12 +453,7 @@ struct TorrentVersionRow: View, Equatable {
     @ViewBuilder
     private var resolutionBadge: some View {
         if model.quality != VideoQuality.p2160.rawValue {
-            Text(model.quality)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3)
-                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+            ResolutionQualityBadge(quality: model.quality)
         }
     }
 }

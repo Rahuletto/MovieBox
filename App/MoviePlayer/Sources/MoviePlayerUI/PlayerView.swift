@@ -362,10 +362,10 @@ public struct PlayerView<
                     }
 
                     HStack(spacing: 6) {
-                        CustomSlider(value: Binding(
+                        VolumeBoostSlider(value: Binding(
                             get: { Double(state.volume) },
                             set: { state.setVolume(Float($0)) }
-                        ), range: 0...1)
+                        ))
                         .frame(width: 130)
                         .padding(.leading, 14)
 
@@ -540,7 +540,7 @@ public struct PlayerView<
     }
 
     private var bottomHUD: some View {
-        HStack(spacing: 0) {
+        HStack(alignment: .bottom, spacing: 0) {
             // Episodes Sidebar (slides in from left)
             if state.isEpisodesSidebarOpen && !state.episodes.isEmpty {
                 episodesSidebar
@@ -617,15 +617,17 @@ public struct PlayerView<
 
             if state.isSourcesSidebarOpen && !state.playbackSources.isEmpty {
                 sourcesSidebar()
+                    .frame(maxHeight: .infinity, alignment: .bottom)
                     .transition(.move(edge: .trailing))
             }
 
             if state.isSubtitlesSidebarOpen {
                 subtitlesSidebar()
+                    .frame(maxHeight: .infinity, alignment: .bottom)
                     .transition(.move(edge: .trailing))
             }
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: state.isSourcesSidebarOpen)
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: state.isSubtitlesSidebarOpen)
     }
@@ -743,10 +745,9 @@ public struct PlayerView<
                 .padding(.horizontal, 8)
             }
             .frame(maxHeight: .infinity)
-            
-            Spacer()
         }
         .frame(width: 260)
+        .frame(maxHeight: .infinity)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
         .padding(12)
     }

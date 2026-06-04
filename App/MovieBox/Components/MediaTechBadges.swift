@@ -21,6 +21,42 @@ enum MediaTechBadgeSize {
     case list
 }
 
+enum ResolutionQualityBadgeStyle {
+    /// Torrent stream list — muted text on a light surface.
+    case surface
+    /// Shelf cards over artwork — high-contrast pill.
+    case onMedia
+}
+
+/// Resolution pill used in torrent stream rows (720p, 1080p, etc.). Hidden for 4K — use `MediaTechBadge` `.fourK` instead.
+struct ResolutionQualityBadge: View {
+    let quality: String
+    var style: ResolutionQualityBadgeStyle = .surface
+
+    var body: some View {
+        Text(quality)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(foregroundStyle)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(backgroundStyle, in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+    }
+
+    private var foregroundStyle: Color {
+        switch style {
+        case .surface: .secondary
+        case .onMedia: .white
+        }
+    }
+
+    private var backgroundStyle: Color {
+        switch style {
+        case .surface: Color.primary.opacity(0.06)
+        case .onMedia: Color.black.opacity(0.5)
+        }
+    }
+}
+
 struct MediaTechBadgeRow: View {
     let kinds: [MediaTechKind]
     var context: MediaTechBadgeContext = .hero

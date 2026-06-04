@@ -18,6 +18,16 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
         flushDownloadsInBackground()
     }
 
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            if StreamFileLocator.isMovieBoxStreamFile(url) {
+                NotificationCenter.default.post(name: .movieBoxOpenStreamFile, object: url)
+            } else {
+                NotificationCenter.default.post(name: .movieBoxOpenImportURL, object: url)
+            }
+        }
+    }
+
     private func flushDownloadsInBackground() {
         guard let appServices else { return }
         Task { @MainActor in

@@ -46,6 +46,9 @@ private struct FeaturedLandscapeCard: View {
     let height: CGFloat
     let action: () -> Void
 
+    private let contentHorizontalPadding: CGFloat = 28
+    private let contentBottomPadding: CGFloat = 22
+
     var body: some View {
         Button(action: action) {
             ZStack(alignment: .bottomLeading) {
@@ -58,9 +61,15 @@ private struct FeaturedLandscapeCard: View {
                 )
 
                 VStack(alignment: .leading, spacing: 6) {
-                    AsyncLogoView(movieId: movie.id, title: movie.title, kind: kind)
-                        .frame(maxWidth: min(width * 0.55, 320), alignment: .leading)
-                        .scaleEffect(0.92, anchor: .bottomLeading)
+                    AsyncLogoView(
+                        movieId: movie.id,
+                        title: movie.title,
+                        kind: kind,
+                        maxLogoHeight: 82,
+                        fallbackTitleSize: 32
+                    )
+                    .frame(maxWidth: min(width - contentHorizontalPadding * 2, 300), alignment: .leading)
+                    .scaleEffect(0.92, anchor: .bottomLeading)
 
                     Text(GenreLabelFormatter.metadataLine(kind: kind, genreIds: movie.genreIds))
                         .font(.system(size: 13, weight: .medium))
@@ -73,11 +82,11 @@ private struct FeaturedLandscapeCard: View {
                             .foregroundStyle(.white.opacity(0.78))
                             .lineLimit(2)
                             .multilineTextAlignment(.leading)
-                            .frame(maxWidth: width * 0.72, alignment: .leading)
+                            .frame(maxWidth: width - contentHorizontalPadding * 2, alignment: .leading)
                     }
                 }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 18)
+                .padding(.horizontal, contentHorizontalPadding)
+                .padding(.bottom, contentBottomPadding)
             }
             .frame(width: width, height: height)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))

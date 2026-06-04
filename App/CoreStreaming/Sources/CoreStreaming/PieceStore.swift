@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 // MARK: - Piece Store
@@ -325,6 +326,38 @@ public actor PieceStore {
         return data
     }
 
+    /// Reads verified on-disk bytes for assembly/export. Never waits on the torrent engine.
+    public func readForExport(offset: Int64, length: Int) async throws -> Data {
+        let clampedLength = min(length, Int(totalSize - offset))
+        guard offset >= 0, clampedLength > 0, offset < totalSize else {
+            throw PieceStoreError.outOfRange(offset, totalSize)
+        }
+        guard isRangeExportable(offset: offset, end: offset + Int64(clampedLength)) else {
+            throw PieceStoreError.rangeNotReadable(offset, clampedLength)
+        }
+
+        let firstPiece = Int(offset / pieceSize)
+        let lastPiece = Int((offset + Int64(clampedLength) - 1) / pieceSize)
+        if firstPiece == lastPiece, let cached = cachedPieceData(pieceIndex: firstPiece) {
+            let pieceOffset = Int(offset - Int64(firstPiece) * pieceSize)
+            if pieceOffset + clampedLength <= cached.count {
+                return cached[pieceOffset..<pieceOffset + clampedLength]
+            }
+        }
+
+        try flushCache()
+
+        guard let readHandle else {
+            throw PieceStoreError.ioError("Read handle unavailable")
+        }
+        try readHandle.seek(toOffset: UInt64(offset))
+        let data = readHandle.readData(ofLength: clampedLength)
+        guard data.count == clampedLength else {
+            throw PieceStoreError.incompleteRead(offset, clampedLength, data.count)
+        }
+        return data
+    }
+
     public func hasPiece(_ index: Int) -> Bool {
         guard index >= 0 && index < bitmap.count else { return false }
         return bitmap[index]
@@ -332,6 +365,54 @@ public actor PieceStore {
 
     public func missingPieceIndices(in range: ClosedRange<Int>) -> [Int] {
         range.filter { !hasPiece($0) }
+    }
+
+    /// Marks pieces that are already on disk with a valid SHA1 but missing from the resume bitmap.
+    public func reconcileVerifiedPiecesOnDisk(
+        in range: ClosedRange<Int>,
+        pieceHashes: Data
+    ) -> [Int] {
+        var expected: [Data] = []
+        var index = 0
+        while index + 20 <= pieceHashes.count {
+            expected.append(pieceHashes[index..<index + 20])
+            index += 20
+        }
+        guard !expected.isEmpty else { return [] }
+
+        var verified: [Int] = []
+        for pieceIndex in range where !hasPiece(pieceIndex) {
+            guard pieceIndex < expected.count else { continue }
+            guard let data = try? readPieceDataFromDisk(pieceIndex: pieceIndex) else { continue }
+            let computed = Data(Insecure.SHA1.hash(data: data))
+            guard computed == expected[pieceIndex] else { continue }
+            markPieceVerified(pieceIndex: pieceIndex, pieceData: data)
+            verified.append(pieceIndex)
+        }
+        if !verified.isEmpty {
+            TorrentLog.info(
+                "[PieceStore] reconciled \(verified.count) verified piece(s) from disk: \(verified.prefix(8).map(String.init).joined(separator: ","))\(verified.count > 8 ? "…" : "")"
+            )
+        }
+        return verified
+    }
+
+    private func readPieceDataFromDisk(pieceIndex: Int) throws -> Data {
+        guard pieceIndex >= 0, pieceIndex < pieceCount else {
+            throw PieceStoreError.invalidPieceIndex(pieceIndex)
+        }
+        try flushCache()
+        guard let readHandle else {
+            throw PieceStoreError.ioError("Read handle unavailable")
+        }
+        let offset = Int64(pieceIndex) * pieceSize
+        let length = Int(pieceSize(for: pieceIndex))
+        try readHandle.seek(toOffset: UInt64(offset))
+        let data = readHandle.readData(ofLength: length)
+        guard data.count == length else {
+            throw PieceStoreError.incompleteRead(offset, length, data.count)
+        }
+        return data
     }
 
     /// Clears resume bitmap flags so the engine re-downloads pieces that were marked done without data.
@@ -519,7 +600,7 @@ public actor PieceStore {
                 position = pieceEnd
                 continue
             }
-            
+
             // Check if within the contiguous unverified stream head.
             let mediaOffset = position - streamMediaByteOffset
             if mediaOffset >= 0 && mediaOffset < streamHeadContiguousEnd {
@@ -527,8 +608,20 @@ public actor PieceStore {
                 position = mediaEnd + streamMediaByteOffset
                 continue
             }
-            
+
             return false
+        }
+        return true
+    }
+
+    /// Export requires every overlapping piece to be verified — not just the streaming head.
+    private func isRangeExportable(offset: Int64, end: Int64) -> Bool {
+        var position = offset
+        while position < end {
+            let pieceIndex = Int(position / pieceSize)
+            guard hasPiece(pieceIndex) else { return false }
+            let pieceStart = Int64(pieceIndex) * pieceSize
+            position = min(end, pieceStart + pieceSize(for: pieceIndex))
         }
         return true
     }
@@ -625,6 +718,8 @@ public enum PieceStoreError: Error, LocalizedError {
     case outOfRange(Int64, Int64)
     case ioError(String)
     case readTimeout(Int64, Int)
+    case rangeNotReadable(Int64, Int)
+    case incompleteRead(Int64, Int, Int)
 
     public var errorDescription: String? {
         switch self {
@@ -638,6 +733,10 @@ public enum PieceStoreError: Error, LocalizedError {
             "I/O error: \(message)"
         case .readTimeout(let offset, let length):
             "Read timeout waiting for range: \(offset) (length: \(length))"
+        case .rangeNotReadable(let offset, let length):
+            "Missing verified data at offset \(offset) (length: \(length))"
+        case .incompleteRead(let offset, let expected, let actual):
+            "Incomplete read at offset \(offset) (expected \(expected), got \(actual))"
         }
     }
 }

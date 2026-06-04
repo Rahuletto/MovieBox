@@ -7,7 +7,153 @@ import MoviePlayerEngine
 import SwiftUI
 
 
-// Custom Slider for Volume & Scrubber Progress
+struct VolumeBoostSlider: View {
+    @Binding var value: Double
+
+    @State private var hoverVolume: Double?
+    @State private var hoverX: CGFloat?
+    @State private var isDragging = false
+
+    private static let maxVolume = Double(PlayerState.maxVolume)
+    private static let unityVolume = Double(PlayerState.unityVolume)
+    private static let normalTrackFraction: CGFloat = 0.8
+    private static let boostTrackFraction: CGFloat = 0.2
+
+    private let trackHeight: CGFloat = 6
+    private let boostFillColor = Color(red: 1, green: 0.55, blue: 0.18)
+
+    var body: some View {
+        GeometryReader { geometry in
+            let width = geometry.size.width
+            let unityMarkX = width * Self.normalTrackFraction
+            let whiteWidth = whiteFillWidth(volume: value, trackWidth: width)
+            let orangeWidth = orangeFillWidth(volume: value, trackWidth: width)
+
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(.white.opacity(0.18))
+                    .frame(height: trackHeight)
+
+                Rectangle()
+                    .fill(.white.opacity(0.32))
+                    .frame(width: 1, height: trackHeight + 2)
+                    .offset(x: unityMarkX - 0.5)
+
+                Capsule()
+                    .fill(.white)
+                    .frame(width: max(0, whiteWidth), height: trackHeight)
+
+                Capsule()
+                    .fill(boostFillColor)
+                    .frame(width: max(0, orangeWidth), height: trackHeight)
+                    .offset(x: unityMarkX)
+            }
+            .frame(height: geometry.size.height)
+            .contentShape(Rectangle())
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let location):
+                    guard !isDragging else { return }
+                    let x = max(0, min(location.x, width))
+                    hoverX = x
+                    hoverVolume = volume(at: x, trackWidth: width)
+                case .ended:
+                    if !isDragging {
+                        hoverVolume = nil
+                        hoverX = nil
+                    }
+                }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { gesture in
+                        isDragging = true
+                        let x = max(0, min(gesture.location.x, width))
+                        value = volume(at: x, trackWidth: width)
+                        hoverX = x
+                        hoverVolume = value
+                    }
+                    .onEnded { _ in
+                        isDragging = false
+                        hoverVolume = nil
+                        hoverX = nil
+                    }
+            )
+        }
+        .frame(height: 12)
+        .overlay(alignment: .top) {
+            if let labelVolume = volumeLabelValue {
+                GeometryReader { labelGeometry in
+                    let width = labelGeometry.size.width
+                    let anchorX = hoverX ?? positionX(for: labelVolume, trackWidth: width)
+                    volumePercentLabel(labelVolume)
+                        .fixedSize()
+                        .position(x: clampedLabelX(anchorX, trackWidth: width), y: -14)
+                }
+                .allowsHitTesting(false)
+            }
+        }
+        .animation(.easeOut(duration: 0.12), value: volumeLabelValue != nil)
+    }
+
+    private var volumeLabelValue: Double? {
+        if isDragging { return value }
+        return hoverVolume
+    }
+
+    private func volumePercentLabel(_ volume: Double) -> some View {
+        Text(Self.formatPercent(volume))
+            .font(.system(size: 11, weight: .bold))
+            .monospacedDigit()
+            .foregroundStyle(.white)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(.black.opacity(0.65), in: Capsule())
+    }
+
+    private func clampedLabelX(_ anchorX: CGFloat, trackWidth: CGFloat) -> CGFloat {
+        let labelHalfWidth: CGFloat = 28
+        return max(labelHalfWidth, min(anchorX, trackWidth - labelHalfWidth))
+    }
+
+    private func positionX(for volume: Double, trackWidth: CGFloat) -> CGFloat {
+        let v = min(max(volume, 0), Self.maxVolume)
+        if v <= Self.unityVolume {
+            return CGFloat(v / Self.unityVolume) * trackWidth * Self.normalTrackFraction
+        }
+        let boost = (v - Self.unityVolume) / (Self.maxVolume - Self.unityVolume)
+        return trackWidth * Self.normalTrackFraction + CGFloat(boost) * trackWidth * Self.boostTrackFraction
+    }
+
+    private static func formatPercent(_ volume: Double) -> String {
+        "\(Int((volume * 100).rounded()))%"
+    }
+
+    private func whiteFillWidth(volume: Double, trackWidth: CGFloat) -> CGFloat {
+        let clamped = min(max(volume, 0), Self.unityVolume)
+        return CGFloat(clamped / Self.unityVolume) * trackWidth * Self.normalTrackFraction
+    }
+
+    private func orangeFillWidth(volume: Double, trackWidth: CGFloat) -> CGFloat {
+        guard volume > Self.unityVolume else { return 0 }
+        let boost = min(volume, Self.maxVolume) - Self.unityVolume
+        let boostSpan = Self.maxVolume - Self.unityVolume
+        return CGFloat(boost / boostSpan) * trackWidth * Self.boostTrackFraction
+    }
+
+    private func volume(at x: CGFloat, trackWidth: CGFloat) -> Double {
+        guard trackWidth > 0 else { return 0 }
+        let t = max(0, min(Double(x / trackWidth), 1))
+        let normalEnd = Double(Self.normalTrackFraction)
+        if t <= normalEnd {
+            return (t / normalEnd) * Self.unityVolume
+        }
+        let boostT = (t - normalEnd) / Double(Self.boostTrackFraction)
+        return Self.unityVolume + boostT * (Self.maxVolume - Self.unityVolume)
+    }
+}
+
+// Custom Slider for Scrubber Progress
 struct CustomSlider: View {
     @Binding var value: Double
     var range: ClosedRange<Double> = 0...1

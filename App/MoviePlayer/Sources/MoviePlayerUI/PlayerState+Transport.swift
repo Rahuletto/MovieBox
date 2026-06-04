@@ -119,17 +119,47 @@ extension PlayerState {
     }
 
     public func setVolume(_ value: Float) {
-        volume = value
-        player.volume = value
-        if value > 0.001, isMuted {
+        let clamped = min(max(value, 0), Self.maxVolume)
+        volume = clamped
+        if clamped > 0.001, isMuted {
             isMuted = false
             player.isMuted = false
         }
+        applyAudioVolume()
     }
 
     public func toggleMute() {
         isMuted.toggle()
         player.isMuted = isMuted
+        applyAudioVolume()
+    }
+
+    func applyAudioVolume() {
+        let uiVolume = isMuted ? Float(0) : volume
+        audioGainController.setGain(Self.effectivePlaybackGain(for: uiVolume))
+        audioGainController.updateLiveVolume(
+            on: player,
+            useProcessingTap: !isHLSTorrentPlayback
+        )
+    }
+
+    func installAudioVolumePipeline() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.audioGainController.configure(
+                for: self.player,
+                useProcessingTap: !self.isHLSTorrentPlayback
+            )
+            self.applyAudioVolume()
+        }
+    }
+
+    static func effectivePlaybackGain(for uiVolume: Float) -> Float {
+        guard uiVolume > unityVolume else { return max(0, uiVolume) }
+        let span = maxVolume - unityVolume
+        guard span > 0 else { return unityVolume }
+        let boost = (uiVolume - unityVolume) / span
+        return unityVolume + boost * unityVolume
     }
 
     public func setPlaybackRate(_ rate: Double) {

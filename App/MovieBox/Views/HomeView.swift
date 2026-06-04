@@ -32,7 +32,7 @@ struct HomeView: View {
 
     var body: some View {
         ZStack {
-            AmbientTopGlow(color: MovieBoxColors.homeGlow)
+            AmbientPageGlow(color: MovieBoxColors.homeGlow)
 
 
             if metadataMode == nil {

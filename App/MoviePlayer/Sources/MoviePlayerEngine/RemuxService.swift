@@ -44,17 +44,33 @@ public actor RemuxService {
     }
 
     public func probe(inputURL: URL) async throws -> MediaProbe {
+        try await probe(inputURL: inputURL, quick: false)
+    }
+
+    /// Fast probe for local MP4/MOV — enough to pick native passthrough without scanning the whole file.
+    public func probeLocalFileQuick(inputURL: URL) async throws -> MediaProbe {
+        try await probe(inputURL: inputURL, quick: true)
+    }
+
+    private func probe(inputURL: URL, quick: Bool) async throws -> MediaProbe {
         let ffprobeURL = try Self.resolveTool(named: "ffprobe")
-        MoviePlayerLog.info("[Remux] probe start file=\(inputURL.lastPathComponent) ffprobe=\(ffprobeURL.path)")
-        let data = try runProbe(ffprobeURL: ffprobeURL, inputURL: inputURL)
+        MoviePlayerLog.info(
+            "[Remux] probe start file=\(inputURL.lastPathComponent) quick=\(quick) ffprobe=\(ffprobeURL.path)"
+        )
+        let data = try runProbe(ffprobeURL: ffprobeURL, inputURL: inputURL, quick: quick)
         let probe = try Self.decodeProbe(data)
         logProbe(probe)
         return probe
     }
 
     public func plan(inputURL: URL, policy: PlaybackPreparePolicy = PlaybackPreparePolicy()) async throws -> RemuxPlan {
-        let probe = try await probe(inputURL: inputURL)
-        return try Self.makePlan(inputURL: inputURL, probe: probe, policy: policy)
+        let mediaProbe: MediaProbe
+        if inputURL.isFileURL, Self.isNativeContainerExtension(inputURL.pathExtension) {
+            mediaProbe = try await probeLocalFileQuick(inputURL: inputURL)
+        } else {
+            mediaProbe = try await probe(inputURL: inputURL)
+        }
+        return try Self.makePlan(inputURL: inputURL, probe: mediaProbe, policy: policy)
     }
 
     public func prepareForPlayback(
@@ -528,18 +544,27 @@ public actor RemuxService {
         )
     }
 
-    private func runProbe(ffprobeURL: URL, inputURL: URL) throws -> Data {
+    private static func isNativeContainerExtension(_ ext: String) -> Bool {
+        ["mp4", "mov", "m4v"].contains(ext.lowercased())
+    }
+
+    private func runProbe(ffprobeURL: URL, inputURL: URL, quick: Bool) throws -> Data {
         let process = Process()
         process.executableURL = ffprobeURL
         let probeInput = inputURL.isFileURL ? inputURL.path : inputURL.absoluteString
-        process.arguments = [
+        var arguments = [
             "-v", "quiet",
             "-print_format", "json",
             "-show_format",
             "-show_streams",
             "-show_entries", "stream=index,codec_type,codec_name,profile,pix_fmt,bits_per_raw_sample,bits_per_sample,width,height,r_frame_rate,avg_frame_rate,color_primaries,color_transfer,color_space,channels,channel_layout,sample_rate,bit_rate,disposition:stream_tags=language,title:stream_side_data",
-            "-i", probeInput
         ]
+        if quick {
+            // Local files: read only the head — avoids multi-minute ffprobe on large MP4s.
+            arguments.insert(contentsOf: ["-analyzeduration", "5M", "-probesize", "5M"], at: 0)
+        }
+        arguments.append(contentsOf: ["-i", probeInput])
+        process.arguments = arguments
 
         let outputPipe = Pipe()
         let errorPipe = Pipe()

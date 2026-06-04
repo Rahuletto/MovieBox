@@ -13,7 +13,7 @@ extension PlayerState {
     public func beginBufferingPlayback(
         title: String,
         movieId: Int,
-        subtitleAppearance: SubtitleAppearance = .cinematic,
+        subtitleAppearance: SubtitleAppearance = .modern,
         subtitleFontSize: CGFloat = 20,
         episodeTitle: String? = nil,
         displayTitle: String? = nil,
@@ -65,7 +65,7 @@ extension PlayerState {
         subtitleURL: URL? = nil,
         hdrType: PlayerHDRType? = nil,
         audioFormat: PlayerAudioFormat? = nil,
-        subtitleAppearance: SubtitleAppearance = .cinematic,
+        subtitleAppearance: SubtitleAppearance = .modern,
         subtitleFontSize: CGFloat = 20,
         episodeTitle: String? = nil,
         episodes: [PlayerEpisode] = [],
@@ -218,13 +218,14 @@ extension PlayerState {
         )
 
         let playerItem = AVPlayerItem(asset: asset)
+        audioGainController.reset(for: player.currentItem)
         if player.currentItem == nil {
             player = AVPlayer(playerItem: playerItem)
         } else {
             player.replaceCurrentItem(with: playerItem)
         }
-        player.volume = volume
         player.isMuted = isMuted
+        installAudioVolumePipeline()
         player.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
 
         if subtitleURL != nil {
@@ -426,9 +427,10 @@ extension PlayerState {
         ]
         let asset = AVURLAsset(url: url, options: assetOptions)
         let playerItem = AVPlayerItem(asset: asset)
+        audioGainController.reset(for: player.currentItem)
         player.replaceCurrentItem(with: playerItem)
-        player.volume = volume
         player.isMuted = isMuted
+        installAudioVolumePipeline()
 
         // Seek to the position within the HLS stream (movie time minus HLS start offset).
         let hlsRelativeTime = time - hlsOffset

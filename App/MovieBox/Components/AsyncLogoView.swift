@@ -8,7 +8,11 @@ struct AsyncLogoView: View {
     let movieId: Int
     let title: String
     let kind: MediaKind
-    
+    var maxLogoHeight: CGFloat = 100
+    var fallbackTitleSize: CGFloat = 38
+    /// When false, the logo hugs the leading edge instead of spanning the card width.
+    var fillsAvailableWidth: Bool = true
+
     @State private var logoURL: URL?
     @State private var loadFailed = false
     @Query private var settings: [AppSettings]
@@ -17,20 +21,28 @@ struct AsyncLogoView: View {
         Group {
             if let url = logoURL {
                 CachedImageView(url: url) {
-                    ProgressView().frame(height: 100)
+                    ProgressView().frame(height: maxLogoHeight)
                 } content: { image in
                     image
                         .resizable()
                         .scaledToFit()
-                        .frame(maxHeight: 100, alignment: .bottomLeading)
-//                        .shadow(color: .black.opacity(0.4), radius: 10, x: 0, y: 5)
+                        .frame(
+                            maxWidth: fillsAvailableWidth ? .infinity : nil,
+                            maxHeight: maxLogoHeight,
+                            alignment: .bottomLeading
+                        )
                 }
             } else if loadFailed {
                 fallbackTitle
             } else {
-                ProgressView().frame(height: 100)
+                ProgressView().frame(height: maxLogoHeight)
             }
         }
+        .frame(
+            maxWidth: fillsAvailableWidth ? .infinity : nil,
+            maxHeight: maxLogoHeight,
+            alignment: .bottomLeading
+        )
         .task(id: "\(movieId)-\(kind.rawValue)") {
             logoURL = nil
             loadFailed = false
@@ -61,10 +73,10 @@ struct AsyncLogoView: View {
         // `.primary` adapts to color scheme (white in dark, black in light),
         // matching the hero carousel's color-scheme-aware fade.
         Text(title)
-            .font(.system(size: 38, weight: .bold))
-            .foregroundStyle(.primary)
-//            .shadow(color: .black.opacity(0.35), radius: 10, x: 0, y: 5)
-            .frame(maxHeight: 160, alignment: .bottomLeading)
+            .font(.system(size: fallbackTitleSize, weight: .bold))
+            .foregroundStyle(.white)
+            .shadow(color: .black.opacity(0.45), radius: 8, x: 0, y: 3)
+            .frame(maxHeight: maxLogoHeight + 24, alignment: .bottomLeading)
             .lineLimit(2)
     }
 }
