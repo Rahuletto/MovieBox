@@ -27,6 +27,7 @@ public final class PlayerPiPDelegate: NSObject, AVPictureInPictureControllerDele
     public func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         let activeState = self.state
         Task { @MainActor in
+            PlaybackHaptics.play(.activate)
             activeState.keepPlaybackAliveForPiP()
         }
     }

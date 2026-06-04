@@ -177,6 +177,7 @@ public final class PlayerState {
 
     var previousWindowFrame: NSRect? = nil
     var hasResizedForCurrentVideo = false
+    var lastAutosizedVideoSize: CGSize?
     var windowAutosizeTask: Task<Void, Never>?
     var presentationTransitionTask: Task<Void, Never>?
     var lastPlaybackLoad: StoredPlaybackLoad?

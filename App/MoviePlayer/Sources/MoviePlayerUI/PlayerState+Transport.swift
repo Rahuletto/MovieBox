@@ -120,17 +120,25 @@ extension PlayerState {
 
     public func setVolume(_ value: Float) {
         let clamped = min(max(value, 0), Self.maxVolume)
+        let wasMuted = isMuted
         volume = clamped
         if clamped > 0.001, isMuted {
             isMuted = false
             player.isMuted = false
+            if wasMuted {
+                PlaybackHaptics.play(.activate)
+            }
         }
         applyAudioVolume()
     }
 
     public func toggleMute() {
+        let wasMuted = isMuted
         isMuted.toggle()
         player.isMuted = isMuted
+        if wasMuted, !isMuted {
+            PlaybackHaptics.play(.activate)
+        }
         applyAudioVolume()
     }
 

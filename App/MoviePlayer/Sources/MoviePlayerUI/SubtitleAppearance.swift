@@ -78,13 +78,14 @@ public struct SubtitleOverlayView: View {
                         if !text.isEmpty {
                             styledText(text)
                                 .frame(maxWidth: 720)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .id(subtitleIdentity)
-                                .transition(.opacity)
+                                .fixedSize(horizontal: true, vertical: true)
                         } else if let loadProgress {
                             subtitleLoadingPill(loadProgress)
                         }
                     }
+                    .id(subtitleIdentity)
+                    .transition(.opacity)
+                    .allowsHitTesting(true)
                     Spacer(minLength: 48)
                 }
                 .padding(.bottom, subtitleBottomInset)
@@ -92,13 +93,10 @@ public struct SubtitleOverlayView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-        .animation(
-            showsControls ? .easeOut(duration: 0.22) : .easeInOut(duration: 0.55),
-            value: showsControls
-        )
-        .animation(.easeOut(duration: 0.12), value: isVisible)
-        .animation(.easeOut(duration: 0.1), value: text)
-        .animation(nil, value: cueID)
+        .allowsHitTesting(false)
+        .animation(.easeOut(duration: 0.22), value: showsControls)
+        .animation(.easeOut(duration: 0.18), value: isVisible)
+        .animation(.easeOut(duration: 0.12), value: subtitleIdentity)
     }
 
     private func subtitleLoadingPill(_ progress: SubtitleLoadProgress) -> some View {
@@ -152,6 +150,7 @@ public struct SubtitleOverlayView: View {
                 .shadow(color: .black.opacity(0.9), radius: 6, y: 2)
                 .multilineTextAlignment(.center)
                 .lineSpacing(4)
+                .textSelection(.enabled)
                 .fixedSize(horizontal: true, vertical: true)
 
         case .yellowBlack:
@@ -173,6 +172,7 @@ public struct SubtitleOverlayView: View {
                 .shadow(color: .black.opacity(0.8), radius: 4, y: 2)
                 .multilineTextAlignment(.center)
                 .lineSpacing(4)
+                .textSelection(.enabled)
                 .fixedSize(horizontal: true, vertical: true)
         }
     }
@@ -214,8 +214,9 @@ private struct FluidSubtitleLabel: View {
             .foregroundStyle(foreground)
             .multilineTextAlignment(.center)
             .lineSpacing(lineSpacing)
+            .textSelection(.enabled)
             .frame(maxWidth: 720, alignment: .center)
-            .fixedSize(horizontal: false, vertical: true)
+            .fixedSize(horizontal: true, vertical: true)
             .padding(.horizontal, horizontalPadding)
             .padding(.vertical, verticalPadding)
     }

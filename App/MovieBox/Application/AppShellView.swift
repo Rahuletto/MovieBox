@@ -88,6 +88,7 @@ struct AppShellView: View {
                             TorrentStreamStatsAccessory(session: session)
                         }
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .ignoresSafeArea()
                     .opacity(shellPlayerOpacity)
                     .allowsHitTesting(!playerState.isPlaybackChromeHidden && playerState.isPlayerRevealed)

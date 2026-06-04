@@ -235,6 +235,9 @@ struct PillTabBar: View {
     private func tabButton(_ tab: TabItem) -> some View {
         let isSelected = currentTopLevelRoute == tab.id
         return Button {
+            if !isSelected {
+                MovieBoxHaptics.play(.selection)
+            }
             router.show(tab.id)
         } label: {
             Label(tab.title, systemImage: tab.systemImage)
@@ -261,6 +264,9 @@ struct PillTabBar: View {
     private var searchButton: some View {
         let isSelected = router.selectedRoute == .search
         return Button {
+            if !isSelected {
+                MovieBoxHaptics.play(.selection)
+            }
             router.show(.search)
         } label: {
             Image(systemName: "magnifyingglass")

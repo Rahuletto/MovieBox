@@ -39,6 +39,8 @@ extension PlayerState {
 
         showsControls = true
         hasResizedForCurrentVideo = false
+        lastAutosizedVideoSize = nil
+        capturePrePlayerWindowFrame()
         isPresented = true
         isPlayerRevealed = true
         isPlaying = false
@@ -119,6 +121,7 @@ extension PlayerState {
         
         self.videoGravity = .resizeAspect // Reset to default
         hasResizedForCurrentVideo = false
+        lastAutosizedVideoSize = nil
 
         let hudTitle: String
         if let displayTitle, !displayTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -307,6 +310,7 @@ extension PlayerState {
 
     func revealPlayerWithTransition(onRevealed: @escaping () -> Void) {
         presentationTransitionTask?.cancel()
+        capturePrePlayerWindowFrame()
         presentationTransitionTask = Task { @MainActor in
             await Task.yield()
             isPresented = true

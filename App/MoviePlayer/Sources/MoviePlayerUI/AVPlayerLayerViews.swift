@@ -92,12 +92,10 @@ public final class PlayerSurfaceHost: NSView {
     }
 
     private func attachPlayerContainer() {
-        if playerContainer.superview !== self {
-            playerContainer.removeFromSuperview()
-            addSubview(playerContainer)
+        if playerContainer.shouldKeepPictureInPictureReparenting {
+            return
         }
-        playerContainer.frame = bounds
-        playerContainer.autoresizingMask = [.width, .height]
+        playerContainer.ensureNormalPresentation(on: self)
     }
 }
 
@@ -118,6 +116,24 @@ public final class PlayerContainerView: NSView {
         playerState = state
         presentationAnchor = anchor
         state?.pipHostView = self
+    }
+
+    var shouldKeepPictureInPictureReparenting: Bool {
+        isReparentedForPictureInPicture && playerState?.isPictureInPictureActive == true
+    }
+
+    /// Reattaches the AVPlayer layer to the SwiftUI surface host when not actively in PiP.
+    func ensureNormalPresentation(on anchor: PlayerSurfaceHost? = nil) {
+        guard !shouldKeepPictureInPictureReparenting else { return }
+        guard let anchor = anchor ?? presentationAnchor else { return }
+        if superview !== anchor {
+            removeFromSuperview()
+            anchor.addSubview(self)
+        }
+        isReparentedForPictureInPicture = false
+        frame = anchor.bounds
+        autoresizingMask = [.width, .height]
+        needsLayout = true
     }
 
     /// Briefly moves the layer host above `NSHostingController.view` so PiP can attach (not under SwiftUI).
@@ -149,22 +165,19 @@ public final class PlayerContainerView: NSView {
     }
 
     func restoreAfterPictureInPicture() {
-        guard isReparentedForPictureInPicture, let anchor = presentationAnchor else { return }
-        removeFromSuperview()
-        anchor.addSubview(self)
-        frame = anchor.bounds
-        autoresizingMask = [.width, .height]
-        isReparentedForPictureInPicture = false
+        ensureNormalPresentation()
         // #region agent log
-        DebugAgentLog.write(
-            hypothesisId: "H2",
-            location: "CorePlayer.swift:restoreAfterPictureInPicture",
-            message: "restored after PiP",
-            data: [
-                "anchorBounds": NSStringFromRect( anchor.bounds),
-                "containerFrame": NSStringFromRect( frame),
-            ]
-        )
+        if let anchor = presentationAnchor {
+            DebugAgentLog.write(
+                hypothesisId: "H2",
+                location: "CorePlayer.swift:restoreAfterPictureInPicture",
+                message: "restored after PiP",
+                data: [
+                    "anchorBounds": NSStringFromRect( anchor.bounds),
+                    "containerFrame": NSStringFromRect( frame),
+                ]
+            )
+        }
         // #endregion
     }
 

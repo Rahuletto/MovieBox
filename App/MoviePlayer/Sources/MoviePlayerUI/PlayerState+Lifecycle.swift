@@ -45,10 +45,8 @@ extension PlayerState {
         if let window = NSApplication.shared.keyWindow, window.styleMask.contains(.fullScreen) {
             window.toggleFullScreen(nil)
         }
-        if let prevFrame = previousWindowFrame, let window = Self.playbackHostWindow() {
-            window.setFrame(prevFrame, display: true, animate: true)
-            previousWindowFrame = nil
-        }
+        restorePrePlayerWindowFrame()
+        scheduleBrowsingWindowFrameCorrection()
 
         guard isPresented else { return }
 

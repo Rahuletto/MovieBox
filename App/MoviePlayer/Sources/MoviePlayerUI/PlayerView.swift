@@ -34,6 +34,7 @@ public struct PlayerView<
     @State private var nerdStatsPresented = false
     @State private var nerdStatsSnapshot = DiagnosticsPanelSnapshot.empty
     @State private var nerdStatsRefreshTask: Task<Void, Never>?
+    @State private var isWindowFullScreen = false
 
     public init(
         state: PlayerState,
@@ -123,6 +124,7 @@ public struct PlayerView<
             }
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay {
             if !state.isPlaybackChromeHidden {
             PlayerKeyboardCaptureView(
@@ -148,15 +150,24 @@ public struct PlayerView<
         }
         .ignoresSafeArea()
         .task {
+            isWindowFullScreen = NSApp.keyWindow?.styleMask.contains(.fullScreen) == true
             resetControlFade()
             NotificationCenter.default.post(name: .playerReclaimKeyboardFocus, object: nil)
         }
-        .clipShape(
-            RoundedRectangle(
-                cornerRadius: surfaceCornerRadius,
-                style: .continuous
-            )
-        )
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willEnterFullScreenNotification)) { _ in
+            isWindowFullScreen = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { _ in
+            isWindowFullScreen = true
+            state.pipHostView?.ensureNormalPresentation()
+            resetControlFade()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in
+            isWindowFullScreen = false
+            state.pipHostView?.ensureNormalPresentation()
+            resetControlFade()
+        }
+        .modifier(PlayerSurfaceClip(isEnabled: !isWindowFullScreen, cornerRadius: surfaceCornerRadius))
         .overlay(alignment: .top) {
             if !state.isPlaybackChromeHidden {
                 VStack(spacing: 8) {
@@ -1105,5 +1116,20 @@ public struct PlayerView<
               let http = response as? HTTPURLResponse,
               (200...299).contains(http.statusCode) else { return nil }
         return String(decoding: data, as: UTF8.self)
+    }
+}
+
+private struct PlayerSurfaceClip: ViewModifier {
+    let isEnabled: Bool
+    let cornerRadius: CGFloat
+
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content.clipShape(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            )
+        } else {
+            content
+        }
     }
 }
