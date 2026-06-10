@@ -2,6 +2,14 @@
 
 A native **macOS** app for browsing movies and TV, streaming from torrents, and managing downloads — with a **Cloudflare Worker** backend that proxies metadata, images, subtitles, and torrent indexers so the app never talks to those APIs directly.
 
+<p align="center">
+  <img src="docs/images/hailmary.png" width="800" alt="MovieBox App Widescreen Home View" />
+</p>
+
+<p align="center">
+  <img src="docs/images/michael.png" width="800" alt="MovieBox Movie Details View" />
+</p>
+
 Think of it as a personal media library: TMDB for discovery, torrent search across several indexers, piece-based streaming with resume, optional full downloads, and a player that can remux MKV into HLS for AVPlayer (including HDR when the source supports it).
 
 > **Note:** The app is open source. Run the **backend yourself** ([guide](docs/SELF_HOSTING.md)) — there is no public hosted API. The maintainer’s Worker is for personal use only. Torrent playback stays on your Mac. Use it responsibly and in line with the laws where you live.
