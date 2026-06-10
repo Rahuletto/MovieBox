@@ -4,6 +4,17 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Marketing version (e.g. 1.0.0) — used for MARKETING_VERSION and release tag v{version}'
+        required: true
+        type: string
+      skip_appcast_push:
+        description: 'Build and upload release only; do not commit appcast.xml to main'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -24,11 +35,20 @@ jobs:
       - name: Stub development secrets
         run: cp MovieBox/Configuration/DevelopmentSecrets.swift.example MovieBox/Configuration/DevelopmentSecrets.swift
 
-      - name: Resolve version from tag
+      - name: Resolve version
         id: version
+        env:
+          INPUT_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || '' }}
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
+          if [ -n "$INPUT_VERSION" ]; then
+            TAG="$INPUT_VERSION"
+            REF="v$INPUT_VERSION"
+          else
+            TAG="${GITHUB_REF_NAME#v}"
+            REF="${GITHUB_REF_NAME}"
+          fi
           echo "marketing=$TAG" >> "$GITHUB_OUTPUT"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
           BUILD="${GITHUB_RUN_NUMBER}"
           echo "build=$BUILD" >> "$GITHUB_OUTPUT"
 
@@ -86,16 +106,18 @@ jobs:
           cat ../appcast.xml
 
       - name: Commit appcast
+        if: github.event_name != 'workflow_dispatch' || inputs.skip_appcast_push != true
         working-directory: ${{ github.workspace }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add appcast.xml
-          git diff --staged --quiet || git commit -m "chore: update appcast for ${GITHUB_REF_NAME}"
+          git diff --staged --quiet || git commit -m "chore: update appcast for ${{ steps.version.outputs.ref }}"
           git push
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.version.outputs.ref }}
           files: build/export/MovieBox.zip
           generate_release_notes: true

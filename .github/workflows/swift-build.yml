@@ -10,6 +10,7 @@ on:
     paths:
       - 'App/**'
       - '.github/workflows/swift-build.yml'
+  workflow_dispatch:
 
 jobs:
   xcodebuild:

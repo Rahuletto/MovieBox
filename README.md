@@ -154,7 +154,7 @@ The macOS app checks for updates via [Sparkle](https://sparkle-project.org/), us
 - **Magnet links:** the app registers a URL scheme — opening `magnet:?…` can jump straight into import flow.  
 - **Swift packages:** you can build modules in isolation, e.g. `swift build --package-path App/CoreStreaming`.  
 - **Player package:** see [App/MoviePlayer/README.md](App/MoviePlayer/README.md) for remux tiers, HDR checks, and integration notes.  
-- **CI:** if workflows are enabled on your branch, Swift builds need a stub secrets file (the workflow copies `DevelopmentSecrets.swift.example`); backend CI runs `bun run lint:strict`.
+- **CI:** if workflows are enabled on your branch, Swift builds need a stub secrets file (the workflow copies `DevelopmentSecrets.swift.example`); backend CI runs `bun run lint:strict`. Trigger workflows manually: `./scripts/gh-workflow.sh build` or `./scripts/gh-workflow.sh release 1.0.0` (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Support
 

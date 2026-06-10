@@ -52,6 +52,44 @@ git push origin v1.0.0
 
 3. Watch **Actions → Release** on GitHub. It will build, sign the zip with Sparkle, update `appcast.xml`, and create the release.
 
+## Trigger workflows manually
+
+Both CI workflows support **Run workflow** in GitHub (**Actions** → pick workflow → **Run workflow**) and the `gh` CLI.
+
+### Swift build (compile check)
+
+```bash
+# GitHub UI: Actions → Swift build → Run workflow
+gh workflow run swift-build.yml --repo Rahuletto/moviebox
+```
+
+### Release (build zip + appcast + GitHub Release)
+
+Tag push (above) is the normal path. To run a release **without** pushing a tag first:
+
+```bash
+# GitHub UI: Actions → Release → Run workflow → enter version (e.g. 1.0.0)
+gh workflow run release.yml --repo Rahuletto/moviebox -f version=1.0.0
+
+# Optional: upload release but skip committing appcast.xml to main
+gh workflow run release.yml --repo Rahuletto/moviebox -f version=1.0.0 -f skip_appcast_push=true
+```
+
+Helper script from the repo root:
+
+```bash
+chmod +x scripts/gh-workflow.sh   # once
+./scripts/gh-workflow.sh build
+./scripts/gh-workflow.sh release 1.0.0
+```
+
+Watch progress:
+
+```bash
+gh run list --workflow=release.yml --repo Rahuletto/moviebox
+gh run watch --repo Rahuletto/moviebox
+```
+
 ## Manual release (without CI)
 
 ```bash
