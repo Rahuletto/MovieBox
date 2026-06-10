@@ -109,10 +109,22 @@ Upload `MovieBox.zip` to a GitHub Release and commit `appcast.xml` on `main`.
 
 `https://raw.githubusercontent.com/Rahuletto/moviebox/main/appcast.xml`
 
+## App icon (Icon Composer → PNG)
+
+CI uses raster icons in `App/MovieBox/Assets.xcassets/AppIcon.appiconset/`. The editable source is `App/AppIcon.icon` (Icon Composer). **Xcode 26.5 `actool` crashes** when compiling `.icon` at build time, so the project does not bundle `AppIcon.icon` directly.
+
+After changing the icon in Icon Composer, re-export PNGs (requires a working local `actool`, e.g. Xcode 26.4.1 or 27+):
+
+```bash
+App/Scripts/export-app-icon.sh
+git add App/MovieBox/Assets.xcassets/AppIcon.appiconset
+```
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
 |---------|----------------|
+| CI `actool` nil-object crash on build | Forgot to export PNGs after editing `AppIcon.icon`, or re-added `AppIcon.icon` to the target’s Copy Bundle Resources |
 | “Update not found” | `appcast.xml` empty or installed build ≥ release |
 | Signature error | `SUPublicEDKey` ≠ `SPARKLE_PRIVATE_KEY` pair |
 | Update downloads but won’t install | Dev ID mismatch; install from same CI build chain |
