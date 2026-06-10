@@ -1,10 +1,19 @@
-<?xml version="1.0" encoding="utf-8"?>
-<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0">
     <channel>
         <title>MovieBox</title>
         <link>https://github.com/Rahuletto/moviebox</link>
         <description>MovieBox for macOS updates</description>
         <language>en</language>
         <!-- New releases are appended here by .github/workflows/release.yml -->
+        <item>
+            <title>1.0.0</title>
+            <pubDate>Wed, 10 Jun 2026 12:41:54 +0000</pubDate>
+            <sparkle:version>5</sparkle:version>
+            <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>26.5</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://raw.githubusercontent.com/Rahuletto/moviebox/main/MovieBox.zip" length="62278451" type="application/octet-stream" sparkle:edSignature="3TstIiTFsTcFx158QWnVSdvvSKp2C9iImv+qtYakft2o39WJgJaTU9u9HcpgQSpCI7EMFSvgH4GYyrTPSj0+Cg=="/>
+        </item>
     </channel>
 </rss>
