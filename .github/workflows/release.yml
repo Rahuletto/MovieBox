@@ -87,26 +87,26 @@ jobs:
           mkdir -p ../build/sparkle
           tar -xf /tmp/Sparkle.tar.xz -C ../build/sparkle
 
-      - name: Sign update archive
+      - name: Sign update and generate appcast
+        id: appcast
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
           if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
-            echo "::warning::SPARKLE_PRIVATE_KEY not set — skipping sign_update (appcast will be unsigned)"
+            echo "::warning::SPARKLE_PRIVATE_KEY not set — skipping Sparkle signing and appcast generation"
+            echo "generated=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           KEY_FILE=$(mktemp)
-          echo "$SPARKLE_PRIVATE_KEY" > "$KEY_FILE"
+          trap 'rm -f "$KEY_FILE"' EXIT
+          printf '%s' "$SPARKLE_PRIVATE_KEY" > "$KEY_FILE"
           ../build/sparkle/bin/sign_update ../build/export/MovieBox.zip --ed-key-file "$KEY_FILE"
-          rm -f "$KEY_FILE"
-
-      - name: Generate appcast
-        run: |
-          ../build/sparkle/bin/generate_appcast ../build/export -o ../appcast.xml
+          ../build/sparkle/bin/generate_appcast ../build/export -o ../appcast.xml --ed-key-file "$KEY_FILE"
           cat ../appcast.xml
+          echo "generated=true" >> "$GITHUB_OUTPUT"
 
       - name: Commit appcast
-        if: github.event_name != 'workflow_dispatch' || inputs.skip_appcast_push != true
+        if: steps.appcast.outputs.generated == 'true' && (github.event_name != 'workflow_dispatch' || inputs.skip_appcast_push != true)
         working-directory: ${{ github.workspace }}
         run: |
           git config user.name "github-actions[bot]"

@@ -126,6 +126,7 @@ git add App/MovieBox/Assets.xcassets/AppIcon.appiconset
 |---------|----------------|
 | CI `actool` nil-object crash on build | Forgot to export PNGs after editing `AppIcon.icon`, or re-added `AppIcon.icon` to the target’s Copy Bundle Resources |
 | “Update not found” | `appcast.xml` empty or installed build ≥ release |
+| CI “Private key not found in the Keychain” on `generate_appcast` | `sign_update` was given `--ed-key-file` but `generate_appcast` was not — both need the key in CI (no Keychain on runners) |
 | Signature error | `SUPublicEDKey` ≠ `SPARKLE_PRIVATE_KEY` pair |
 | Update downloads but won’t install | Dev ID mismatch; install from same CI build chain |
 | Gatekeeper blocks app | Expected without notarization — Open from Finder |
