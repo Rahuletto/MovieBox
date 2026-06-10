@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/banner.svg" width="800" alt="MovieBox" />
+  <img src="docs/images/banner.svg" width="400" alt="MovieBox" />
 </p>
 
 A native **macOS** app for browsing movies and TV, streaming from torrents, and managing downloads — with a **Cloudflare Worker** backend that proxies metadata, images, subtitles, and torrent indexers so the app never talks to those APIs directly.
