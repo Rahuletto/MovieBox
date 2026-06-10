@@ -16,6 +16,8 @@ public struct DownloadPersistenceSnapshot: Sendable {
     public let localFilePath: String?
     public let pieceBitmap: Data
     public let storageDirectory: String
+    public let selectedSubtitleID: String
+    public let localSubtitlePath: String?
 
     public init(
         taskId: UUID,
@@ -32,7 +34,9 @@ public struct DownloadPersistenceSnapshot: Sendable {
         downloadedBytes: Int64,
         localFilePath: String?,
         pieceBitmap: Data,
-        storageDirectory: String
+        storageDirectory: String,
+        selectedSubtitleID: String = "",
+        localSubtitlePath: String? = nil
     ) {
         self.taskId = taskId
         self.infoHash = infoHash
@@ -49,6 +53,8 @@ public struct DownloadPersistenceSnapshot: Sendable {
         self.localFilePath = localFilePath
         self.pieceBitmap = pieceBitmap
         self.storageDirectory = storageDirectory
+        self.selectedSubtitleID = selectedSubtitleID
+        self.localSubtitlePath = localSubtitlePath
     }
 }
 

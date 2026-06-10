@@ -91,9 +91,11 @@ function readTitleFields(detail: TMDBTitleDetail): {
     (typeof detail.title === 'string' ? detail.title : undefined) ??
     (typeof detail.name === 'string' ? detail.name : undefined)
   const year =
-    ((detail.release_date as string | undefined) ??
+    (
+      (detail.release_date as string | undefined) ??
       (detail.first_air_date as string | undefined) ??
-      '')
+      ''
+    )
       .toString()
       .slice(0, 4) || null
   return { extIds, title, year }

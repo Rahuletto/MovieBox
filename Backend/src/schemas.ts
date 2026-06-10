@@ -94,11 +94,7 @@ export const SubtitleDownloadQuerySchema = z.object({
 })
 
 export const TrailerResolveQuerySchema = z.object({
-  key: z
-    .string()
-    .trim()
-    .min(1, 'key is required')
-    .max(32, 'key is too long'),
+  key: z.string().trim().min(1, 'key is required').max(32, 'key is too long'),
 })
 
 export const ImageProxyQuerySchema = z.object({

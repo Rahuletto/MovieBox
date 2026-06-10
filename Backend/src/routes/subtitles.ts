@@ -18,7 +18,8 @@ export function registerSubtitleRoutes(app: Hono<AppEnv>): void {
         return c.json(
           {
             error: 'misconfigured',
-            message: 'SUBDL_API_KEY is not set on the Worker. Run: wrangler secret put SUBDL_API_KEY',
+            message:
+              'SUBDL_API_KEY is not set on the Worker. Run: wrangler secret put SUBDL_API_KEY',
           },
           503
         )
@@ -37,7 +38,8 @@ export function registerSubtitleRoutes(app: Hono<AppEnv>): void {
         return c.json(
           {
             error: 'subtitle_quota_exceeded',
-            message: 'Subtitle search quota reached. Cached results still work; try again in an hour.',
+            message:
+              'Subtitle search quota reached. Cached results still work; try again in an hour.',
             retryAfter: 3600,
           },
           429,

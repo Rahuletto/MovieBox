@@ -1,4 +1,3 @@
-
 import type { TorrentIndexer, TorrentSearchHit } from '../types'
 import { fetchJSON, magnetFor, normalizeImdb, resolveQualityLabel } from '../utils'
 
@@ -35,7 +34,10 @@ export const torrentioIndexer: TorrentIndexer = {
 
     let lastError: string | null = null
     for (const url of torrentioStreamURL(mediaPath, id)) {
-      const data = await fetchJSON<{ streams?: Array<{ title: string; infoHash: string }> }>(url, 'https://strem.io/')
+      const data = await fetchJSON<{ streams?: Array<{ title: string; infoHash: string }> }>(
+        url,
+        'https://strem.io/'
+      )
       if (data?.streams?.length) {
         return data.streams
           .filter((s) => s.infoHash)

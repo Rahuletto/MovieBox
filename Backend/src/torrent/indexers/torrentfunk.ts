@@ -1,5 +1,11 @@
 import type { TorrentIndexer, TorrentSearchHit } from '../types'
-import { decodeHtml, fetchHTML, hashFromMagnet, parseSizeBytes, resolveQualityLabel } from '../utils'
+import {
+  decodeHtml,
+  fetchHTML,
+  hashFromMagnet,
+  parseSizeBytes,
+  resolveQualityLabel,
+} from '../utils'
 
 function parseTorrentFunkRows(html: string): Array<{
   title: string
@@ -59,10 +65,7 @@ function parseTorrentFunkRows(html: string): Array<{
   return rows.slice(0, 30)
 }
 
-async function searchTorrentFunkHost(
-  base: string,
-  query: string
-): Promise<TorrentSearchHit[]> {
+async function searchTorrentFunkHost(base: string, query: string): Promise<TorrentSearchHit[]> {
   const slug = encodeURIComponent(query.trim()).replace(/%20/g, '+')
   const searchUrl = `${base}/search/${slug}/`
 
@@ -105,10 +108,7 @@ export const torrentFunkIndexer: TorrentIndexer = {
   },
 
   async search(ctx) {
-    const hosts = [
-      'https://www.torrentfunk.com',
-      'https://torrentfunk.org',
-    ]
+    const hosts = ['https://www.torrentfunk.com', 'https://torrentfunk.org']
 
     for (const base of hosts) {
       try {

@@ -96,8 +96,6 @@ public struct PlayerView<
             .ignoresSafeArea()
             .allowsHitTesting(false)
 
-            subtitleOverlay
-
             if showsBufferingIndicator {
                 playerBufferingIndicator
                     .transition(.opacity)
@@ -107,6 +105,7 @@ public struct PlayerView<
             // Beautiful, floating glassmorphic IINA top bar
             topHUD
                 .opacity(state.showsControls ? 1 : 0)
+                .allowsHitTesting(state.showsControls)
                 .animation(state.showsControls ? Self.hudShowAnimation : Self.hudHideAnimation, value: state.showsControls)
 
             centerPlaybackOverlay
@@ -115,6 +114,7 @@ public struct PlayerView<
             // Stunning, floating glassmorphic IINA control pod
             bottomHUD
                 .opacity(state.showsControls ? 1 : 0)
+                .allowsHitTesting(state.showsControls)
                 .animation(state.showsControls ? Self.hudShowAnimation : Self.hudHideAnimation, value: state.showsControls)
 
             if let errorMsg = state.errorMessage {
@@ -125,6 +125,12 @@ public struct PlayerView<
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay(alignment: .bottom) {
+            if !state.isPlaybackChromeHidden {
+                subtitleOverlay
+                    .zIndex(20)
+            }
+        }
         .overlay {
             if !state.isPlaybackChromeHidden {
             PlayerKeyboardCaptureView(
@@ -539,6 +545,7 @@ public struct PlayerView<
         }
         .scaleEffect(state.showsControls ? 1.0 : 0.9)
         .opacity(state.showsControls ? 1.0 : 0.0)
+        .allowsHitTesting(state.showsControls)
         .animation(.spring(response: 0.08, dampingFraction: 0.92), value: state.showsControls)
     }
 

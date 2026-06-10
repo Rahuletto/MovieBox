@@ -81,6 +81,9 @@ struct SettingsView: View {
         }
         do {
             try modelContext.save()
+            if let settings = settingsRows.first {
+                AppSettingsBackupStore.save(from: settings)
+            }
         } catch {
             NSLog("MovieBox Settings: failed to save — \(error.localizedDescription)")
         }

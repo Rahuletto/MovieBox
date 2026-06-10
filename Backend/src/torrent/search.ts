@@ -6,11 +6,7 @@ import { TORRENT_API_VERSION } from './types'
 
 export { TORRENT_API_VERSION } from './types'
 export { INDEXER_IDS } from './registry'
-export {
-  INDEXER_CATALOG,
-  DEFAULT_ENABLED_INDEXER_IDS,
-  parseEnabledIndexerIDs,
-} from './catalog'
+export { INDEXER_CATALOG, DEFAULT_ENABLED_INDEXER_IDS, parseEnabledIndexerIDs } from './catalog'
 export { parse1337xSearchRows } from './indexers/x1337'
 
 type RunIndexersResult = Awaited<ReturnType<typeof runIndexers>>
@@ -92,9 +88,7 @@ export async function searchAllTorrents(opts: {
   // Merge the results without cross-provider dedupe so duplicate releases still show
   // their original provider (YTS, Pirate Bay, 1337x, etc.).
   const allResults = [...mainRes.results, ...seasonRes.results]
-  const mergedResults = allResults.toSorted(
-    (a, b) => (b.seeders ?? 0) - (a.seeders ?? 0)
-  )
+  const mergedResults = allResults.toSorted((a, b) => (b.seeders ?? 0) - (a.seeders ?? 0))
 
   // Combine counts and errors
   const finalCounts = { ...mainRes.counts }

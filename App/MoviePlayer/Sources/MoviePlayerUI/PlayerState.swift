@@ -99,6 +99,8 @@ public final class PlayerState {
     public var onRefreshSubtitles: (@MainActor () async -> Void)?
     /// Downloads and loads the default English subtitle when enabling captions without a file yet.
     public var onEnsureSubtitleSelected: (@MainActor () async -> Void)?
+    /// Persists the user's subtitle choice (id, on-disk path if any) for resume.
+    public var onPersistSubtitleSelection: (@MainActor (String, URL?) -> Void)?
     /// Fired when AVPlayer exposes `.legible` subtitle tracks on the current item.
     public var onEmbeddedLegibleTracksDiscovered: (@MainActor ([EmbeddedLegibleTrack]) -> Void)?
     /// Refreshes the torrent export slice used for ffmpeg subtitle extraction while streaming.

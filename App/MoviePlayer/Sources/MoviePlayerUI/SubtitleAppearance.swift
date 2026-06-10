@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 public enum SubtitleAppearance: String, Sendable, CaseIterable {
@@ -70,30 +71,25 @@ public struct SubtitleOverlayView: View {
     }
 
     public var body: some View {
-        ZStack(alignment: .bottom) {
+        Group {
             if isVisible {
                 HStack {
                     Spacer(minLength: 48)
                     Group {
                         if !text.isEmpty {
                             styledText(text)
-                                .frame(maxWidth: 720)
-                                .fixedSize(horizontal: true, vertical: true)
                         } else if let loadProgress {
                             subtitleLoadingPill(loadProgress)
                         }
                     }
                     .id(subtitleIdentity)
                     .transition(.opacity)
-                    .allowsHitTesting(true)
                     Spacer(minLength: 48)
                 }
                 .padding(.bottom, subtitleBottomInset)
                 .transition(.opacity)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-        .allowsHitTesting(false)
         .animation(.easeOut(duration: 0.22), value: showsControls)
         .animation(.easeOut(duration: 0.18), value: isVisible)
         .animation(.easeOut(duration: 0.12), value: subtitleIdentity)
@@ -134,8 +130,8 @@ public struct SubtitleOverlayView: View {
         case .modern:
             FluidSubtitleLabel(
                 text: text,
-                font: .system(size: fontSize, weight: .semibold, design: .rounded),
-                foreground: .white,
+                font: subtitleRoundedFont(size: fontSize, weight: .semibold),
+                textColor: .white,
                 horizontalPadding: 14,
                 verticalPadding: 8,
                 cornerRadius: 10,
@@ -144,20 +140,21 @@ public struct SubtitleOverlayView: View {
             )
 
         case .largeWhite:
-            Text(text)
-                .font(.system(size: fontSize * 1.25, weight: .bold))
-                .foregroundStyle(.white)
-                .shadow(color: .black.opacity(0.9), radius: 6, y: 2)
-                .multilineTextAlignment(.center)
-                .lineSpacing(4)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: true, vertical: true)
+            SubtitleLookupText(
+                text: text,
+                font: .boldSystemFont(ofSize: fontSize * 1.25),
+                textColor: .white,
+                lineSpacing: 4,
+                maxWidth: 720
+            )
+            .fixedSize(horizontal: true, vertical: true)
+            .shadow(color: .black.opacity(0.9), radius: 6, y: 2)
 
         case .yellowBlack:
             FluidSubtitleLabel(
                 text: text,
-                font: .system(size: fontSize * 1.05, weight: .bold),
-                foreground: .yellow,
+                font: .boldSystemFont(ofSize: fontSize * 1.05),
+                textColor: .yellow,
                 horizontalPadding: 12,
                 verticalPadding: 6,
                 cornerRadius: 8,
@@ -166,14 +163,15 @@ public struct SubtitleOverlayView: View {
             )
 
         case .system:
-            Text(text)
-                .font(.system(size: fontSize * 1.05, weight: .medium))
-                .foregroundStyle(.white)
-                .shadow(color: .black.opacity(0.8), radius: 4, y: 2)
-                .multilineTextAlignment(.center)
-                .lineSpacing(4)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: true, vertical: true)
+            SubtitleLookupText(
+                text: text,
+                font: .systemFont(ofSize: fontSize * 1.05, weight: .medium),
+                textColor: .white,
+                lineSpacing: 4,
+                maxWidth: 720
+            )
+            .fixedSize(horizontal: true, vertical: true)
+            .shadow(color: .black.opacity(0.8), radius: 4, y: 2)
         }
     }
 }
@@ -182,8 +180,8 @@ public struct SubtitleOverlayView: View {
 
 private struct FluidSubtitleLabel: View {
     let text: String
-    let font: Font
-    let foreground: Color
+    let font: NSFont
+    let textColor: NSColor
     let horizontalPadding: CGFloat
     let verticalPadding: CGFloat
     let cornerRadius: CGFloat
@@ -209,15 +207,21 @@ private struct FluidSubtitleLabel: View {
     }
 
     private var captionText: some View {
-        Text(text)
-            .font(font)
-            .foregroundStyle(foreground)
-            .multilineTextAlignment(.center)
-            .lineSpacing(lineSpacing)
-            .textSelection(.enabled)
-            .frame(maxWidth: 720, alignment: .center)
-            .fixedSize(horizontal: true, vertical: true)
-            .padding(.horizontal, horizontalPadding)
-            .padding(.vertical, verticalPadding)
+        SubtitleLookupText(
+            text: text,
+            font: font,
+            textColor: textColor,
+            lineSpacing: lineSpacing,
+            maxWidth: 720
+        )
+        .fixedSize(horizontal: true, vertical: true)
+        .padding(.horizontal, horizontalPadding)
+        .padding(.vertical, verticalPadding)
     }
+}
+
+private func subtitleRoundedFont(size: CGFloat, weight: NSFont.Weight) -> NSFont {
+    let base = NSFont.systemFont(ofSize: size, weight: weight)
+    guard let descriptor = base.fontDescriptor.withDesign(.rounded) else { return base }
+    return NSFont(descriptor: descriptor, size: size) ?? base
 }

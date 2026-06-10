@@ -1,10 +1,6 @@
 import { fetchWithRetry } from '../fetch-retry'
 import { kvGet, kvPut } from '../kv-cache'
-import {
-  LogoRouteParamsSchema,
-  PersonRouteParamsSchema,
-  TitleRouteParamsSchema,
-} from '../schemas'
+import { LogoRouteParamsSchema, PersonRouteParamsSchema, TitleRouteParamsSchema } from '../schemas'
 import { enrichTitleBundle } from '../title-bundle'
 import {
   LOGO_TTL_HIT,
@@ -33,7 +29,10 @@ export function registerMetadataRoutes(app: Hono<AppEnv>): void {
         return c.json({ error: 'bad_request', message: 'id must be a numeric TMDB id' }, 400)
       }
       if (!c.env.FANART_API_KEY) {
-        return c.json({ error: 'service_unavailable', message: 'FANART_API_KEY not configured' }, 503)
+        return c.json(
+          { error: 'service_unavailable', message: 'FANART_API_KEY not configured' },
+          503
+        )
       }
 
       const cacheKey = `logo:${kind}:${id}`
@@ -65,9 +64,15 @@ export function registerMetadataRoutes(app: Hono<AppEnv>): void {
           }
           const title = tmdbTitle.title ?? tmdbTitle.name
           const year =
-            (tmdbTitle.release_date ?? tmdbTitle.first_air_date ?? '').toString().slice(0, 4) || null
+            (tmdbTitle.release_date ?? tmdbTitle.first_air_date ?? '').toString().slice(0, 4) ||
+            null
           if (title) {
-            const omdb = await fetchOmdbByTitle(c, title, year, kind === 'movie' ? 'movie' : 'series')
+            const omdb = await fetchOmdbByTitle(
+              c,
+              title,
+              year,
+              kind === 'movie' ? 'movie' : 'series'
+            )
             if (omdb?.Response === 'True' && omdb.imdbID) {
               imdbForFanart = omdb.imdbID
             }
@@ -221,7 +226,10 @@ export function registerMetadataRoutes(app: Hono<AppEnv>): void {
       const imdbId = c.req.param('imdbId')
       if (!imdbId) return c.json({ error: 'bad_request', message: 'Missing imdb_id' }, 400)
       if (!c.env.FANART_API_KEY) {
-        return c.json({ error: 'service_unavailable', message: 'FANART_API_KEY not configured' }, 503)
+        return c.json(
+          { error: 'service_unavailable', message: 'FANART_API_KEY not configured' },
+          503
+        )
       }
 
       const data = await fetchFanart(c, 'movies', imdbId)

@@ -1,4 +1,3 @@
-
 /** Retry transient Worker fetch failures (common in wrangler dev / workerd). */
 
 const DEFAULT_BACKOFF_MS = [150, 400, 900]

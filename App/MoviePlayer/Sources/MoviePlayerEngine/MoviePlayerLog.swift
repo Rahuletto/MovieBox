@@ -1,16 +1,23 @@
-import CoreStorage
 import Foundation
+import OSLog
 
-enum MoviePlayerLog {
+public enum MoviePlayerLog {
+    private static let logger = Logger(subsystem: "com.movieplayer", category: "engine")
+
+    public nonisolated(unsafe) static var onLog: (@Sendable (String, String) -> Void)?
+
     static func info(_ message: String) {
-        MovieBoxFileLogger.log(.info, category: "movieplayer", message)
+        logger.info("\(message, privacy: .public)")
+        onLog?("INFO", message)
     }
 
     static func warn(_ message: String) {
-        MovieBoxFileLogger.log(.warn, category: "movieplayer", message)
+        logger.warning("\(message, privacy: .public)")
+        onLog?("WARN", message)
     }
 
     static func error(_ message: String) {
-        MovieBoxFileLogger.log(.error, category: "movieplayer", message)
+        logger.error("\(message, privacy: .public)")
+        onLog?("ERROR", message)
     }
 }

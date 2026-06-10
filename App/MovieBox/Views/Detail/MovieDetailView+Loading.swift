@@ -38,6 +38,7 @@ extension MovieDetailView {
                             }
                         } else {
                             subtitleLoadHint = nil
+                            restoreSavedSubtitleSelection()
                         }
                     }
                 }

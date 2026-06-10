@@ -118,7 +118,7 @@ public enum SubtitlePlaybackSupport {
         catalog: [SubtitleInfo],
         searchContext: SubtitleSearchContext?,
         selectedSubtitleID: String? = nil,
-        autoSelectRemote: Bool = true
+        autoSelectRemote: Bool = true,
     ) {
         playerState.availableSubtitles = catalog.map(PlayerSubtitleOption.init(info:))
         playerState.selectedSubtitleID = selectedSubtitleID
@@ -359,6 +359,7 @@ public enum SubtitlePlaybackSupport {
         if option.usesAVPlayerLegible, let streamIndex = option.embeddedStreamIndex {
             playerState.selectEmbeddedLegibleTrack(at: streamIndex)
             playerState.setSubtitlesEnabled(true)
+            playerState.onPersistSubtitleSelection?(option.id, nil)
             return
         }
 
@@ -396,6 +397,7 @@ public enum SubtitlePlaybackSupport {
                 )
                 playerState.loadSubtitleStream(from: outputURL)
                 playerState.setSubtitlesEnabled(true)
+                playerState.onPersistSubtitleSelection?(option.id, outputURL)
             } catch {
                 await handleEmbeddedExtractFailure(
                     error: error,
@@ -431,6 +433,7 @@ public enum SubtitlePlaybackSupport {
             try data.write(to: fileURL)
             playerState.loadSubtitleStream(from: fileURL)
             playerState.setSubtitlesEnabled(true)
+            playerState.onPersistSubtitleSelection?(option.id, fileURL)
         } catch {
             NSLog("Subtitle download failed: \(error.localizedDescription)")
             playerState.setSubtitleLoadProgress(

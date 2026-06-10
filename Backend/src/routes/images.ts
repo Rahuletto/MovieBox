@@ -18,7 +18,8 @@ export function registerImageRoutes(app: Hono<AppEnv>): void {
   })
 
   app.use('/img', async (c, next) => {
-    const clientIp = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || 'unknown'
+    const clientIp =
+      c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || 'unknown'
     const cacheKey = `img_rate:${clientIp}:${Math.floor(Date.now() / IMG_RATE_WINDOW_MS)}`
     const { allowed } = await consumeKvRateLimit(c.env.MOVIEBOX_CACHE, cacheKey, IMG_RATE_MAX, 60)
     if (!allowed) {

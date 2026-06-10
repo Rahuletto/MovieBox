@@ -72,7 +72,9 @@ export async function fetchExternalIds(
     headers: { Authorization: `Bearer ${c.env.TMDB_TOKEN}` },
   })
   if (response.status === 404) {
-    await kvPut(c.env.MOVIEBOX_CACHE, cacheKey, JSON.stringify({}), { expirationTtl: LOGO_TTL_MISS })
+    await kvPut(c.env.MOVIEBOX_CACHE, cacheKey, JSON.stringify({}), {
+      expirationTtl: LOGO_TTL_MISS,
+    })
     return {}
   }
   if (!response.ok) return null
@@ -171,7 +173,9 @@ export async function fetchFanart(
   const url = `https://webservice.fanart.tv/v3/${kind}/${externalId}?api_key=${c.env.FANART_API_KEY}`
   const response = await fetch(url)
   if (response.status === 404) {
-    await kvPut(c.env.MOVIEBOX_CACHE, cacheKey, JSON.stringify({}), { expirationTtl: LOGO_TTL_MISS })
+    await kvPut(c.env.MOVIEBOX_CACHE, cacheKey, JSON.stringify({}), {
+      expirationTtl: LOGO_TTL_MISS,
+    })
     return {}
   }
   if (!response.ok) return null

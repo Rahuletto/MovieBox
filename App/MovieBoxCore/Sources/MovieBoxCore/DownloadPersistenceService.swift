@@ -1,3 +1,4 @@
+import CoreMetadata
 import CoreStorage
 import CoreStreaming
 import Foundation
@@ -107,6 +108,7 @@ public final class DownloadPersistenceService: DownloadPersistenceDelegate {
         var activeHashes = Set(
             downloadManager.tasks.compactMap { $0.infoHash?.lowercased() }
         )
+        recoverCompletedExports(into: downloadManager, activeHashes: &activeHashes)
 
         for root in roots {
             let key = root.standardizedFileURL.path
@@ -204,6 +206,103 @@ public final class DownloadPersistenceService: DownloadPersistenceDelegate {
         modelContext.saveOrReport(errorCenter, context: "Recovered downloads from disk")
     }
 
+    /// Re-imports finished `.mp4`/`.mkv` files when SwiftData rows were wiped but `~/Movies/MovieBox/<Title>/` remains.
+    private func recoverCompletedExports(
+        into downloadManager: DownloadManager,
+        activeHashes: inout Set<String>
+    ) {
+        let roots = [
+            downloadManager.downloadRootDirectory,
+            DownloadStorage.defaultRootDirectory(),
+            DownloadStorage.sandboxDownloadsRootDirectory(),
+        ]
+        var seenPaths = Set<String>()
+
+        for root in roots {
+            for export in DownloadDiskRecovery.scanCompletedExports(root: root) {
+                guard seenPaths.insert(export.localFilePath).inserted else { continue }
+
+                let hash = resolvedInfoHash(for: export) ?? export.infoHash
+                guard activeHashes.insert(hash).inserted else { continue }
+                guard !DownloadStorage.isDownloadCancelled(infoHash: hash) else { continue }
+
+                let movie = movieRecord(matchingTitle: export.title)
+                let record: DownloadRecord
+                if let existing = fetchDownloadRecord(infoHash: hash) {
+                    record = existing
+                } else {
+                    record = DownloadRecord(
+                        infoHash: hash,
+                        tmdbId: movie?.tmdbId ?? 0,
+                        mediaKind: movie?.mediaKind ?? "movie",
+                        title: export.title,
+                        magnetURI: "",
+                        quality: "1080p",
+                        hdrType: nil,
+                        localFilePath: export.localFilePath,
+                        storageDirectory: export.storageDirectory.path,
+                        state: .completed,
+                        progressFraction: 1,
+                        totalBytes: export.totalBytes,
+                        downloadedBytes: export.totalBytes
+                    )
+                    modelContext.insert(record)
+                }
+
+                record.storageDirectory = export.storageDirectory.path
+                record.localFilePath = export.localFilePath
+                record.state = DownloadState.completed.rawValue
+                record.progressFraction = 1
+                record.totalBytes = max(record.totalBytes, export.totalBytes)
+                record.downloadedBytes = max(record.downloadedBytes, export.totalBytes)
+                if record.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    record.title = export.title
+                }
+                if record.tmdbId == 0, let movie {
+                    record.tmdbId = movie.tmdbId
+                    record.mediaKind = movie.mediaKind
+                }
+
+                downloadManager.restoreTask(
+                    id: stableTaskID(infoHash: hash),
+                    tmdbId: record.tmdbId,
+                    mediaKind: record.mediaKind,
+                    title: record.title,
+                    magnetURI: record.magnetURI,
+                    quality: record.quality,
+                    hdrType: record.hdrType,
+                    infoHash: hash,
+                    state: .completed,
+                    progress: 1,
+                    totalBytes: record.totalBytes,
+                    downloadedBytes: record.downloadedBytes,
+                    localFilePath: export.localFilePath,
+                    storageDirectory: export.storageDirectory,
+                    pieceBitmap: nil
+                )
+            }
+        }
+    }
+
+    private func resolvedInfoHash(for export: RecoveredCompletedExport) -> String? {
+        if let movie = movieRecord(matchingTitle: export.title),
+           let hash = movie.lastStreamInfoHash?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !hash.isEmpty {
+            return hash.lowercased()
+        }
+        return nil
+    }
+
+    private func movieRecord(matchingTitle title: String) -> MovieRecord? {
+        let needle = title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return nil }
+        let descriptor = FetchDescriptor<MovieRecord>()
+        guard let records = try? modelContext.fetch(descriptor) else { return nil }
+        return records.first { record in
+            record.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == needle
+        }
+    }
+
     private func fetchDownloadRecord(infoHash: String) -> DownloadRecord? {
         let normalized = infoHash.lowercased()
         let descriptor = FetchDescriptor<DownloadRecord>(
@@ -226,6 +325,7 @@ public final class DownloadPersistenceService: DownloadPersistenceDelegate {
             predicate: #Predicate<DownloadRecord> { $0.infoHash == infoHash }
         )
         let existing = try? modelContext.fetch(descriptor).first
+        let priorState = existing?.state
 
         if let existing {
             existing.tmdbId = snapshot.tmdbId
@@ -241,6 +341,12 @@ public final class DownloadPersistenceService: DownloadPersistenceDelegate {
             existing.totalBytes = snapshot.totalBytes
             existing.downloadedBytes = snapshot.downloadedBytes
             existing.pieceBitmap = snapshot.pieceBitmap
+            if !snapshot.selectedSubtitleID.isEmpty {
+                existing.selectedSubtitleID = snapshot.selectedSubtitleID
+            }
+            if let path = snapshot.localSubtitlePath {
+                existing.localSubtitlePath = path
+            }
         } else {
             let record = DownloadRecord(
                 infoHash: snapshot.infoHash,
@@ -256,11 +362,105 @@ public final class DownloadPersistenceService: DownloadPersistenceDelegate {
                 progressFraction: snapshot.progress,
                 totalBytes: snapshot.totalBytes,
                 downloadedBytes: snapshot.downloadedBytes,
-                pieceBitmap: snapshot.pieceBitmap
+                pieceBitmap: snapshot.pieceBitmap,
+                selectedSubtitleID: snapshot.selectedSubtitleID,
+                localSubtitlePath: snapshot.localSubtitlePath
             )
             modelContext.insert(record)
         }
         modelContext.saveOrReport(errorCenter, context: "Download sync")
+
+        if snapshot.state == DownloadState.completed.rawValue,
+           priorState != DownloadState.completed.rawValue {
+            Task { await downloadSubtitleBesideCompletedMedia(snapshot: snapshot) }
+        }
+    }
+
+    private func downloadSubtitleBesideCompletedMedia(snapshot: DownloadPersistenceSnapshot) async {
+        guard snapshot.tmdbId > 0 else { return }
+        if let path = snapshot.localSubtitlePath,
+           !path.isEmpty,
+           FileManager.default.fileExists(atPath: path) {
+            return
+        }
+
+        let storageDir = URL(fileURLWithPath: snapshot.storageDirectory, isDirectory: true)
+        guard FileManager.default.fileExists(atPath: storageDir.path) else { return }
+
+        guard let settings = try? modelContext.fetch(FetchDescriptor<AppSettings>()).first,
+              let mode = settings.subtitleServiceMode
+        else { return }
+
+        let kind = MediaKind(storageValue: snapshot.mediaKind) ?? .movie
+        let movieRecord = fetchMovieRecord(tmdbId: snapshot.tmdbId)
+        let scope = subtitleScope(for: kind, movieRecord: movieRecord)
+        let downloadRecord = fetchDownloadRecord(infoHash: snapshot.infoHash)
+
+        do {
+            let metadata = MetadataClient(mode: mode)
+            let detail = try await metadata.movieDetail(id: snapshot.tmdbId, kind: kind)
+            let subtitleClient = SubtitleClient(mode: mode)
+            let season = kind == .tv ? (scope.season > 0 ? scope.season : nil) : nil
+            let episode = kind == .tv ? (scope.episode > 0 ? scope.episode : nil) : nil
+            let results = try await subtitleClient.searchSubtitles(
+                title: detail.movie.title,
+                year: Int(detail.movie.releaseDate.prefix(4)),
+                language: "all",
+                type: kind == .tv ? "tv" : "movie",
+                imdbId: detail.imdbId,
+                tmdbId: snapshot.tmdbId,
+                seasonNumber: season,
+                episodeNumber: episode
+            )
+            guard !results.isEmpty else { return }
+
+            let subtitle: SubtitleInfo
+            if let movieRecord,
+               let saved = SubtitlePreferenceStore.savedPreference(record: movieRecord, scope: scope),
+               let match = results.first(where: { $0.id == saved.id }) {
+                subtitle = match
+            } else {
+                subtitle = results[0]
+            }
+
+            _ = await SubtitlePreferenceStore.attachSubtitleToDownload(
+                subtitle: subtitle,
+                mode: mode,
+                storageDirectory: storageDir,
+                mediaFilePath: snapshot.localFilePath,
+                tmdbId: snapshot.tmdbId,
+                scope: scope,
+                downloadRecord: downloadRecord,
+                movieRecord: movieRecord,
+                modelContext: modelContext
+            )
+        } catch {
+            NSLog("Subtitle download beside completed media failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func fetchMovieRecord(tmdbId: Int) -> MovieRecord? {
+        let descriptor = FetchDescriptor<MovieRecord>(
+            predicate: #Predicate<MovieRecord> { $0.tmdbId == tmdbId }
+        )
+        return try? modelContext.fetch(descriptor).first
+    }
+
+    private func subtitleScope(for kind: MediaKind, movieRecord: MovieRecord?) -> SubtitlePreferenceStore.Scope {
+        guard kind == .tv, let movieRecord else { return .movie() }
+        if movieRecord.lastSubtitleSeason > 0, movieRecord.lastSubtitleEpisode > 0 {
+            return .tv(
+                season: movieRecord.lastSubtitleSeason,
+                episode: movieRecord.lastSubtitleEpisode
+            )
+        }
+        if movieRecord.lastWatchedSeason > 0, movieRecord.lastWatchedEpisode > 0 {
+            return .tv(
+                season: movieRecord.lastWatchedSeason,
+                episode: movieRecord.lastWatchedEpisode
+            )
+        }
+        return .movie()
     }
 
     public func downloadManager(_ manager: DownloadManager, didRemove infoHash: String) {

@@ -1,6 +1,12 @@
-
 import type { TorrentIndexer, TorrentSearchHit } from '../types'
-import { decodeHtml, fetchHTML, hashFromMagnet, parseSizeBytes, resolveQualityLabel, searchWithQueryVariants } from '../utils'
+import {
+  decodeHtml,
+  fetchHTML,
+  hashFromMagnet,
+  parseSizeBytes,
+  resolveQualityLabel,
+  searchWithQueryVariants,
+} from '../utils'
 
 function parseTorrentDownloadRows(html: string): Array<{
   title: string
@@ -58,10 +64,7 @@ function parseTorrentDownloadRows(html: string): Array<{
   return rows.slice(0, 30)
 }
 
-async function searchTorrentDownloadHost(
-  base: string,
-  query: string
-): Promise<TorrentSearchHit[]> {
+async function searchTorrentDownloadHost(base: string, query: string): Promise<TorrentSearchHit[]> {
   const slug = encodeURIComponent(query.trim())
   const searchUrl = `${base}/search.php?q=${slug}`
 
@@ -104,10 +107,7 @@ export const torrentDownloadIndexer: TorrentIndexer = {
   },
 
   async search(ctx) {
-    const hosts = [
-      'https://www.torrentdownloaddb.info',
-      'https://torrentdownloaddb.info',
-    ]
+    const hosts = ['https://www.torrentdownloaddb.info', 'https://torrentdownloaddb.info']
 
     return searchWithQueryVariants(ctx.query, ctx.year, async (query) => {
       for (const base of hosts) {

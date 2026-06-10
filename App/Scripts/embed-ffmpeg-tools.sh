@@ -18,9 +18,9 @@ mkdir -p "${CACHE_DIR}" "${DEST}"
 
 binary_arch() {
   local bin="$1"
-  if file "$bin" | grep -q 'arm64'; then
+  if file -b "$bin" | grep -q 'arm64'; then
     echo arm64
-  elif file "$bin" | grep -q 'x86_64'; then
+  elif file -b "$bin" | grep -q 'x86_64'; then
     echo x86_64
   else
     echo unknown
@@ -63,8 +63,8 @@ fetch_tool() {
   fi
 }
 
-fetch_tool ffmpeg "https://evermeet.cx/ffmpeg/get/zip"
-fetch_tool ffprobe "https://evermeet.cx/ffmpeg/get/ffprobe/zip"
+fetch_tool ffmpeg "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/snapshot/ffmpeg.zip"
+fetch_tool ffprobe "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/snapshot/ffprobe.zip"
 
 if ! "${CACHE_DIR}/ffmpeg" -hide_banner -h muxer=hls 2>&1 | grep -q "Apple HTTP Live Streaming"; then
   echo "error: embedded ffmpeg is missing the HLS muxer" >&2

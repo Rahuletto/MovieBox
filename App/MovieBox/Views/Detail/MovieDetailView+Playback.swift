@@ -170,8 +170,14 @@ extension MovieDetailView {
         )
 
         Task {
-            if subtitleFileURL == nil, let preferred = subtitles.first {
-                await downloadSubtitleAsync(preferred)
+            await MainActor.run { restoreSavedSubtitleSelection() }
+
+            if subtitleFileURL == nil {
+                if let saved = subtitleToDownloadWithMedia() {
+                    await downloadSubtitleAsync(saved)
+                } else if let preferred = subtitles.first {
+                    await downloadSubtitleAsync(preferred)
+                }
             }
 
             let playback = PlaybackSettings.from(settings.first)
@@ -227,6 +233,20 @@ extension MovieDetailView {
                 "Play — \(hasContinue ? "resume" : "fresh") \(playSource) \"\(chosen.title)\" seeders=\(chosen.seeders) quality=\(chosen.quality.rawValue)"
             )
 
+            if let localPath = appServices.resolvedCompletedMediaPath(
+                for: chosen,
+                downloadRecords: downloads
+            ) {
+                let mediaURL = URL(fileURLWithPath: localPath)
+                await downloadSubtitleForStorageDirectory(
+                    mediaURL.deletingLastPathComponent(),
+                    mediaPath: localPath,
+                    infoHash: chosen.resolvedInfoHash
+                )
+            }
+
+            playerState.onPersistSubtitleSelection = makeSubtitlePersistHandler()
+
             let request = PersistentPlaybackStartRequest(
                 mode: .single(chosen),
                 movieId: movieId,
@@ -236,7 +256,13 @@ extension MovieDetailView {
                 title: detail?.movie.title ?? "Playing",
                 episodeTitle: episodeTitle,
                 displayTitle: detail?.movie.title,
-                subtitleURL: subtitleFileURL,
+                subtitleURL: resolvedSubtitleForPlayback(
+                    mediaPath: appServices.resolvedCompletedMediaPath(
+                        for: chosen,
+                        downloadRecords: downloads
+                    ),
+                    infoHash: chosen.resolvedInfoHash
+                ),
                 subtitleCatalog: subtitles,
                 selectedSubtitleID: selectedSubtitle?.id,
                 subtitleSearchContext: subtitleSearchContext,

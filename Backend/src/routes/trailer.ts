@@ -13,7 +13,10 @@ export function registerTrailerRoutes(app: Hono<AppEnv>): void {
       const streamURL = await resolveTrailerStreamURL(trailer.key)
       if (!streamURL) {
         return c.json(
-          { error: 'trailer_unavailable', message: 'No playable stream found for this trailer key.' },
+          {
+            error: 'trailer_unavailable',
+            message: 'No playable stream found for this trailer key.',
+          },
           404
         )
       }

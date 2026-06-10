@@ -1,5 +1,11 @@
 import type { TorrentIndexer, TorrentSearchHit } from '../types'
-import { decodeHtml, fetchHTML, hashFromMagnet, parseSizeBytes, resolveQualityLabel } from '../utils'
+import {
+  decodeHtml,
+  fetchHTML,
+  hashFromMagnet,
+  parseSizeBytes,
+  resolveQualityLabel,
+} from '../utils'
 
 function parseIsohuntRows(html: string): Array<{
   title: string
@@ -24,7 +30,8 @@ function parseIsohuntRows(html: string): Array<{
     const item = match[1]
 
     // Extract title
-    const titleMatch = item.match(/<a[^>]*href="[^"]*"[^>]*>([^<]+)<\/a>/i) ||
+    const titleMatch =
+      item.match(/<a[^>]*href="[^"]*"[^>]*>([^<]+)<\/a>/i) ||
       item.match(/<span[^>]*class="[^"]*title[^"]*"[^>]*>([^<]+)<\/span>/i)
     if (!titleMatch) continue
 
@@ -51,10 +58,7 @@ function parseIsohuntRows(html: string): Array<{
   return rows.slice(0, 30)
 }
 
-async function searchIsohuntHost(
-  base: string,
-  query: string
-): Promise<TorrentSearchHit[]> {
+async function searchIsohuntHost(base: string, query: string): Promise<TorrentSearchHit[]> {
   const slug = encodeURIComponent(query.trim())
   const searchUrl = `${base}/search/?q=${slug}`
 
@@ -97,10 +101,7 @@ export const isohuntIndexer: TorrentIndexer = {
   },
 
   async search(ctx) {
-    const hosts = [
-      'https://isohunt.to',
-      'https://isohunt.app',
-    ]
+    const hosts = ['https://isohunt.to', 'https://isohunt.app']
 
     for (const base of hosts) {
       try {

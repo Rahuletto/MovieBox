@@ -1,8 +1,4 @@
-import {
-  DEFAULT_ENABLED_INDEXER_IDS,
-  INDEXER_CATALOG,
-  TORRENT_API_VERSION,
-} from '../torrent'
+import { DEFAULT_ENABLED_INDEXER_IDS, INDEXER_CATALOG, TORRENT_API_VERSION } from '../torrent'
 import { kvDelete, kvGet, kvList, kvPut } from '../kv-cache'
 import type { AppEnv } from '../types'
 import type { Hono } from 'hono'

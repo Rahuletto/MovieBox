@@ -80,7 +80,9 @@ async function main() {
   }
 
   const dev = loadDevVars()
-  const base = (process.env.MOVIEBOX_WORKER_URL ?? 'https://moviebox-backend.rahulmarban.workers.dev').replace(/\/+$/, '')
+  const base = (
+    process.env.MOVIEBOX_WORKER_URL ?? 'https://moviebox-backend.rahulmarban.workers.dev'
+  ).replace(/\/+$/, '')
   const token = process.env.APP_SECRET ?? dev.APP_SECRET
   if (!token) {
     console.error('Missing APP_SECRET (env or Backend/.dev.vars).')

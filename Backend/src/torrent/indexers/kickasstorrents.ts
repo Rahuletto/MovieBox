@@ -1,5 +1,11 @@
 import type { TorrentIndexer, TorrentSearchHit } from '../types'
-import { decodeHtml, fetchHTML, hashFromMagnet, parseSizeBytes, resolveQualityLabel } from '../utils'
+import {
+  decodeHtml,
+  fetchHTML,
+  hashFromMagnet,
+  parseSizeBytes,
+  resolveQualityLabel,
+} from '../utils'
 
 function parseKATRows(html: string): Array<{
   title: string
@@ -59,10 +65,7 @@ function parseKATRows(html: string): Array<{
   return rows.slice(0, 25)
 }
 
-async function searchKATHost(
-  base: string,
-  query: string
-): Promise<TorrentSearchHit[]> {
+async function searchKATHost(base: string, query: string): Promise<TorrentSearchHit[]> {
   const slug = encodeURIComponent(query.trim()).replace(/%20/g, '+')
   const searchUrl = `${base}/search/${slug}/`
 

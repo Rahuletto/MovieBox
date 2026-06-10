@@ -25,6 +25,7 @@ let package = Package(
                 "CoreStorage",
                 "CoreStreaming",
                 .product(name: "MoviePlayerKit", package: "MoviePlayer"),
+                .product(name: "MoviePlayerEngine", package: "MoviePlayer"),
             ]
         ),
     ],

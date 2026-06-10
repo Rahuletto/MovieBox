@@ -1,6 +1,12 @@
-
 import type { TorrentIndexer, TorrentSearchHit } from '../types'
-import { decodeHtml, fetchHTML, hashFromMagnet, parseSizeBytes, resolveQualityLabel, searchWithQueryVariants } from '../utils'
+import {
+  decodeHtml,
+  fetchHTML,
+  hashFromMagnet,
+  parseSizeBytes,
+  resolveQualityLabel,
+  searchWithQueryVariants,
+} from '../utils'
 
 function parseBitsearchRows(html: string): Array<{
   title: string
@@ -32,7 +38,8 @@ function parseBitsearchRows(html: string): Array<{
     if (!magnetMatch) continue
 
     // Extract seeders/leechers (usually shown as "1234 seeders, 567 leechers")
-    const statsMatch = item.match(/(\d+)\s+seeders?[\s,]+(\d+)\s+leechers?/i) ||
+    const statsMatch =
+      item.match(/(\d+)\s+seeders?[\s,]+(\d+)\s+leechers?/i) ||
       item.match(/seeders?[:\s]+(\d+)[\s\S]*?leechers?[:\s]+(\d+)/i)
 
     // Extract size
@@ -50,10 +57,7 @@ function parseBitsearchRows(html: string): Array<{
   return rows.slice(0, 30)
 }
 
-async function searchBitsearchHost(
-  base: string,
-  query: string
-): Promise<TorrentSearchHit[]> {
+async function searchBitsearchHost(base: string, query: string): Promise<TorrentSearchHit[]> {
   const slug = encodeURIComponent(query.trim())
   const searchUrl = `${base}/search?q=${slug}&sort=seeders`
 
@@ -96,10 +100,7 @@ export const bitsearchIndexer: TorrentIndexer = {
   },
 
   async search(ctx) {
-    const hosts = [
-      'https://bitsearch.to',
-      'https://www.bitsearch.to',
-    ]
+    const hosts = ['https://bitsearch.to', 'https://www.bitsearch.to']
 
     return searchWithQueryVariants(ctx.query, ctx.year, async (query) => {
       for (const base of hosts) {

@@ -24,6 +24,8 @@ struct TorrentSection: View {
     var isLoading: Bool = false
     let isTV: Bool
     var episodeLabel: String? = nil
+    var tvSeason: Int? = nil
+    var tvEpisode: Int? = nil
     let subtitleURL: URL?
     var subtitleCatalog: [SubtitleInfo] = []
     var selectedSubtitleID: String? = nil
@@ -429,6 +431,8 @@ struct TorrentSection: View {
             return
         }
 
+        playerState.onPersistSubtitleSelection = makeSubtitlePersistHandler()
+
         WatchProgressStore.ensureRecord(
             movie: movie,
             kind: isTV ? .tv : .movie,
@@ -445,6 +449,10 @@ struct TorrentSection: View {
             posterPath: movie.posterPath,
             backdropPath: movie.backdropPath
         )
+        let resolvedSubtitle = resolvedSubtitleURL(
+            localPath: appServices.resolvedCompletedMediaPath(for: torrent, downloadRecords: downloads),
+            torrent: torrent
+        )
         let persistentRequest = PersistentPlaybackStartRequest(
             mode: .single(torrent),
             movieId: movie.id,
@@ -454,7 +462,7 @@ struct TorrentSection: View {
             title: movie.title,
             episodeTitle: episodeLabel,
             displayTitle: movie.title,
-            subtitleURL: subtitleURL,
+            subtitleURL: resolvedSubtitle,
             subtitleCatalog: subtitleCatalog,
             selectedSubtitleID: selectedSubtitleID,
             subtitleSearchContext: subtitleSearchContext,
@@ -502,13 +510,16 @@ struct TorrentSection: View {
             backdropPath: movie.backdropPath
         )
 
+        playerState.onPersistSubtitleSelection = makeSubtitlePersistHandler()
+
+        let resolvedSubtitle = resolvedSubtitleURL(localPath: localPath, torrent: torrent)
         appServices.playbackCoordinator.playLocalFile(
             localFilePath: localPath,
             torrent: torrent,
             allTorrents: torrents,
             playerState: playerState,
             movieId: movie.id,
-            subtitleURL: subtitleURL,
+            subtitleURL: resolvedSubtitle,
             subtitleAppearance: playback.appearance,
             subtitleFontSize: playback.fontSize,
             episodeTitle: episodeLabel,
@@ -525,9 +536,9 @@ struct TorrentSection: View {
                 searchContext: context,
                 selectedSubtitleID: selectedSubtitleID,
                 localMediaPath: localPath,
-                autoSelectRemote: subtitleURL == nil
+                autoSelectRemote: resolvedSubtitle == nil
             )
-        } else if subtitleURL != nil {
+        } else if resolvedSubtitle != nil {
             SubtitlePlaybackSupport.attachToPlayback(
                 playerState: playerState,
                 catalog: subtitleCatalog,
@@ -612,6 +623,7 @@ struct TorrentSection: View {
                 }
                 return
             case .completed:
+                await downloadSubtitleBesideCompletedTask(taskId: taskId, torrentID: torrentID)
                 await MainActor.run {
                     downloadTaskByTorrentID.removeValue(forKey: torrentID)
                     rebuildVisibleCardModels()
@@ -642,6 +654,94 @@ struct TorrentSection: View {
         errorDismissTasks[id]?.cancel()
         errorDismissTasks.removeValue(forKey: id)
         cardErrors.removeValue(forKey: id)
+    }
+
+    private var subtitlePreferenceScope: SubtitlePreferenceStore.Scope {
+        SubtitlePreferenceStore.scope(
+            mediaKind: isTV ? .tv : .movie,
+            season: tvSeason,
+            episode: tvEpisode
+        )
+    }
+
+    private func makeSubtitlePersistHandler() -> @MainActor (String, URL?) -> Void {
+        { id, url in
+            SubtitlePreferenceStore.savePreference(
+                tmdbId: movie.id,
+                subtitleID: id,
+                filePath: url?.path,
+                scope: subtitlePreferenceScope,
+                in: modelContext,
+                records: storedMovies
+            )
+        }
+    }
+
+    private func resolvedSubtitleURL(localPath: String?, torrent: TorrentResult) -> URL? {
+        let downloadRecord = torrent.resolvedInfoHash.flatMap { hash in
+            downloads.first { $0.infoHash.lowercased() == hash.lowercased() }
+        }
+        let movieRecord = storedMovies.first { $0.tmdbId == movie.id }
+        if let localPath, !localPath.isEmpty {
+            return SubtitlePreferenceStore.resolvePlaybackSubtitleURL(
+                nearMediaFile: localPath,
+                movieRecord: movieRecord,
+                downloadRecord: downloadRecord,
+                scope: subtitlePreferenceScope
+            )
+        }
+        if let movieRecord,
+           let saved = SubtitlePreferenceStore.savedPreference(
+               record: movieRecord,
+               scope: subtitlePreferenceScope
+           ),
+           let path = saved.path {
+            return URL(fileURLWithPath: path)
+        }
+        return subtitleURL
+    }
+
+    private func subtitleToDownloadWithMedia() -> SubtitleInfo? {
+        if let id = selectedSubtitleID,
+           let match = subtitleCatalog.first(where: { $0.id == id }) {
+            return match
+        }
+        if let record = storedMovies.first(where: { $0.tmdbId == movie.id }),
+           let saved = SubtitlePreferenceStore.savedPreference(
+               record: record,
+               scope: subtitlePreferenceScope
+           ),
+           let match = subtitleCatalog.first(where: { $0.id == saved.id }) {
+            return match
+        }
+        return subtitleCatalog.first
+    }
+
+    private func downloadSubtitleBesideCompletedTask(taskId: UUID, torrentID: UUID) async {
+        guard let task = downloadManager.tasks.first(where: { $0.id == taskId }),
+              let storageDir = task.storageDirectory,
+              let mode = settings.first?.subtitleServiceMode,
+              let subtitle = subtitleToDownloadWithMedia()
+        else { return }
+
+        let torrent = torrents.first { $0.id == torrentID }
+        let infoHash = torrent?.resolvedInfoHash
+        let downloadRecord = infoHash.flatMap { hash in
+            downloads.first { $0.infoHash.lowercased() == hash.lowercased() }
+        }
+        let movieRecord = storedMovies.first { $0.tmdbId == movie.id }
+
+        _ = await SubtitlePreferenceStore.attachSubtitleToDownload(
+            subtitle: subtitle,
+            mode: mode,
+            storageDirectory: storageDir,
+            mediaFilePath: task.outputPath,
+            tmdbId: movie.id,
+            scope: subtitlePreferenceScope,
+            downloadRecord: downloadRecord,
+            movieRecord: movieRecord,
+            modelContext: modelContext
+        )
     }
 
     private func copyError(for id: UUID) {

@@ -124,6 +124,8 @@ struct MovieDetailContentView: View {
                                 episode: episode.episodeNumber,
                                 name: episode.name
                             ),
+                            tvSeason: episode.seasonNumber,
+                            tvEpisode: episode.episodeNumber,
                             subtitleURL: subtitleFileURL,
                             subtitleCatalog: subtitles,
                             selectedSubtitleID: selectedSubtitle?.id,

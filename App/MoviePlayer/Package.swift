@@ -10,9 +10,7 @@ let package = Package(
         .library(name: "MoviePlayerKit", targets: ["MoviePlayerKit"]),
         .library(name: "MoviePlayer", targets: ["MoviePlayerKit"]),
     ],
-    dependencies: [
-        .package(path: "../CoreStorage"),
-    ],
+    dependencies: [],
     targets: [
         .target(
             name: "MoviePlayerUI",
@@ -24,7 +22,7 @@ let package = Package(
         ),
         .target(
             name: "MoviePlayerEngine",
-            dependencies: ["CoreStorage"]
+            dependencies: []
         ),
         .target(
             name: "MoviePlayerKit",

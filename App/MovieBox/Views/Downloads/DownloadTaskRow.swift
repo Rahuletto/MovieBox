@@ -36,6 +36,7 @@ struct DownloadTaskRow: View {
     @Environment(PlayerState.self) private var playerState
     @Environment(\.modelContext) private var modelContext
     @Query private var movieRecords: [MovieRecord]
+    @Query private var downloadRecords: [DownloadRecord]
     @Query private var settings: [AppSettings]
     @State private var bannerArtworkURL: URL?
     @State private var canPlayWhileDownloading = false
@@ -988,6 +989,11 @@ struct DownloadTaskRow: View {
                 }
             }
 
+            let mediaPath = task.outputPath
+            let resolvedSubtitle = resolvedSubtitleURL(for: task, mediaPath: mediaPath)
+            let selectedID = resolvedSelectedSubtitleID(for: task, mediaPath: mediaPath)
+            playerState.onPersistSubtitleSelection = makeSubtitlePersistHandler(for: task)
+
             do {
                 try await appServices.playInProgressDownload(
                     task: task,
@@ -995,7 +1001,7 @@ struct DownloadTaskRow: View {
                     allTorrents: [torrent],
                     playerState: playerState,
                     movieId: task.tmdbId,
-                    subtitleURL: nil,
+                    subtitleURL: resolvedSubtitle,
                     subtitleAppearance: playback.appearance,
                     subtitleFontSize: playback.fontSize,
                     displayTitle: displayTitle,
@@ -1006,8 +1012,9 @@ struct DownloadTaskRow: View {
                     playerState: playerState,
                     catalog: subtitleCatalog,
                     searchContext: subtitleSearchContext,
-                    localMediaPath: nil,
-                    autoSelectRemote: subtitleSearchContext != nil
+                    selectedSubtitleID: selectedID,
+                    localMediaPath: mediaPath,
+                    autoSelectRemote: resolvedSubtitle == nil && subtitleSearchContext != nil
                 )
             } catch {
                 playerState.errorMessage = (error as? LocalizedError)?.errorDescription
@@ -1045,13 +1052,17 @@ struct DownloadTaskRow: View {
                 await appServices.prepareForLocalFilePlayback()
             }
 
+            let resolvedSubtitle = resolvedSubtitleURL(for: task, mediaPath: path)
+            let selectedID = resolvedSelectedSubtitleID(for: task, mediaPath: path)
+            playerState.onPersistSubtitleSelection = makeSubtitlePersistHandler(for: task)
+
             appServices.playbackCoordinator.playLocalFile(
                 localFilePath: path,
                 torrent: torrent,
                 allTorrents: [torrent],
                 playerState: playerState,
                 movieId: task.tmdbId,
-                subtitleURL: nil,
+                subtitleURL: resolvedSubtitle,
                 subtitleAppearance: playback.appearance,
                 subtitleFontSize: playback.fontSize,
                 displayTitle: displayTitle,
@@ -1087,9 +1098,86 @@ struct DownloadTaskRow: View {
                     playerState: playerState,
                     catalog: subtitleCatalog,
                     searchContext: subtitleSearchContext,
+                    selectedSubtitleID: selectedID,
                     localMediaPath: path,
-                    autoSelectRemote: subtitleSearchContext != nil
+                    autoSelectRemote: resolvedSubtitle == nil && subtitleSearchContext != nil
                 )
+            }
+        }
+    }
+
+    private func subtitlePreferenceScope(for task: DownloadManager.DownloadTask) -> SubtitlePreferenceStore.Scope {
+        let kind = MediaKind(storageValue: task.mediaKind) ?? .movie
+        guard kind == .tv,
+              let record = movieRecords.first(where: { $0.tmdbId == task.tmdbId })
+        else { return .movie() }
+        if record.lastSubtitleSeason > 0, record.lastSubtitleEpisode > 0 {
+            return .tv(season: record.lastSubtitleSeason, episode: record.lastSubtitleEpisode)
+        }
+        if record.lastWatchedSeason > 0, record.lastWatchedEpisode > 0 {
+            return .tv(season: record.lastWatchedSeason, episode: record.lastWatchedEpisode)
+        }
+        return .movie()
+    }
+
+    private func downloadRecord(for task: DownloadManager.DownloadTask) -> DownloadRecord? {
+        guard let hash = task.infoHash?.lowercased() else { return nil }
+        return downloadRecords.first { $0.infoHash.lowercased() == hash }
+    }
+
+    private func resolvedSubtitleURL(
+        for task: DownloadManager.DownloadTask,
+        mediaPath: String?
+    ) -> URL? {
+        guard let mediaPath, !mediaPath.isEmpty else { return nil }
+        let movieRecord = movieRecords.first { $0.tmdbId == task.tmdbId }
+        return SubtitlePreferenceStore.resolvePlaybackSubtitleURL(
+            nearMediaFile: mediaPath,
+            movieRecord: movieRecord,
+            downloadRecord: downloadRecord(for: task),
+            scope: subtitlePreferenceScope(for: task)
+        )
+    }
+
+    private func resolvedSelectedSubtitleID(
+        for task: DownloadManager.DownloadTask,
+        mediaPath: String?
+    ) -> String? {
+        if let record = downloadRecord(for: task),
+           !record.selectedSubtitleID.isEmpty {
+            return record.selectedSubtitleID
+        }
+        if let movieRecord = movieRecords.first(where: { $0.tmdbId == task.tmdbId }),
+           let saved = SubtitlePreferenceStore.savedPreference(
+               record: movieRecord,
+               scope: subtitlePreferenceScope(for: task)
+           ) {
+            return saved.id
+        }
+        _ = mediaPath
+        return nil
+    }
+
+    private func makeSubtitlePersistHandler(
+        for task: DownloadManager.DownloadTask
+    ) -> @MainActor (String, URL?) -> Void {
+        { id, url in
+            guard task.tmdbId > 0 else { return }
+            SubtitlePreferenceStore.savePreference(
+                tmdbId: task.tmdbId,
+                subtitleID: id,
+                filePath: url?.path,
+                scope: subtitlePreferenceScope(for: task),
+                in: modelContext,
+                records: movieRecords
+            )
+            if let hash = task.infoHash?.lowercased(),
+               let record = downloadRecords.first(where: { $0.infoHash.lowercased() == hash }) {
+                record.selectedSubtitleID = id
+                if let url {
+                    record.localSubtitlePath = url.path
+                }
+                try? modelContext.save()
             }
         }
     }

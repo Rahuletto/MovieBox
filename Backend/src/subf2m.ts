@@ -1,4 +1,3 @@
-
 import { assertSafeSubtitleURL, buildSubf2mURL } from './subtitle-guard'
 
 interface Subf2mSearchResult {
@@ -38,7 +37,10 @@ function parseSubf2mSearchResults(html: string, targetYear?: string | null): Sub
     if (!path.startsWith('/subtitles/') || seenPaths.has(path)) return
     const yearMatch = fullTitle.match(/\((\d{4})\)/)
     const year = yearMatch ? yearMatch[1] : null
-    const title = fullTitle.replace(/\s*\(\d{4}\).*$/, '').replace(/\s+/g, ' ').trim()
+    const title = fullTitle
+      .replace(/\s*\(\d{4}\).*$/, '')
+      .replace(/\s+/g, ' ')
+      .trim()
     if (targetYear && year && year !== targetYear) return
     seenPaths.add(path)
     results.push({ title, year: year || '', path })
@@ -46,11 +48,15 @@ function parseSubf2mSearchResults(html: string, targetYear?: string | null): Sub
 
   while ((sectionMatch = sectionRegex.exec(afterStart)) !== null) {
     const listHtml = sectionMatch[1]
-    const itemRegex = /<li>[\s\S]*?<a\s+href="(\/subtitles\/[^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<\/li>/gi
+    const itemRegex =
+      /<li>[\s\S]*?<a\s+href="(\/subtitles\/[^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<\/li>/gi
     let match: RegExpExecArray | null
     while ((match = itemRegex.exec(listHtml)) !== null) {
       const path = match[1]
-      const fullTitle = match[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+      const fullTitle = match[2]
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
       addResult(path, fullTitle)
     }
   }
@@ -60,7 +66,10 @@ function parseSubf2mSearchResults(html: string, targetYear?: string | null): Sub
     let match: RegExpExecArray | null
     while ((match = fallbackRegex.exec(afterStart)) !== null) {
       const path = match[1]
-      const fullTitle = match[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+      const fullTitle = match[2]
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
       addResult(path, fullTitle)
     }
   }
@@ -76,7 +85,9 @@ function parseSubf2mDetailPage(html: string, language: string): SubtitleResult[]
 
   while ((itemMatch = itemRegex.exec(html)) !== null) {
     const itemHtml = itemMatch[1]
-    const downloadMatch = itemHtml.match(/<a\s+class=['"]download\s+icon-download['"]\s+href=['"]([^'"]+)['"]/i)
+    const downloadMatch = itemHtml.match(
+      /<a\s+class=['"]download\s+icon-download['"]\s+href=['"]([^'"]+)['"]/i
+    )
     if (!downloadMatch) continue
     const downloadUrl = downloadMatch[1]
     const authorMatch = itemHtml.match(/<b>\s*By\s*<a[^>]*>([^<]+)<\/a>/i)

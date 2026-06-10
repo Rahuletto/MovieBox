@@ -1,5 +1,11 @@
 import type { TorrentIndexer, TorrentSearchHit } from '../types'
-import { decodeHtml, fetchHTML, hashFromMagnet, parseSizeBytes, resolveQualityLabel } from '../utils'
+import {
+  decodeHtml,
+  fetchHTML,
+  hashFromMagnet,
+  parseSizeBytes,
+  resolveQualityLabel,
+} from '../utils'
 
 function parseMagnetDLRows(html: string): Array<{
   title: string
@@ -26,8 +32,7 @@ function parseMagnetDLRows(html: string): Array<{
 
     // Title is usually first <td> content or anchor text
     const titleMatch =
-      row.match(/><td[^>]*>([^<]*)<a/) ||
-      row.match(/href="magnet:\?[^"]*"[^>]*>([^<]+)</)
+      row.match(/><td[^>]*>([^<]*)<a/) || row.match(/href="magnet:\?[^"]*"[^>]*>([^<]+)</)
     if (!titleMatch) continue
 
     // Extract stats - seeders and leechers in <td> tags
@@ -56,10 +61,7 @@ function parseMagnetDLRows(html: string): Array<{
   return rows.slice(0, 25)
 }
 
-async function searchMagnetDLHost(
-  base: string,
-  query: string
-): Promise<TorrentSearchHit[]> {
+async function searchMagnetDLHost(base: string, query: string): Promise<TorrentSearchHit[]> {
   const slug = encodeURIComponent(query.trim()).replace(/%20/g, '+')
   const searchUrl = `${base}/?q=${slug}&sort=seeders`
 

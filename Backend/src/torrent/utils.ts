@@ -82,9 +82,7 @@ export function searchQueryVariants(query: string, year?: number | null): string
 
   let base = query.replace(/\s(19|20)\d{2}$/, '').trim()
   const trailingYear = query.match(/\s((19|20)\d{2})$/)
-  const resolvedYear =
-    year ??
-    (trailingYear ? parseInt(trailingYear[1], 10) : null)
+  const resolvedYear = year ?? (trailingYear ? parseInt(trailingYear[1], 10) : null)
 
   const colonIdx = base.indexOf(':')
   if (colonIdx > 0) {

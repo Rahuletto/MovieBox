@@ -1,9 +1,5 @@
 import { streamSSE } from 'hono/streaming'
-import {
-  fetchTorrentFileBytes,
-  searchAllTorrents,
-  streamAllTorrents,
-} from '../torrent'
+import { fetchTorrentFileBytes, searchAllTorrents, streamAllTorrents } from '../torrent'
 import { TorrentMetadataQuerySchema, TorrentSearchQuerySchema } from '../schemas'
 import { parseQuery } from '../validate'
 import { kvGetBuffer, kvPut } from '../kv-cache'

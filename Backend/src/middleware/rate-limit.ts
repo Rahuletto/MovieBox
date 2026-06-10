@@ -11,7 +11,8 @@ export function registerApiRateLimit(app: Hono<AppEnv>): void {
     const maxRequests = isSubtitleRoute
       ? parseInt(c.env.RATE_LIMIT_SUBTITLE_MAX_REQUESTS || '40')
       : parseInt(c.env.RATE_LIMIT_MAX_REQUESTS || '180')
-    const clientIp = c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || 'unknown'
+    const clientIp =
+      c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For') || 'unknown'
     const bucket = isSubtitleRoute ? 'subtitle' : 'api'
     const cacheKey = `rate_limit:${bucket}:${clientIp}:${Math.floor(Date.now() / windowMs)}`
 

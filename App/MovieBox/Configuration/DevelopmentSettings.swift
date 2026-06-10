@@ -42,6 +42,7 @@ enum DevelopmentSettings {
 
         guard changed else { return }
         try? modelContext.save()
+        AppSettingsBackupStore.save(from: settings)
         let endpoint = settings.useLocalBackend ? BackendProxyURL.local : settings.proxyBaseURL
         NSLog("MovieBox: Applied development backend settings (\(endpoint))")
     }

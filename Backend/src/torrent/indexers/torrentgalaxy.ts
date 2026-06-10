@@ -1,5 +1,11 @@
 import type { TorrentIndexer, TorrentSearchHit } from '../types'
-import { decodeHtml, fetchHTML, hashFromMagnet, parseSizeBytes, resolveQualityLabel } from '../utils'
+import {
+  decodeHtml,
+  fetchHTML,
+  hashFromMagnet,
+  parseSizeBytes,
+  resolveQualityLabel,
+} from '../utils'
 
 function parseTorrentGalaxyRows(html: string): Array<{
   title: string
@@ -32,14 +38,12 @@ function parseTorrentGalaxyRows(html: string): Array<{
     if (!magnetMatch) continue
 
     // Extract seeders/leechers (usually in span with text or numbers)
-    const statsMatch = item.match(
-      /seeders?[:\s]*(\d+)[\s\S]*?leechers?[:\s]*(\d+)/i
-    ) || item.match(/>(\d+)\s+([sS]eeds?)<[\s\S]*?>(\d+)\s+([lL]eech)/i)
+    const statsMatch =
+      item.match(/seeders?[:\s]*(\d+)[\s\S]*?leechers?[:\s]*(\d+)/i) ||
+      item.match(/>(\d+)\s+([sS]eeds?)<[\s\S]*?>(\d+)\s+([lL]eech)/i)
 
     const seeders = statsMatch ? parseInt(statsMatch[1], 10) : 0
-    const leechers = statsMatch
-      ? parseInt(statsMatch[statsMatch.length > 2 ? 3 : 2], 10)
-      : 0
+    const leechers = statsMatch ? parseInt(statsMatch[statsMatch.length > 2 ? 3 : 2], 10) : 0
 
     // Extract size
     const sizeMatch = item.match(/(\d+(?:\.\d+)?\s*(?:GB|MB|KB))/i)
@@ -56,10 +60,7 @@ function parseTorrentGalaxyRows(html: string): Array<{
   return rows.slice(0, 25)
 }
 
-async function searchTorrentGalaxyHost(
-  base: string,
-  query: string
-): Promise<TorrentSearchHit[]> {
+async function searchTorrentGalaxyHost(base: string, query: string): Promise<TorrentSearchHit[]> {
   const slug = encodeURIComponent(query.trim()).replace(/%20/g, '+')
   const searchUrl = `${base}/torrents.php?search=${slug}&sort=seeders&order=desc`
 
@@ -98,11 +99,7 @@ export const torrentGalaxyIndexer: TorrentIndexer = {
   },
 
   async search(ctx) {
-    const hosts = [
-      'https://www.torrentgalaxy.to',
-      'https://torrentgalaxy.org',
-      'https://tgx.rs',
-    ]
+    const hosts = ['https://www.torrentgalaxy.to', 'https://torrentgalaxy.org', 'https://tgx.rs']
 
     for (const base of hosts) {
       try {

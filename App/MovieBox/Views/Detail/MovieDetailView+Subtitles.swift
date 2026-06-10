@@ -44,6 +44,7 @@ extension MovieDetailView {
                     guard generation == subtitleSearchGeneration else { return }
                     subtitles = results
                     if !results.isEmpty { subtitleLoadHint = nil }
+                    restoreSavedSubtitleSelection()
                 }
             } catch {
                 await MainActor.run {
@@ -73,6 +74,7 @@ extension MovieDetailView {
             let fileURL = tempDir.appendingPathComponent("\(subtitle.id).srt")
             try data.write(to: fileURL)
             subtitleFileURL = fileURL
+            persistSubtitleSelection(id: subtitle.id, fileURL: fileURL)
             SubtitlePlaybackSupport.applyDownloadedFile(
                 fileURL,
                 subtitleID: subtitle.id,

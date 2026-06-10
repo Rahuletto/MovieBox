@@ -1,4 +1,3 @@
-
 import type { TorrentIndexer, TorrentSearchHit } from '../types'
 import { fetchJSON, magnetFor, resolveQualityLabel } from '../utils'
 

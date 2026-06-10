@@ -61,11 +61,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 export async function runIndexersStreaming(
   ctx: SearchContext,
   enabledIds: Set<string>,
-  onBatch: (batch: {
-    id: string
-    rows: TorrentSearchHit[]
-    error?: string
-  }) => Promise<void>
+  onBatch: (batch: { id: string; rows: TorrentSearchHit[]; error?: string }) => Promise<void>
 ): Promise<{
   results: TorrentSearchHit[]
   counts: Record<string, number>
@@ -94,9 +90,7 @@ export async function runIndexersStreaming(
     })
   )
 
-  const merged = allRows.toSorted(
-    (a, b) => (b.seeders ?? 0) - (a.seeders ?? 0)
-  )
+  const merged = allRows.toSorted((a, b) => (b.seeders ?? 0) - (a.seeders ?? 0))
 
   return { results: merged, counts, errors }
 }
@@ -138,9 +132,7 @@ export async function runIndexers(
     }
   }
 
-  const merged = allRows.toSorted(
-    (a, b) => (b.seeders ?? 0) - (a.seeders ?? 0)
-  )
+  const merged = allRows.toSorted((a, b) => (b.seeders ?? 0) - (a.seeders ?? 0))
 
   return { results: merged, counts, errors }
 }

@@ -4,10 +4,7 @@ import { sanitizeQuery } from './utils'
 import type { TorrentKind, TorrentSearchHit } from './types'
 import { TORRENT_API_VERSION } from './types'
 
-export type TorrentSearchSSEWriter = (
-  event: string,
-  data: Record<string, unknown>
-) => Promise<void>
+export type TorrentSearchSSEWriter = (event: string, data: Record<string, unknown>) => Promise<void>
 
 function parseSeasonEpisode(query: string, kind: TorrentKind) {
   let season: number | null = null
@@ -29,9 +26,7 @@ function parseSeasonEpisode(query: string, kind: TorrentKind) {
 }
 
 function mergeHits(...groups: TorrentSearchHit[][]): TorrentSearchHit[] {
-  return groups.flat().toSorted(
-    (a, b) => (b.seeders ?? 0) - (a.seeders ?? 0)
-  )
+  return groups.flat().toSorted((a, b) => (b.seeders ?? 0) - (a.seeders ?? 0))
 }
 
 /** Streams torrent search results over SSE as each indexer completes. */
@@ -63,18 +58,13 @@ export async function streamAllTorrents(
   const finalCounts: Record<string, number> = {}
   const finalErrors: Record<string, string> = {}
 
-  const emitIndexerRun = async (
-    runCtx: typeof ctx,
-    runEnabled: Set<string>
-  ): Promise<void> => {
+  const emitIndexerRun = async (runCtx: typeof ctx, runEnabled: Set<string>): Promise<void> => {
     await runIndexersStreaming(runCtx, runEnabled, async (batch) => {
       finalCounts[batch.id] = batch.rows.length
       if (batch.error) {
         finalErrors[batch.id] = batch.error
       }
-      const capped = batch.rows
-        .toSorted((a, b) => (b.seeders ?? 0) - (a.seeders ?? 0))
-        .slice(0, 40)
+      const capped = batch.rows.toSorted((a, b) => (b.seeders ?? 0) - (a.seeders ?? 0)).slice(0, 40)
       if (capped.length > 0) {
         allBatches.push(capped)
       }

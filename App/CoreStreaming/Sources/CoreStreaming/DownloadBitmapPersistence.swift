@@ -40,8 +40,98 @@ public struct RecoveredDownloadArtifact: Sendable {
     public let streamByteCount: Int64
 }
 
+/// A finished export sitting in a per-title download folder (no `.stream` sidecar left).
+public struct RecoveredCompletedExport: Sendable, Equatable {
+    public let infoHash: String
+    public let storageDirectory: URL
+    public let localFilePath: String
+    public let title: String
+    public let totalBytes: Int64
+
+    public init(
+        infoHash: String,
+        storageDirectory: URL,
+        localFilePath: String,
+        title: String,
+        totalBytes: Int64
+    ) {
+        self.infoHash = infoHash
+        self.storageDirectory = storageDirectory
+        self.localFilePath = localFilePath
+        self.title = title
+        self.totalBytes = totalBytes
+    }
+}
+
 /// Locates in-progress `moviebox_*.stream` + `.bitmap` pairs for resume after DB loss or app restart.
 public enum DownloadDiskRecovery {
+    private static let exportExtensions: Set<String> = ["mp4", "mkv", "mov", "m4v", "avi", "webm"]
+
+    /// Finds completed media exports when SwiftData rows were lost but `~/Movies/MovieBox/<Title>/` remains.
+    public static func scanCompletedExports(root: URL) -> [RecoveredCompletedExport] {
+        let rootURL = root.standardizedFileURL
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: rootURL,
+            includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+
+        var results: [RecoveredCompletedExport] = []
+        var seenPaths = Set<String>()
+
+        for entry in entries {
+            guard (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else {
+                continue
+            }
+            guard let media = largestExportFile(in: entry) else { continue }
+            let path = media.path
+            guard seenPaths.insert(path).inserted else { continue }
+
+            let title = entry.lastPathComponent
+            let bytes = (try? media.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
+            let hash = stableInfoHash(for: path)
+            results.append(
+                RecoveredCompletedExport(
+                    infoHash: hash,
+                    storageDirectory: entry,
+                    localFilePath: path,
+                    title: title,
+                    totalBytes: max(bytes, 0)
+                )
+            )
+        }
+        return results
+    }
+
+    private static func largestExportFile(in directory: URL) -> URL? {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else { return nil }
+
+        return files
+            .filter { url in
+                exportExtensions.contains(url.pathExtension.lowercased())
+                    && (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) != false
+            }
+            .max { lhs, rhs in
+                let l = (try? lhs.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                let r = (try? rhs.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                return l < r
+            }
+    }
+
+    /// Stable 40-char id derived from the on-disk export path (used when the torrent hash is unknown).
+    private static func stableInfoHash(for localFilePath: String) -> String {
+        let normalized = URL(fileURLWithPath: localFilePath).standardizedFileURL.path.lowercased()
+        var bytes = [UInt8](repeating: 0, count: 20)
+        for byte in normalized.utf8 {
+            bytes[Int(byte) % 20] ^= byte
+        }
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
     public static func scan(root: URL) -> [RecoveredDownloadArtifact] {
         let rootURL = root.standardizedFileURL
         guard let entries = try? FileManager.default.contentsOfDirectory(

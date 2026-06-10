@@ -1,5 +1,3 @@
-import CoreStorage
-
 import Foundation
 
 public struct HDRVerificationOutcome: Sendable {

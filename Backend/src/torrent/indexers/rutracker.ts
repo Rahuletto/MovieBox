@@ -1,5 +1,11 @@
 import type { TorrentIndexer, TorrentSearchHit } from '../types'
-import { decodeHtml, fetchHTML, hashFromMagnet, parseSizeBytes, resolveQualityLabel } from '../utils'
+import {
+  decodeHtml,
+  fetchHTML,
+  hashFromMagnet,
+  parseSizeBytes,
+  resolveQualityLabel,
+} from '../utils'
 
 function parseRutrackerRows(html: string): Array<{
   title: string
@@ -24,7 +30,8 @@ function parseRutrackerRows(html: string): Array<{
     const rowHtml = match[2]
 
     // Extract title from link
-    const titleMatch = rowHtml.match(/<a[^>]*href="[^"]*"[^>]*title="([^"]+)"/i) ||
+    const titleMatch =
+      rowHtml.match(/<a[^>]*href="[^"]*"[^>]*title="([^"]+)"/i) ||
       rowHtml.match(/<b[^>]*>([^<]+)<\/b>/i)
     if (!titleMatch) continue
 
@@ -51,10 +58,7 @@ function parseRutrackerRows(html: string): Array<{
   return rows.slice(0, 25)
 }
 
-async function searchRutrackerHost(
-  base: string,
-  query: string
-): Promise<TorrentSearchHit[]> {
+async function searchRutrackerHost(base: string, query: string): Promise<TorrentSearchHit[]> {
   const slug = encodeURIComponent(query.trim())
   const searchUrl = `${base}/forum/tracker.php?nm=${slug}&o=10&s=2`
 

@@ -10,7 +10,9 @@ export function parseSchema<T>(schema: z.ZodType<T>, data: unknown): ParseResult
   if (result.success) {
     return { ok: true, data: result.data }
   }
-  const message = result.error.issues.map((i) => `${i.path.join('.') || 'input'}: ${i.message}`).join('; ')
+  const message = result.error.issues
+    .map((i) => `${i.path.join('.') || 'input'}: ${i.message}`)
+    .join('; ')
   return { ok: false, message, issues: result.error.issues }
 }
 

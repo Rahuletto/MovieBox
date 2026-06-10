@@ -1,4 +1,3 @@
-
 import { kvGet, kvPut } from './kv-cache'
 
 export type RottenTomatoesStats = {
@@ -349,9 +348,7 @@ function parseCachedRtBundle(cached: string): RottenTomatoesBundle | null {
       return { stats: o as unknown as RottenTomatoesStats, trailerHls: null }
     }
     const stats =
-      o.stats != null && typeof o.stats === 'object'
-        ? (o.stats as RottenTomatoesStats)
-        : null
+      o.stats != null && typeof o.stats === 'object' ? (o.stats as RottenTomatoesStats) : null
     const trailerHls = typeof o.trailerHls === 'string' ? o.trailerHls : null
     if (!stats && !trailerHls) return null
     return { stats, trailerHls }

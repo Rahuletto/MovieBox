@@ -104,8 +104,7 @@ function pickUnpackFile(
   if (files.length === 0) return undefined
 
   const srtFiles = files.filter(
-    (file) =>
-      file.format?.toLowerCase() === 'srt' || file.name?.toLowerCase().endsWith('.srt')
+    (file) => file.format?.toLowerCase() === 'srt' || file.name?.toLowerCase().endsWith('.srt')
   )
   const pool = srtFiles.length > 0 ? srtFiles : files
 
@@ -117,10 +116,7 @@ function pickUnpackFile(
   return pool[0]
 }
 
-function subdlDownloadURL(
-  row: SubdlSubtitleRow,
-  episodeNumber?: number | null
-): string | null {
+function subdlDownloadURL(row: SubdlSubtitleRow, episodeNumber?: number | null): string | null {
   const direct = row.download_link?.trim()
   if (direct) return toSubdlDownloadURL(direct)
 

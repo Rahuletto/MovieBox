@@ -1,5 +1,11 @@
 import type { TorrentIndexer, TorrentSearchHit } from '../types'
-import { decodeHtml, fetchHTML, hashFromMagnet, parseSizeBytes, resolveQualityLabel } from '../utils'
+import {
+  decodeHtml,
+  fetchHTML,
+  hashFromMagnet,
+  parseSizeBytes,
+  resolveQualityLabel,
+} from '../utils'
 
 function parseZooqleRows(html: string): Array<{
   title: string
@@ -24,9 +30,9 @@ function parseZooqleRows(html: string): Array<{
     const item = match[1]
 
     // Extract title and magnet from link
-    const titleMatch = item.match(
-      /<a[^>]*href="[^"]*"[^>]*title="([^"]+)"[^>]*>([^<]+)<\/a>/i
-    ) || item.match(/<span[^>]*class="[^"]*title[^"]*"[^>]*>([^<]+)<\/span>/i)
+    const titleMatch =
+      item.match(/<a[^>]*href="[^"]*"[^>]*title="([^"]+)"[^>]*>([^<]+)<\/a>/i) ||
+      item.match(/<span[^>]*class="[^"]*title[^"]*"[^>]*>([^<]+)<\/span>/i)
     if (!titleMatch) continue
 
     const magnetMatch = item.match(/href="(magnet:\?[^"]+)"/i)
@@ -52,10 +58,7 @@ function parseZooqleRows(html: string): Array<{
   return rows.slice(0, 30)
 }
 
-async function searchZooqleHost(
-  base: string,
-  query: string
-): Promise<TorrentSearchHit[]> {
+async function searchZooqleHost(base: string, query: string): Promise<TorrentSearchHit[]> {
   const slug = encodeURIComponent(query.trim())
   const searchUrl = `${base}/search?q=${slug}&fmt=rss`
 
@@ -98,10 +101,7 @@ export const zooqleIndexer: TorrentIndexer = {
   },
 
   async search(ctx) {
-    const hosts = [
-      'https://zooqle.com',
-      'https://www.zooqle.com',
-    ]
+    const hosts = ['https://zooqle.com', 'https://www.zooqle.com']
 
     for (const base of hosts) {
       try {

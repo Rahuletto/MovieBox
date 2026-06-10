@@ -19,6 +19,12 @@ public final class MovieRecord {
     /// Last TV episode watched (0 = unknown).
     public var lastWatchedSeason: Int
     public var lastWatchedEpisode: Int
+    /// Last remote subtitle track chosen for this title (scoped by season/episode on TV).
+    public var lastSelectedSubtitleID: String
+    /// On-disk `.srt` path for `lastSelectedSubtitleID` when available.
+    public var lastSelectedSubtitlePath: String?
+    public var lastSubtitleSeason: Int
+    public var lastSubtitleEpisode: Int
 
     public init(
         tmdbId: Int,
@@ -33,7 +39,11 @@ public final class MovieRecord {
         durationSeconds: Double = 0,
         lastStreamInfoHash: String? = nil,
         lastWatchedSeason: Int = 0,
-        lastWatchedEpisode: Int = 0
+        lastWatchedEpisode: Int = 0,
+        lastSelectedSubtitleID: String = "",
+        lastSelectedSubtitlePath: String? = nil,
+        lastSubtitleSeason: Int = 0,
+        lastSubtitleEpisode: Int = 0
     ) {
         self.tmdbId = tmdbId
         self.mediaKind = mediaKind
@@ -48,6 +58,10 @@ public final class MovieRecord {
         self.lastStreamInfoHash = lastStreamInfoHash
         self.lastWatchedSeason = lastWatchedSeason
         self.lastWatchedEpisode = lastWatchedEpisode
+        self.lastSelectedSubtitleID = lastSelectedSubtitleID
+        self.lastSelectedSubtitlePath = lastSelectedSubtitlePath
+        self.lastSubtitleSeason = lastSubtitleSeason
+        self.lastSubtitleEpisode = lastSubtitleEpisode
     }
 }
 
@@ -83,6 +97,8 @@ public final class DownloadRecord {
     public var downloadedBytes: Int64
     public var pieceBitmap: Data
     public var createdAt: Date
+    public var selectedSubtitleID: String
+    public var localSubtitlePath: String?
 
     public init(
         infoHash: String,
@@ -99,7 +115,9 @@ public final class DownloadRecord {
         totalBytes: Int64 = 0,
         downloadedBytes: Int64 = 0,
         pieceBitmap: Data = Data(),
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        selectedSubtitleID: String = "",
+        localSubtitlePath: String? = nil
     ) {
         self.infoHash = infoHash
         self.tmdbId = tmdbId
@@ -116,6 +134,8 @@ public final class DownloadRecord {
         self.downloadedBytes = downloadedBytes
         self.pieceBitmap = pieceBitmap
         self.createdAt = createdAt
+        self.selectedSubtitleID = selectedSubtitleID
+        self.localSubtitlePath = localSubtitlePath
     }
 }
 
@@ -325,7 +345,7 @@ public enum MovieBoxSchema {
 public enum MovieBoxModelContainer {
     private static let storeName = "MovieBox"
 
-    /// Opens the shared SwiftData store, recreating it once if the on-disk schema is incompatible.
+    /// Opens the shared SwiftData store. Never deletes user data on schema mismatch.
     public static func make(inMemoryOnly: Bool = false) throws -> ModelContainer {
         let schema = Schema(MovieBoxSchema.models)
         let storeURL = try persistentStoreURL()
@@ -340,9 +360,15 @@ public enum MovieBoxModelContainer {
             return try ModelContainer(for: schema, configurations: config)
         } catch {
             guard !inMemoryOnly else { throw error }
-            NSLog("MovieBox SwiftData: store incompatible (\(error)). Recreating \(storeURL.path)")
-            try removeStoreFiles(at: storeURL)
-            return try ModelContainer(for: schema, configurations: config)
+            if let backup = AppSettingsBackupStore.captureFromSQLiteStore(at: storeURL) {
+                AppSettingsBackupStore.save(backup: backup)
+                NSLog("MovieBox SwiftData: preserved AppSettings backup before failed open")
+            }
+            NSLog(
+                "MovieBox SwiftData: failed to open store at \(storeURL.path): \(error). "
+                    + "User data was NOT deleted. Restore credentials from Settings if needed."
+            )
+            throw error
         }
     }
 
@@ -357,11 +383,4 @@ public enum MovieBoxModelContainer {
         return folder.appendingPathComponent("\(storeName).store", isDirectory: false)
     }
 
-    private static func removeStoreFiles(at url: URL) throws {
-        let fm = FileManager.default
-        let paths = [url.path, url.path + "-shm", url.path + "-wal"]
-        for path in paths where fm.fileExists(atPath: path) {
-            try fm.removeItem(atPath: path)
-        }
-    }
 }
