@@ -342,6 +342,12 @@ private struct RootTabBarChrome: View {
         VStack(spacing: 0) {
             PillTabBar()
                 .padding(.top, 8)
+                .padding(.bottom, 12)
+                .background(.ultraThinMaterial)
+                .overlay(alignment: .bottom) {
+                    Color.primary.opacity(0.08)
+                        .frame(height: 1)
+                }
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
