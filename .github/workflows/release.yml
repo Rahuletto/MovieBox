@@ -74,10 +74,8 @@ jobs:
           mkdir -p ../build/export
           ditto "$APP" ../build/export/MovieBox.app
 
-      - name: Zip for distribution
-        run: |
-          cd ../build/export
-          ditto -c -k --sequesterRsrc --keepParent MovieBox.app MovieBox.zip
+      - name: Package zip and dmg
+        run: Scripts/package-release.sh
 
       - name: Download Sparkle tools
         run: |
@@ -119,5 +117,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.ref }}
-          files: build/export/MovieBox.zip
+          files: |
+            build/export/MovieBox.dmg
+            build/export/MovieBox.zip
+          overwrite_files: true
           generate_release_notes: true

@@ -26,13 +26,13 @@ You do **not** need the paid Apple Developer Program for Sparkle or GitHub Relea
 
 | What | Without Dev ID |
 |------|----------------|
-| **GitHub Release zip** | CI builds and uploads `MovieBox.zip` |
+| **GitHub Release assets** | CI uploads `MovieBox.dmg` (install) and `MovieBox.zip` (Sparkle) |
 | **Sparkle feed** | `appcast.xml` signed with EdDSA via `SPARKLE_PRIVATE_KEY` |
 | **First install** | Users download from Releases → may need **right-click → Open** (Gatekeeper) |
 | **In-app update** | Works best when the installed app and the update are built with the **same** ad-hoc/local signature (e.g. both from CI). Mixed Xcode Run vs CI zip can fail to replace the app. |
 | **Notarization** | Not available — expect stricter Gatekeeper warnings for strangers |
 
-**Practical approach:** ship only via **GitHub Releases + Sparkle**; tell users to open the app once from the downloaded zip. Avoid promising “one-click update” to random internet users without Dev ID.
+**Practical approach:** ship via **GitHub Releases + Sparkle**; tell users to download the **dmg**, drag to Applications, then **right-click → Open** on first launch. Sparkle in-app updates use the signed zip. Avoid promising frictionless installs to strangers without notarization.
 
 ## Cutting a release
 
@@ -50,7 +50,7 @@ git push origin main
 git push origin v1.0.0
 ```
 
-3. Watch **Actions → Release** on GitHub. It will build, sign the zip with Sparkle, update `appcast.xml`, and create the release.
+3. Watch **Actions → Release** on GitHub. It will build, package zip + dmg, sign the zip with Sparkle, update `appcast.xml`, and create the release.
 
 ## Trigger workflows manually
 
