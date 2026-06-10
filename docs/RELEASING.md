@@ -100,7 +100,8 @@ ditto -c -k --sequesterRsrc --keepParent path/to/MovieBox.app build/MovieBox.zip
 SPARKLE_BIN="$(find ~/Library/Developer/Xcode/DerivedData -path '*artifacts/sparkle*' -name generate_keys 2>/dev/null | head -1)"
 DIR="$(dirname "$SPARKLE_BIN")"
 "$DIR/sign_update" build/MovieBox.zip
-"$DIR/generate_appcast" build -o ../appcast.xml
+mkdir -p build/sparkle-export && cp build/MovieBox.zip build/sparkle-export/
+"$DIR/generate_appcast" build/sparkle-export -o ../appcast.xml
 ```
 
 Upload `MovieBox.zip` to a GitHub Release and commit `appcast.xml` on `main`.

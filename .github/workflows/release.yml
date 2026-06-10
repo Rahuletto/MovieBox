@@ -98,8 +98,12 @@ jobs:
           KEY_FILE=$(mktemp)
           trap 'rm -f "$KEY_FILE"' EXIT
           printf '%s' "$SPARKLE_PRIVATE_KEY" > "$KEY_FILE"
-          ../build/sparkle/bin/sign_update ../build/export/MovieBox.zip --ed-key-file "$KEY_FILE"
-          ../build/sparkle/bin/generate_appcast ../build/export -o ../appcast.xml --ed-key-file "$KEY_FILE"
+          SPARKLE_EXPORT="../build/sparkle-export"
+          rm -rf "$SPARKLE_EXPORT"
+          mkdir -p "$SPARKLE_EXPORT"
+          cp ../build/export/MovieBox.zip "$SPARKLE_EXPORT/"
+          ../build/sparkle/bin/sign_update "$SPARKLE_EXPORT/MovieBox.zip" --ed-key-file "$KEY_FILE"
+          ../build/sparkle/bin/generate_appcast "$SPARKLE_EXPORT" -o ../appcast.xml --ed-key-file "$KEY_FILE"
           cat ../appcast.xml
           echo "generated=true" >> "$GITHUB_OUTPUT"
 
