@@ -343,14 +343,27 @@ private struct RootTabBarChrome: View {
             PillTabBar()
                 .padding(.top, 8)
                 .padding(.bottom, 12)
-                .background(.ultraThinMaterial)
-                .overlay(alignment: .bottom) {
-                    Color.primary.opacity(0.08)
-                        .frame(height: 1)
+                .background {
+                    GeometryReader { geo in
+                        Color.clear
+                            .background(.ultraThinMaterial)
+                            .mask(
+                                LinearGradient(
+                                    stops: [
+                                        .init(color: .black.opacity(0.65), location: 0.0),
+                                        .init(color: .black.opacity(0.45), location: 0.5),
+                                        .init(color: .black.opacity(0.15), location: 0.85),
+                                        .init(color: .clear, location: 1.0)
+                                    ],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            )
+                    }
+                    .ignoresSafeArea(edges: .top)
                 }
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .ignoresSafeArea(edges: .top)
     }
 }
